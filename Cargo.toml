@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+default-members = ["crates/storb"]
+
+[workspace.package]
+version = "0.1.0"
+description = "An object storage subnet on the Bittensor network"
+edition = "2021"
+authors = ["Storb Developers"]
+homepage = "https://storb.dev"
+license = "MIT"
+readme = "README.md"
+
+[workspace.dependencies]
+clap = { version = "4.5.26", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+opt-level = 2
