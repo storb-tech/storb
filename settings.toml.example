@@ -1,0 +1,46 @@
+version = "0.2.2"
+
+netuid = 0
+external_ip = "0.0.0.0"
+api_port = 6969
+post_ip = false
+
+wallet_name = "default"
+hotkey_name = "default"
+
+mock = false
+
+load_old_nodes = true
+min_stake_threshold = 1000
+
+log_level = "info"
+db_dir = "database.db"
+pem_file = "storb.pem"
+
+[subtensor]
+network = "finney"
+address = "wss://entrypoint-finney.opentensor.ai:443"
+
+[neuron]
+sync_frequency = 300
+
+[dht]
+port = 6942
+file = "dht.bin"
+
+bootstrap_ip = ""     # IPv4 format
+bootstrap_port = 6942
+
+[miner]
+store_dir = "object_store"
+
+[validator.neuron]
+num_concurrent_forwards = 1
+disable_set_weights = false
+moving_average_alpha = 0.1
+response_time_alpha = 0.1
+
+[validator.query]
+batch_size = 20
+num_uids = 10
+timeout = 5

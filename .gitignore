@@ -2,3 +2,7 @@
 .direnv
 /result
 /target
+
+# Storb
+settings.toml
+!settings.toml.example

@@ -1,0 +1,102 @@
+//! Settings for Storb, defined in the settings.toml file.
+
+use config::{Config, ConfigError, File};
+use serde::Deserialize;
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct Subtensor {
+    pub network: String,
+    pub address: String,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct Neuron {
+    pub sync_frequency: u64,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct DHT {
+    pub port: u16,
+    pub file: String,
+    pub bootstrap_ip: String,
+    pub bootstrap_port: u16,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct Miner {
+    pub store_dir: String,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct ValidatorNeuron {
+    pub num_concurrent_forwards: u64,
+    pub disable_set_weights: bool,
+    pub moving_average_alpha: f64,
+    pub response_time_alpha: f64,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct ValidatorQuery {
+    pub batch_size: u64,
+    pub num_uids: u16,
+    pub timeout: u64,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct Validator {
+    pub neuron: ValidatorNeuron,
+    pub query: ValidatorQuery,
+}
+
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct Settings {
+    pub version: String,
+
+    pub netuid: u16,
+    pub external_ip: String,
+    pub api_port: u16,
+    pub post_ip: bool,
+
+    pub wallet_name: String,
+    pub hotkey_name: String,
+
+    pub mock: bool,
+
+    pub load_old_nodes: bool,
+    pub min_stake_threshold: u64,
+
+    pub log_level: String, // TODO: Add function to convert str -> enum
+    pub db_dir: String,
+    pub pem_file: String,
+
+    pub subtensor: Subtensor,
+    pub neuron: Neuron,
+    pub dht: DHT,
+
+    pub miner: Miner,
+    pub validator: Validator,
+}
+
+impl Settings {
+    /// Load settings and create a new `Settings` instance.
+    pub(crate) fn new(config_file: Option<&str>) -> Result<Self, ConfigError> {
+        let file: &str = match config_file {
+            Some(name) => name,
+            None => "settings.toml",
+        };
+
+        let s = Config::builder()
+            .add_source(File::with_name(file))
+            .build()?;
+
+        s.try_deserialize()
+    }
+}
