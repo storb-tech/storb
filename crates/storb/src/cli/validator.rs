@@ -47,4 +47,6 @@ pub fn cli() -> Command {
 
 pub fn exec(args: &ArgMatches, settings: &Settings) {
     // TODO
+    _ = args;
+    _ = settings;
 }

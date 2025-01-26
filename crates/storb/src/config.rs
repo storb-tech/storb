@@ -18,7 +18,7 @@ pub struct Neuron {
 
 #[allow(unused)]
 #[derive(Debug, Deserialize)]
-pub struct DHT {
+pub struct Dht {
     pub port: u16,
     pub file: String,
     pub bootstrap_ip: String,
@@ -79,7 +79,7 @@ pub struct Settings {
 
     pub subtensor: Subtensor,
     pub neuron: Neuron,
-    pub dht: DHT,
+    pub dht: Dht,
 
     pub miner: Miner,
     pub validator: Validator,
