@@ -13,7 +13,7 @@ mock = false
 load_old_nodes = true
 min_stake_threshold = 1000
 
-log_level = "info"
+log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 db_dir = "database.db"
 pem_file = "storb.pem"
 
@@ -27,7 +27,6 @@ sync_frequency = 300
 [dht]
 port = 6942
 file = "dht.bin"
-
 bootstrap_ip = ""     # IPv4 format
 bootstrap_port = 6942
 

@@ -1,12 +1,21 @@
-use std::io::stdout;
+use std::io::stderr;
 
 use tracing::level_filters::LevelFilter;
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
-use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+
+/// Print to stderr and exit with a non-zero exit code
+#[macro_export]
+macro_rules! fatal {
+    ($($arg:tt)*) => {{
+        eprintln!($($arg)*);
+        std::process::exit(1);
+    }};
+}
 
 /// Initialise the global logger
 pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
@@ -17,8 +26,7 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
         "WARN" => Level::WARN,
         "ERROR" => Level::ERROR,
         _ => {
-            // TODO: log warning that option was invalid
-            Level::INFO
+            fatal!("Invalid log level `{log_level}`. Valid levels are: TRACE, DEBUG, INFO, WARN, ERROR");
         }
     };
 
@@ -29,7 +37,7 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
         .expect("Failed to initialise rolling file appender");
 
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(appender);
-    let (non_blocking_stdout, stdout_guard) = tracing_appender::non_blocking(stdout());
+    let (non_blocking_stdout, stdout_guard) = tracing_appender::non_blocking(stderr());
 
     let logger = Registry::default()
         .with(LevelFilter::from_level(level))
