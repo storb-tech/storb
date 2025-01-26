@@ -1,0 +1,32 @@
+name: CI
+on:
+  pull_request:
+    branches:
+      - "**"
+  push:
+    branches:
+      - "main"
+
+jobs:
+  checks:
+    name: Checks for linting and formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.84.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Linting check
+        run: |
+          cargo clippy --workspace --all-targets --all-features
+          cargo clippy --workspace --all-targets --no-default-features
+
+      - name: Formatting check
+        run: cargo fmt --check --all
