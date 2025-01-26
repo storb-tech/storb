@@ -4,5 +4,6 @@
 /target
 
 # Storb
+logs/
 settings.toml
 !settings.toml.example

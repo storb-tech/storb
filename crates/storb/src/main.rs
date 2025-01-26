@@ -11,5 +11,7 @@ pub fn main() {
 
     // println!("Settings: {settings:?}");
 
+    let _guards = log::new("DEBUG");
+
     cli::cli(&settings);
 }

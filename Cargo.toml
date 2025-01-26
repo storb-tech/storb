@@ -17,6 +17,14 @@ clap = { version = "4.5.26", features = ["derive"] }
 config = { version = "0.15.6", features = ["toml"] }
 serde = { version = "1.0.217", features = ["derive"] }
 tracing = "0.1.41"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.19", features = [
+    "ansi",
+    "env-filter",
+    "fmt",
+    "registry",
+    "std",
+] }
 
 [profile.release]
 codegen-units = 1

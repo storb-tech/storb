@@ -16,4 +16,5 @@ clap.workspace = true
 config.workspace = true
 serde.workspace = true
 tracing.workspace = true
-
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
