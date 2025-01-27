@@ -20,6 +20,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install Cap'n Proto
+        run: sudo apt-get install capnproto
+
       - name: Set up Rust cache
         uses: Swatinem/rust-cache@v2
 
