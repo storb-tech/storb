@@ -13,10 +13,17 @@ license = "MIT"
 readme = "README.md"
 
 [workspace.dependencies]
+storb_schemas = { version = "*", path = "crates/storb_schemas" }
+storb_base = { version = "*", path = "crates/storb_base" }
+storb_miner = { version = "*", path = "crates/storb_miner" }
+storb_validator = { version = "*", path = "crates/storb_validator" }
+
+capnp = "0.20.3"
 clap = { version = "4.5.26", features = ["derive"] }
 crabtensor = { version = "0.3.0", git = "https://github.com/fr34kcoders/crabtensor" }
 config = { version = "0.15.6", features = ["toml"] }
 serde = { version = "1.0.217", features = ["derive"] }
+tokio = { version = "1.43.0", features = ["full"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.19", features = [

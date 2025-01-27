@@ -3,6 +3,9 @@
 /result
 /target
 
+# Cap'n Proto
+*_capnp.rs
+
 # Storb
 logs/
 settings.toml
