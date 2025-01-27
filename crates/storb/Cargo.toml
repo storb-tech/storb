@@ -12,6 +12,9 @@ name = "storb"
 path = "src/main.rs"
 
 [dependencies]
+storb_miner.workspace = true
+storb_validator.workspace = true
+
 clap.workspace = true
 config.workspace = true
 serde.workspace = true

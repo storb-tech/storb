@@ -1,5 +1,7 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
+use storb_validator;
+
 use crate::config::Settings;
 
 pub fn cli() -> Command {
@@ -49,4 +51,6 @@ pub fn exec(args: &ArgMatches, settings: &Settings) {
     // TODO
     _ = args;
     _ = settings;
+
+    storb_validator::run();
 }
