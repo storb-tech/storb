@@ -4,12 +4,20 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+# Storb
 storb_base.workspace = true
-storb_schemas = { path = "../../crates/storb_schemas" }
-capnp = "0.20"
+storb_schemas.workspace = true
+storb_miner.workspace = true
 
+# Third party
+anyhow.workspace = true
+axum.workspace = true
+capnp.workspace = true
+futures.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+tarpc.workspace = true
 tokio.workspace = true
-tokio-serde = { version = "0.9.0", features = ["serde"] }
-tarpc = { version = "0.35.0", features = ["full"] }
-futures = "0.3.31"
-anyhow = "1.0.95"
+tokio-serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true

@@ -12,16 +12,6 @@ pub struct NeuronConfig {
     pub hotkey_name: String,
 }
 
-impl NeuronConfig {
-    pub fn new(netuid: u16, wallet_name: String, hotkey_name: String) -> Self {
-        Self {
-            netuid,
-            wallet_name,
-            hotkey_name,
-        }
-    }
-}
-
 pub struct Neuron {
     pub config: NeuronConfig,
     // pub spec_version: Version,

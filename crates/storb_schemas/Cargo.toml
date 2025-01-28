@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-capnp = "0.20" # Note this is a different library than capnp*c*
+capnp.workspace = true # Note this is a different library than capnp*c*
 
 [build-dependencies]
-capnpc = "0.20"
+capnpc = "0.20.1"
