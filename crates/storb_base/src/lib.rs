@@ -4,11 +4,22 @@ pub struct Version {
     pub patch: u16,
 }
 
+#[derive(Clone)]
 pub struct NeuronConfig {
-    netuid: u16,
+    pub netuid: u16,
 
-    wallet_name: String,
-    hotkey_name: String,
+    pub wallet_name: String,
+    pub hotkey_name: String,
+}
+
+impl NeuronConfig {
+    pub fn new(netuid: u16, wallet_name: String, hotkey_name: String) -> Self {
+        Self {
+            netuid,
+            wallet_name,
+            hotkey_name,
+        }
+    }
 }
 
 pub struct Neuron {
