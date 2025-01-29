@@ -33,39 +33,6 @@ impl Validator {
     pub fn new(config: ValidatorConfig) -> Self {
         Validator { config }
     }
-
-    async fn handle_upload(&self, mut multipart: Multipart) -> impl IntoResponse {
-        if let Ok(field) = multipart.next_field().await {
-            if let Some(field) = field {
-                let filename = field.file_name().unwrap_or("unknown").to_string();
-                let data = field.bytes().await.unwrap_or_default();
-
-                // Create Cap'n Proto request
-                let mut request = capnp::message::Builder::new_default();
-                let mut file_upload =
-                    request.init_root::<message_capnp::file_upload_request::Builder>();
-                file_upload.set_filename(&filename);
-                file_upload.set_data(&data);
-
-                // Serialize request
-                let mut request_bytes = Vec::new();
-                capnp::serialize::write_message(&mut request_bytes, &request).unwrap_or_else(|e| {
-                    error!("Error serializing request: {e}");
-                });
-                match process_request(request_bytes).await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        error!("Error processing request: {e}");
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        }
-    }
 }
 
 #[axum::debug_handler]
