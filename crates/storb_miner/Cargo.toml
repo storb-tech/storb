@@ -5,13 +5,11 @@ edition.workspace = true
 
 [dependencies]
 # Storb
-storb_schemas.workspace = true
 storb_base.workspace = true
 
 # Third party
 anyhow.workspace = true
 blake3.workspace = true
-capnp.workspace = true
 futures.workspace = true
 tarpc.workspace = true
 tokio.workspace = true

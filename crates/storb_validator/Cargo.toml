@@ -6,13 +6,11 @@ edition.workspace = true
 [dependencies]
 # Storb
 storb_base.workspace = true
-storb_schemas.workspace = true
 storb_miner.workspace = true
 
 # Third party
 anyhow.workspace = true
 axum.workspace = true
-capnp.workspace = true
 futures.workspace = true
 rand.workspace = true
 serde_json.workspace = true

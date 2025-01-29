@@ -4,7 +4,7 @@ in
   pkgs.mkShell rec {
     packages =
       [
-        pkgs.capnproto
+        # pkgs.capnproto
         pkgs.rust-analyzer
       ]
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
