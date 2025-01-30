@@ -1,14 +1,11 @@
-use anyhow;
-// use capnp::{message::ReaderOptions, serialize};
-use futures::future;
-use futures::stream::StreamExt;
-use tarpc::context;
-use tarpc::serde_transport::tcp;
-use tarpc::server::{self, Channel};
-use tokio_serde::formats::Json;
-use tracing::info;
-
 use neuron::NeuronConfig;
+use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
+use quinn::{Endpoint, ServerConfig};
+use rcgen::{generate_simple_self_signed, Certificate};
+use std::error::Error;
+use std::net::UdpSocket;
+use std::sync::Arc;
+use tracing::info;
 
 /// Miner configuration
 #[derive(Clone)]
@@ -29,48 +26,41 @@ impl Miner {
 }
 
 async fn main() {
-    info!("Running the Storb miner...");
+    let quic_port = 5000;
+    let server_config = configure_server().unwrap();
 
-    // let mut listener = tcp::listen("127.0.0.1:9003", Json::default)
-    //     .await
-    //     .expect("Failed to bind validator server");
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", quic_port)).unwrap();
 
-    // TODO: set frame size limit?
-    // listener.config_mut().max_frame_length(usize::MAX);
+    let endpoint = Endpoint::new(
+        Default::default(),
+        Some(server_config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .unwrap();
 
-    // let server = {
-    //     let miner = Miner::new(MinerConfig {
-    //         neuron_config: NeuronConfig {
-    //             netuid: 0,
-    //             wallet_name: "default".to_string(),
-    //             hotkey_name: "default".to_string(),
-    //         },
-    //     });
+    info!("Miner is listening on quic://0.0.0.0:{}", quic_port);
 
-    //     listener
-    //         // If we only want to ignore errors, we can filter_map with `ok()`
-    //         .filter_map(|res| async move { res.ok() })
-    //         // Turn each incoming stream into a BaseChannel
-    //         .map(server::BaseChannel::with_defaults)
-    //         .for_each_concurrent(None, move |channel| {
-    //             let miner = miner.clone();
-    //             async move {
-    //                 channel
-    //                     .execute(miner.serve())
-    //                     // Each item in this Stream is itself a Future, so we can run them:
-    //                     // what is the error?
-    //                     .for_each_concurrent(None, |f| f)
-    //                     .await;
-    //             }
-    //         })
-    // };
+    while let Some(conn) = endpoint.accept().await {
+        tokio::spawn(async move {
+            let conn = conn.await.unwrap();
+            info!("Accepted connection from: {}", conn.remote_address());
 
-    // tokio::spawn(server);
-
-    println!("Miner is now running. (Press Ctrl-C to stop.)");
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            while let Ok((mut send_stream, mut rcv_stream)) = conn.accept_bi().await {
+                // Handle the incoming stream
+                tokio::spawn(async move {
+                    let mut buffer = Vec::new();
+                    while let Ok(Some(data)) = rcv_stream.read(&mut buffer).await {
+                        let data = &buffer[..data];
+                        let data_hash = blake3::hash(data).to_hex();
+                        send_stream
+                            .write_all(format!("received data {}", data_hash).as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                });
+            }
+        });
     }
 }
 
@@ -81,4 +71,14 @@ pub fn run() {
         .build()
         .unwrap()
         .block_on(main())
+}
+
+fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
+    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert_der = Certificate::from(cert.cert);
+    let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+
+    let server_config = ServerConfig::with_single_cert(vec![cert_der.into()], priv_key.into());
+
+    Ok(server_config.unwrap())
 }

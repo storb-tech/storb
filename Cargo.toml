@@ -41,6 +41,10 @@ tracing-subscriber = { version = "0.3.19", features = [
     "std",
 ] }
 uuid = "1.12.1"
+rcgen = "0.13.2"
+quinn = "0.11.2"
+rustls = { version = "*" }
+
 
 [profile.release]
 codegen-units = 1
