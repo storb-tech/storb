@@ -1,3 +1,6 @@
+# certs
+*.der
+
 .DS_Store
 .direnv
 /result

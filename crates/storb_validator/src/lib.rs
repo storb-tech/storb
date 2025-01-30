@@ -8,10 +8,11 @@ use axum::{
 };
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
+use rcgen::{generate_simple_self_signed, Certificate, CertificateParams, CertifiedKey};
 use rustls::client::danger::ServerCertVerifier;
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls::{self};
-use std::{error::Error, net::SocketAddr, sync::Arc};
+use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
 
@@ -21,54 +22,24 @@ struct ValidatorState {
     server_cert: Vec<u8>,
 }
 
-// struct SkipServerVerification;
+async fn ensure_certificate_exists() -> Result<Vec<u8>> {
+    let cert_path = Path::new("cert.der");
 
-// impl SkipServerVerification {
-//     fn new() -> Arc<Self> {
-//         Arc::new(Self)
-//     }
-// }
+    if !cert_path.exists() {
+        // Generate new certificate
+        let subject_alt_names = vec!["localhost".to_string()];
+        let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)?;
 
-// impl std::fmt::Debug for SkipServerVerification {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         write!(f, "SkipServerVerification")
-//     }
-// }
+        // Save certificate
+        let cert_der = cert.der().to_vec();
+        std::fs::write(cert_path, &cert_der)?;
 
-// impl ServerCertVerifier for SkipServerVerification {
-//     fn verify_server_cert(
-//         &self,
-//         _end_entity: &rustls::pki_types::CertificateDer<'_>,
-//         _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-//         _server_name: &rustls::pki_types::ServerName<'_>,
-//         _ocsp_response: &[u8],
-//         _now: rustls::pki_types::UnixTime,
-//     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-//         Ok(rustls::client::danger::ServerCertVerified::assertion())
-//     }
-
-//     fn verify_tls12_signature(
-//         &self,
-//         _message: &[u8],
-//         _cert: &rustls::pki_types::CertificateDer<'_>,
-//         _dss: &rustls::DigitallySignedStruct,
-//     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-//         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-//     }
-
-//     fn verify_tls13_signature(
-//         &self,
-//         _message: &[u8],
-//         _cert: &rustls::pki_types::CertificateDer<'_>,
-//         _dss: &rustls::DigitallySignedStruct,
-//     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-//         Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-//     }
-
-//     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-//         vec![]
-//     }
-// }
+        Ok(cert_der)
+    } else {
+        // Read existing certificate
+        std::fs::read(cert_path).context("Failed to read server certificate")
+    }
+}
 
 #[derive(Debug)]
 struct InsecureCertVerifier;
@@ -113,8 +84,8 @@ impl ServerCertVerifier for InsecureCertVerifier {
 }
 
 pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
-    // Load server certificate
-    let server_cert = std::fs::read("cert.der").context("Failed to read server certificate")?;
+    // Load or generate server certificate
+    let server_cert = ensure_certificate_exists().await?;
     let mut roots = rustls::RootCertStore::empty();
 
     let state = ValidatorState {
@@ -166,8 +137,8 @@ async fn upload_file(
                     "Failed to read file".into(),
                 )
             })?
-            .to_vec(); // Convert Bytes to Vec<u8>
-        break; // Assuming single file upload
+            .to_vec();
+        break;
     }
 
     // Send data to miner via QUIC
@@ -185,35 +156,60 @@ async fn upload_file(
 }
 
 async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
+    info!("Creating QUIC client endpoint for address: {}", addr);
     let client = make_client_endpoint(SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         0,
     ))
     .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+    info!("Establishing QUIC connection");
     let connection = create_quic_client(&client, *addr).await?;
 
+    info!("Opening bidirectional stream");
     let (mut send_stream, mut rcv_stream) = connection.open_bi().await?;
 
-    send_stream.write_all(data).await?;
-    send_stream.finish();
+    const CHUNK_SIZE: usize = 1024 * 64; // 64KB chunks
+    info!("Sending file in chunks of {} bytes", CHUNK_SIZE);
+
+    // First send total size as u64
+    let total_size = data.len() as u64;
+    send_stream.write_all(&total_size.to_be_bytes()).await?;
+
+    // Send data in chunks
+    for chunk in data.chunks(CHUNK_SIZE) {
+        send_stream.write_all(chunk).await?;
+        info!("Sent chunk of {} bytes", chunk.len());
+    }
+
+    info!("Finishing send stream");
+    send_stream
+        .finish()
+        .map_err(|e| anyhow::anyhow!("Failed to finish stream: {}", e))?;
 
     let mut response = String::new();
+    info!("Reading response from stream");
     rcv_stream.read_to_string(&mut response).await?;
+    info!("Received response: {}", response);
+
+    // Close streams
+    drop(send_stream);
+    drop(rcv_stream);
+
+    // Close the connection
+    connection.close(0u32.into(), b"done");
+
+    // Close the endpoint
+    client.close(0u32.into(), b"done");
 
     Ok(response)
 }
-fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
-    // let mut client_crypto = rustls::ClientConfig::builder()
-    //     // .with_custom_certificate_verifier(SkipServerVerification::new())
-    //     .with_no_client_auth();
 
+fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
     let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
 
-    // client_crypto.alpn_protocols = vec![b"hq-interop".to_vec()];
-    // For local development or testing only: skip server cert verification
     tls_config
         .dangerous()
         .set_certificate_verifier(Arc::new(InsecureCertVerifier));
@@ -229,35 +225,31 @@ fn make_client_endpoint(
     bind_addr: SocketAddr,
 ) -> Result<Endpoint, Box<dyn Error + Send + Sync + 'static>> {
     let client_cfg = configure_client()?;
-    let mut endpoint = Endpoint::client(bind_addr)?;
-    endpoint.set_default_client_config(client_cfg);
-    Ok(endpoint)
+
+    let mut attempts = 0;
+    let max_attempts = 5;
+
+    while attempts < max_attempts {
+        match Endpoint::client(bind_addr) {
+            Ok(mut endpoint) => {
+                endpoint.set_default_client_config(client_cfg.clone());
+                return Ok(endpoint);
+            }
+            Err(e) if attempts < max_attempts - 1 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Err("Failed to create endpoint after maximum attempts".into())
 }
 
 async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<quinn::Connection> {
-    info!("Creating QUIC client endpoint");
-    // Bind to some local UDP address/port (0.0.0.0:0 picks a random free port).
-    let mut endpoint = Endpoint::client(addr)?;
-
-    // Build the base rustls config.
-    let mut tls_config = RustlsClientConfig::builder()
-        .with_root_certificates(rustls::RootCertStore::empty())
-        .with_no_client_auth();
-
-    // For local development or testing only: skip server cert verification
-    tls_config
-        .dangerous()
-        .set_certificate_verifier(Arc::new(InsecureCertVerifier));
-
-    let quic_config = QuicClientConfig::try_from(tls_config).unwrap_or_else(|e| {
-        panic!("Failed to create QUIC client config: {:?}", e);
-    });
-    let client_config = ClientConfig::new(Arc::new(quic_config));
-
-    endpoint.set_default_client_config(client_config);
-
+    info!("Creating QUIC client connection");
     let connection = client.connect(addr, "localhost")?.await?;
-
     Ok(connection)
 }
 
