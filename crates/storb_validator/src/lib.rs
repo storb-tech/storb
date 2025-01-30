@@ -8,12 +8,11 @@ use axum::{
 };
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
-use rcgen::{generate_simple_self_signed, Certificate, CertificateParams, CertifiedKey};
+use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::client::danger::ServerCertVerifier;
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls::{self};
 use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, info};
 
 #[derive(Clone)]
@@ -28,7 +27,7 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     if !cert_path.exists() {
         // Generate new certificate
         let subject_alt_names = vec!["localhost".to_string()];
-        let CertifiedKey { cert, key_pair } = generate_simple_self_signed(subject_alt_names)?;
+        let CertifiedKey { cert, key_pair: _ } = generate_simple_self_signed(subject_alt_names)?;
 
         // Save certificate
         let cert_der = cert.der().to_vec();
@@ -86,7 +85,6 @@ impl ServerCertVerifier for InsecureCertVerifier {
 pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
     // Load or generate server certificate
     let server_cert = ensure_certificate_exists().await?;
-    let mut roots = rustls::RootCertStore::empty();
 
     let state = ValidatorState {
         miner_addr,
@@ -95,7 +93,7 @@ pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()>
 
     let app = Router::new()
         .route("/upload", post(upload_file))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024)) // 1GB
+        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024 * 1024)) // 1TiB
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], http_port));
@@ -152,7 +150,7 @@ async fn upload_file(
             )
         })?;
 
-    Ok((StatusCode::OK, format!("File stored: {}", response)))
+    Ok((StatusCode::OK, format!("File hashes: {}", response)))
 }
 
 async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
@@ -187,19 +185,36 @@ async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
         .finish()
         .map_err(|e| anyhow::anyhow!("Failed to finish stream: {}", e))?;
 
-    let mut response = String::new();
-    info!("Reading response from stream");
-    rcv_stream.read_to_string(&mut response).await?;
-    info!("Received response: {}", response);
+    // Read and collect all hashes
+    let mut all_hashes = Vec::new();
+    let mut current_hash = String::new();
+    let mut buf = [0u8; 1];
 
-    // Close streams
-    drop(send_stream);
-    drop(rcv_stream);
+    while let Ok(Some(n)) = rcv_stream.read(&mut buf).await {
+        if n == 0 {
+            break;
+        }
+
+        if buf[0] == b'\n' {
+            if !current_hash.is_empty() {
+                all_hashes.push(current_hash.clone());
+                current_hash.clear();
+            }
+        } else {
+            current_hash.push(buf[0] as char);
+        }
+    }
+
+    if !current_hash.is_empty() {
+        all_hashes.push(current_hash);
+    }
+
+    // Format the response
+    let response = all_hashes.join("\n");
+    info!("Received {} hashes", all_hashes.len());
 
     // Close the connection
     connection.close(0u32.into(), b"done");
-
-    // Close the endpoint
     client.close(0u32.into(), b"done");
 
     Ok(response)
@@ -269,18 +284,3 @@ pub fn run() {
         .unwrap()
         .block_on(main())
 }
-
-// fn main() {
-//     let mut client_crypto = ClientConfig::builder()
-//         .with_safe_defaults()
-//         .with_custom_certificate_verifier(SkipServerVerification::new())
-//         .with_no_client_auth();
-
-//     client_crypto.alpn_protocols = vec![b"hq-interop".to_vec()];
-
-//     let client_config = QuicClientConfig::new(Arc::new(client_crypto));
-//     let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap()).unwrap();
-//     endpoint.set_default_client_config(client_config);
-
-//     // Continue with the client setup
-// }

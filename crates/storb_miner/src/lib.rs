@@ -6,8 +6,7 @@ use rcgen::{generate_simple_self_signed, Certificate};
 use std::error::Error;
 use std::net::UdpSocket;
 use std::sync::Arc;
-use tokio::io::AsyncReadExt;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 
 /// Miner configuration
 #[derive(Clone)]
@@ -59,29 +58,72 @@ async fn main() {
                     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                         info!("New bidirectional stream opened");
 
-                        let mut chunk_buffer = Vec::new();
-                        match recv.read_buf(&mut chunk_buffer).await {
-                            Ok(_) => {
-                                info!("Received chunk of {:?} bytes", chunk_buffer.len());
+                        // Read the total size first
+                        let mut size_buf = [0u8; 8];
+                        if let Err(e) = recv.read_exact(&mut size_buf).await {
+                            error!("Failed to read total size: {}", e);
+                            continue;
+                        }
+                        let total_size = u64::from_be_bytes(size_buf);
+                        info!("Expected total size: {} bytes", total_size);
 
-                                match process_chunk(chunk_buffer.into()).await {
-                                    Ok(result) => {
-                                        if let Err(e) = send.write_all(result.as_bytes()).await {
-                                            error!("Failed to send result: {}", e);
+                        // Process chunks in a loop
+                        let mut processed = 0;
+                        let chunk_size = 64 * 1024; // 64KB buffer
+                        let mut buffer = vec![0u8; chunk_size];
+
+                        while processed < total_size {
+                            let remaining = (total_size - processed) as usize;
+                            let to_read = remaining.min(chunk_size);
+
+                            // Ensure we read exactly the amount we expect
+                            let mut chunk = Vec::new();
+                            let mut bytes_read = 0;
+
+                            while bytes_read < to_read {
+                                match recv.read(&mut buffer[..to_read - bytes_read]).await {
+                                    Ok(Some(n)) if n > 0 => {
+                                        chunk.extend_from_slice(&buffer[..n]);
+                                        bytes_read += n;
+                                    }
+                                    Ok(_) => break, // End of stream
+                                    Err(e) => {
+                                        error!("Error reading chunk: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if bytes_read > 0 {
+                                processed += bytes_read as u64;
+                                info!("Received chunk of exactly {} bytes", bytes_read);
+
+                                match process_chunk(chunk.into()).await {
+                                    Ok(hash) => {
+                                        if let Err(e) = send.write_all(hash.as_bytes()).await {
+                                            error!("Failed to send hash: {}", e);
+                                            break;
+                                        }
+                                        // Send delimiter after each hash
+                                        if let Err(e) = send.write_all(b"\n").await {
+                                            error!("Failed to send delimiter: {}", e);
+                                            break;
                                         }
                                     }
                                     Err(e) => {
                                         error!("Chunk processing error: {}", e);
-                                        if let Err(e) = send.write_all(b"PROCESSING_ERROR").await {
-                                            error!("Failed to send error response: {}", e);
-                                        }
+                                        break;
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                error!("Error reading chunk: {}", e);
+                            } else {
+                                break; // No more data to read
                             }
                         }
+
+                        info!(
+                            "Finished processing file. Total bytes processed: {}",
+                            processed
+                        );
                     }
                 }
                 Err(e) => {
