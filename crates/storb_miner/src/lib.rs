@@ -26,9 +26,8 @@ impl Miner {
     }
 }
 
-async fn process_chunk(chunk: Bytes) -> Result<String, Box<dyn Error + Send + Sync>> {
-    let hash = blake3::hash(&chunk).to_hex();
-    Ok(hash.to_string())
+async fn process_chunk(chunk: Bytes) -> String {
+    blake3::hash(&chunk).to_hex().to_string()
 }
 
 async fn main() {
@@ -94,29 +93,22 @@ async fn main() {
                                 }
                             }
 
-                            if bytes_read > 0 {
-                                processed += bytes_read as u64;
-                                info!("Received chunk of exactly {} bytes", bytes_read);
-
-                                match process_chunk(chunk.into()).await {
-                                    Ok(hash) => {
-                                        if let Err(e) = send.write_all(hash.as_bytes()).await {
-                                            error!("Failed to send hash: {}", e);
-                                            break;
-                                        }
-                                        // Send delimiter after each hash
-                                        if let Err(e) = send.write_all(b"\n").await {
-                                            error!("Failed to send delimiter: {}", e);
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Chunk processing error: {}", e);
-                                        break;
-                                    }
-                                }
-                            } else {
+                            if bytes_read == 0 {
                                 break; // No more data to read
+                            }
+
+                            processed += bytes_read as u64;
+                            info!("Received chunk of exactly {} bytes", bytes_read);
+
+                            let hash = process_chunk(chunk.into()).await;
+                            if let Err(e) = send.write_all(hash.as_bytes()).await {
+                                error!("Failed to send hash: {}", e);
+                                break;
+                            }
+                            // Send delimiter after each hash
+                            if let Err(e) = send.write_all(b"\n").await {
+                                error!("Failed to send delimiter: {}", e);
+                                break;
                             }
                         }
 

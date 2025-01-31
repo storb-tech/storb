@@ -15,12 +15,22 @@ use rustls::{self};
 use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
 use tracing::{error, info};
 
+/// State maintained by the validator service
 #[derive(Clone)]
 struct ValidatorState {
     miner_addr: SocketAddr,
     server_cert: Vec<u8>,
 }
 
+/// Ensures a certificate exists at the default path, generating one if needed
+///
+/// # Returns
+///
+/// The certificate bytes as a Vec<u8>
+///
+/// # Errors
+///
+/// Returns error if certificate generation or file operations fail
 async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     let cert_path = Path::new("cert.der");
 
@@ -40,6 +50,7 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     }
 }
 
+/// Insecure certificate verifier that accepts all certificates
 #[derive(Debug)]
 struct InsecureCertVerifier;
 
@@ -82,6 +93,16 @@ impl ServerCertVerifier for InsecureCertVerifier {
     }
 }
 
+/// Runs the validator service
+///
+/// # Arguments
+///
+/// * `http_port` - The port to listen on for HTTP requests
+/// * `miner_addr` - The address of the miner service
+///
+/// # Errors
+///
+/// Returns error if server fails to start or encounters runtime errors
 pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
     // Load or generate server certificate
     let server_cert = ensure_certificate_exists().await?;
@@ -111,12 +132,27 @@ pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()>
     Ok(())
 }
 
+/// Handles file upload requests
+///
+/// # Arguments
+///
+/// * `state` - The validator state
+/// * `multipart` - The multipart form data containing the file
+///
+/// # Returns
+///
+/// Response with status code and message
+///
+/// # Errors
+///
+/// Returns error if file upload or processing fails
 async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let mut file_data = Vec::new();
-    let mut _file_name = String::new();
+    // TOOD: filename
+    // let mut file_name = String::new();
 
     // Get the first field from multipart
     let field = multipart.next_field().await.map_err(|e| {
@@ -126,9 +162,9 @@ async fn upload_file(
 
     // Check if there's a field
     if let Some(field) = field {
-        if let Some(name) = field.file_name() {
-            _file_name = name.to_string();
-        }
+        // if let Some(name) = field.file_name() {
+        //     file_name = name.to_string();
+        // }
         file_data = field
             .bytes()
             .await
@@ -158,6 +194,24 @@ async fn upload_file(
     Ok((StatusCode::OK, format!("File hashes: {}", response)))
 }
 
+/// Sends data to a QUIC server and receives hashes in response
+///
+/// # Arguments
+///
+/// * `addr` - The socket address of the QUIC server
+/// * `data` - The data to send
+///
+/// # Returns
+///
+/// A string containing newline-separated hashes received from the server
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Client endpoint creation fails
+/// - QUIC connection fails
+/// - Stream operations fail
+/// - Data transmission fails
 async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
     info!("Creating QUIC client endpoint for address: {}", addr);
     let client = make_client_endpoint(SocketAddr::new(
@@ -200,11 +254,9 @@ async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
             break;
         }
 
-        if buf[0] == b'\n' {
-            if !current_hash.is_empty() {
-                all_hashes.push(current_hash.clone());
-                current_hash.clear();
-            }
+        if buf[0] == b'\n' && !current_hash.is_empty() {
+            all_hashes.push(current_hash.clone());
+            current_hash.clear();
         } else {
             current_hash.push(buf[0] as char);
         }
@@ -225,6 +277,15 @@ async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
     Ok(response)
 }
 
+/// Configures a QUIC client with insecure certificate verification
+///
+/// # Returns
+///
+/// Client configuration for QUIC connections
+///
+/// # Errors
+///
+/// Returns error if client configuration fails
 fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
     let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
@@ -243,6 +304,19 @@ fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'sta
     Ok(client_config)
 }
 
+/// Creates a QUIC client endpoint with retry logic
+///
+/// # Arguments
+///
+/// * `bind_addr` - The local address to bind to
+///
+/// # Returns
+///
+/// QUIC endpoint for client connections
+///
+/// # Errors
+///
+/// Returns error if endpoint creation fails after max attempts
 fn make_client_endpoint(
     bind_addr: SocketAddr,
 ) -> Result<Endpoint, Box<dyn Error + Send + Sync + 'static>> {
@@ -257,7 +331,7 @@ fn make_client_endpoint(
                 endpoint.set_default_client_config(client_cfg.clone());
                 return Ok(endpoint);
             }
-            Err(_e) if attempts < max_attempts - 1 => {
+            Err(_) if attempts < max_attempts - 1 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
@@ -269,12 +343,27 @@ fn make_client_endpoint(
     Err("Failed to create endpoint after maximum attempts".into())
 }
 
+/// Creates a QUIC client connection
+///
+/// # Arguments
+///
+/// * `client` - The QUIC endpoint to connect from
+/// * `addr` - The remote address to connect to
+///
+/// # Returns
+///
+/// QUIC connection
+///
+/// # Errors
+///
+/// Returns error if connection fails
 async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<quinn::Connection> {
     info!("Creating QUIC client connection");
     let connection = client.connect(addr, "localhost")?.await?;
     Ok(connection)
 }
 
+/// Main entry point for the validator service
 async fn main() {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -284,6 +373,7 @@ async fn main() {
         .unwrap()
 }
 
+/// Runs the main async runtime
 pub fn run() {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
