@@ -1,3 +1,6 @@
+mod signature;
+use signature::InsecureCertVerifier;
+
 use anyhow::{Context, Result};
 use axum::{
     extract::{DefaultBodyLimit, Multipart},
@@ -9,13 +12,17 @@ use axum::{
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
-use rustls::client::danger::ServerCertVerifier;
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls::{self};
 use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
 use tracing::{error, info};
 
+const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
+
 /// State maintained by the validator service
+///
+/// We derive Clone here to allow this state to be shared between request handlers,
+/// as Axum requires state types to be cloneable to share them across requests.
 #[derive(Clone)]
 struct ValidatorState {
     miner_addr: SocketAddr,
@@ -50,49 +57,6 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     }
 }
 
-/// Insecure certificate verifier that accepts all certificates
-#[derive(Debug)]
-struct InsecureCertVerifier;
-
-impl ServerCertVerifier for InsecureCertVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        // Always trust the server certificate.
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &rustls::pki_types::CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-        ]
-    }
-}
-
 /// Runs the validator service
 ///
 /// # Arguments
@@ -114,7 +78,7 @@ pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()>
 
     let app = Router::new()
         .route("/upload", post(upload_file))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024 * 1024)) // 1TiB
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], http_port));

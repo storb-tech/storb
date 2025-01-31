@@ -8,6 +8,8 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use tracing::{error, info};
 
+const QUIC_PORT: u16 = 5000;
+
 /// Miner configuration
 #[derive(Clone)]
 pub struct MinerConfig {
@@ -26,17 +28,33 @@ impl Miner {
     }
 }
 
+/// Processes a chunk of bytes by computing its BLAKE3 hash
+/// and returning it as a hexadecimal string
 async fn process_chunk(chunk: Bytes) -> String {
     blake3::hash(&chunk).to_hex().to_string()
 }
 
+/// Configures the QUIC server with a self-signed certificate for localhost
+///
+/// # Returns
+/// - A ServerConfig containing the server configuration with the self-signed cert
+/// - An error if server configuration fails
+fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
+    let cert = generate_simple_self_signed(vec!["localhost".into()])?;
+    let cert_der = Certificate::from(cert.cert);
+    let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+
+    let server_config = ServerConfig::with_single_cert(vec![cert_der.into()], priv_key.into());
+
+    Ok(server_config?)
+}
+
 async fn main() {
-    let quic_port = 5000;
     info!("Configuring miner server...");
     let server_config = configure_server().unwrap();
 
     let socket =
-        UdpSocket::bind(format!("0.0.0.0:{}", quic_port)).expect("Failed to bind UDP socket");
+        UdpSocket::bind(format!("0.0.0.0:{}", QUIC_PORT)).expect("Failed to bind UDP socket");
 
     let endpoint = Endpoint::new(
         Default::default(),
@@ -46,7 +64,7 @@ async fn main() {
     )
     .expect("Failed to create QUIC endpoint");
 
-    info!("Miner listening for chunks on quic://0.0.0.0:{}", quic_port);
+    info!("Miner listening for chunks on quic://0.0.0.0:{}", QUIC_PORT);
 
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
@@ -133,14 +151,4 @@ pub fn run() {
         .build()
         .unwrap()
         .block_on(main())
-}
-
-fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
-    let cert = generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let cert_der = Certificate::from(cert.cert);
-    let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-
-    let server_config = ServerConfig::with_single_cert(vec![cert_der.into()], priv_key.into());
-
-    Ok(server_config.unwrap())
 }
