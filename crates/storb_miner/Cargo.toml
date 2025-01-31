@@ -2,3 +2,24 @@
 name = "storb_miner"
 version = "0.1.0"
 edition.workspace = true
+
+[dependencies]
+# Storb
+storb_base.workspace = true
+
+# Third party
+anyhow.workspace = true
+axum.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+futures.workspace = true
+quinn.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-serde.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

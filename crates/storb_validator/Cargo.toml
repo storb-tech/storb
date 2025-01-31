@@ -2,3 +2,22 @@
 name = "storb_validator"
 version = "0.1.0"
 edition.workspace = true
+
+[dependencies]
+# Storb
+storb_base.workspace = true
+storb_miner.workspace = true
+
+# Third party
+anyhow.workspace = true
+axum.workspace = true
+futures.workspace = true
+quinn.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+tokio.workspace = true
+tokio-serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

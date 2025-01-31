@@ -1,0 +1,12 @@
+[package]
+name = "storb_base"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["lib"]
+path = "src/lib.rs"
+name = "neuron"
+
+[dependencies]
+tracing.workspace = true
