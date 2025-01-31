@@ -30,14 +30,6 @@ struct ValidatorState {
 }
 
 /// Ensures a certificate exists at the default path, generating one if needed
-///
-/// # Returns
-///
-/// The certificate bytes as a Vec<u8>
-///
-/// # Errors
-///
-/// Returns error if certificate generation or file operations fail
 async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     let cert_path = Path::new("cert.der");
 
@@ -57,16 +49,11 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
     }
 }
 
-/// Runs the validator service
+/// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
+/// This server serves as an intermediary between HTTP clients and the backing storage+processing miner.
 ///
-/// # Arguments
-///
-/// * `http_port` - The port to listen on for HTTP requests
-/// * `miner_addr` - The address of the miner service
-///
-/// # Errors
-///
-/// Returns error if server fails to start or encounters runtime errors
+/// On success returns Ok(()).
+/// On failure returns error with details of the failure.
 pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
     // Load or generate server certificate
     let server_cert = ensure_certificate_exists().await?;
@@ -97,18 +84,6 @@ pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()>
 }
 
 /// Handles file upload requests
-///
-/// # Arguments
-///
-/// * `state` - The validator state
-/// * `multipart` - The multipart form data containing the file
-///
-/// # Returns
-///
-/// Response with status code and message
-///
-/// # Errors
-///
 /// Returns error if file upload or processing fails
 async fn upload_file(
     state: axum::extract::State<ValidatorState>,
@@ -159,23 +134,6 @@ async fn upload_file(
 }
 
 /// Sends data to a QUIC server and receives hashes in response
-///
-/// # Arguments
-///
-/// * `addr` - The socket address of the QUIC server
-/// * `data` - The data to send
-///
-/// # Returns
-///
-/// A string containing newline-separated hashes received from the server
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - Client endpoint creation fails
-/// - QUIC connection fails
-/// - Stream operations fail
-/// - Data transmission fails
 async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
     info!("Creating QUIC client endpoint for address: {}", addr);
     let client = make_client_endpoint(SocketAddr::new(
@@ -242,14 +200,6 @@ async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
 }
 
 /// Configures a QUIC client with insecure certificate verification
-///
-/// # Returns
-///
-/// Client configuration for QUIC connections
-///
-/// # Errors
-///
-/// Returns error if client configuration fails
 fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
     let mut tls_config = RustlsClientConfig::builder()
         .with_root_certificates(rustls::RootCertStore::empty())
@@ -268,19 +218,7 @@ fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'sta
     Ok(client_config)
 }
 
-/// Creates a QUIC client endpoint with retry logic
-///
-/// # Arguments
-///
-/// * `bind_addr` - The local address to bind to
-///
-/// # Returns
-///
-/// QUIC endpoint for client connections
-///
-/// # Errors
-///
-/// Returns error if endpoint creation fails after max attempts
+/// Creates a QUIC client endpoint bound to specified address with automatic retries
 fn make_client_endpoint(
     bind_addr: SocketAddr,
 ) -> Result<Endpoint, Box<dyn Error + Send + Sync + 'static>> {
@@ -307,20 +245,7 @@ fn make_client_endpoint(
     Err("Failed to create endpoint after maximum attempts".into())
 }
 
-/// Creates a QUIC client connection
-///
-/// # Arguments
-///
-/// * `client` - The QUIC endpoint to connect from
-/// * `addr` - The remote address to connect to
-///
-/// # Returns
-///
-/// QUIC connection
-///
-/// # Errors
-///
-/// Returns error if connection fails
+/// Creates QUIC client connection with provided endpoint and address
 async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<quinn::Connection> {
     info!("Creating QUIC client connection");
     let connection = client.connect(addr, "localhost")?.await?;
