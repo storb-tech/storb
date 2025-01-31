@@ -116,14 +116,18 @@ async fn upload_file(
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let mut file_data = Vec::new();
-    let mut file_name = String::new();
+    let mut _file_name = String::new();
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
+    // Get the first field from multipart
+    let field = multipart.next_field().await.map_err(|e| {
         error!("Error reading multipart field: {}", e);
         (StatusCode::BAD_REQUEST, format!("Invalid request: {}", e))
-    })? {
+    })?;
+
+    // Check if there's a field
+    if let Some(field) = field {
         if let Some(name) = field.file_name() {
-            file_name = name.to_string();
+            _file_name = name.to_string();
         }
         file_data = field
             .bytes()
@@ -136,7 +140,8 @@ async fn upload_file(
                 )
             })?
             .to_vec();
-        break;
+    } else {
+        return Err((StatusCode::BAD_REQUEST, "No file provided".into()));
     }
 
     // Send data to miner via QUIC
@@ -252,7 +257,7 @@ fn make_client_endpoint(
                 endpoint.set_default_client_config(client_cfg.clone());
                 return Ok(endpoint);
             }
-            Err(e) if attempts < max_attempts - 1 => {
+            Err(_e) if attempts < max_attempts - 1 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;
