@@ -232,7 +232,9 @@ fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'sta
     let quic_config = QuicClientConfig::try_from(tls_config).unwrap_or_else(|e| {
         panic!("Failed to create QUIC client config: {:?}", e);
     });
+
     let client_config = ClientConfig::new(Arc::new(quic_config));
+    // let client_config: ClientConfig = ClientConfig::with_platform_verifier();
     Ok(client_config)
 }
 
