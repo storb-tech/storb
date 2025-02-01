@@ -9,4 +9,7 @@ path = "src/lib.rs"
 name = "neuron"
 
 [dependencies]
+crabtensor.workspace = true
+dirs.workspace = true
+subxt.workspace = true
 tracing.workspace = true

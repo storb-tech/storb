@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub struct Subtensor {
     pub network: String,
     pub address: String,
+    pub insecure: bool,
 }
 
 #[allow(unused)]
@@ -65,6 +66,7 @@ pub struct Settings {
     pub api_port: u16,
     pub post_ip: bool,
 
+    pub wallet_path: String,
     pub wallet_name: String,
     pub hotkey_name: String,
 
@@ -99,4 +101,27 @@ impl Settings {
 
         s.try_deserialize()
     }
+}
+
+/// Macro to get a value from CLI args if present, otherwise use the settings value.
+///
+/// # Example
+///
+/// ```rust
+/// get_config_value(args, "arg_name", String, settings.arg_name);
+/// ```
+#[macro_export]
+macro_rules! get_config_value {
+    ($args:expr, $arg_name:expr, $arg_type:ty, $settings:expr) => {
+        // TODO: assert that type of arg_type is same as settings type
+
+        match $args.try_get_one::<$arg_type>($arg_name) {
+            Ok(Some(value)) => value,
+            Ok(None) => &$settings,
+            Err(err) => {
+                tracing::warn!("Failed to load CLI config, loading default settings. Error: {err}");
+                &$settings
+            }
+        }
+    };
 }

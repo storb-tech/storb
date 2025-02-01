@@ -1,32 +1,13 @@
 use bytes::Bytes;
-use neuron::NeuronConfig;
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
-use rcgen::{generate_simple_self_signed, Certificate};
+use rcgen::generate_simple_self_signed;
 use std::error::Error;
 use std::net::UdpSocket;
 use std::sync::Arc;
 use tracing::{error, info};
 
 const QUIC_PORT: u16 = 5000;
-
-/// Miner configuration
-#[derive(Clone)]
-pub struct MinerConfig {
-    pub neuron_config: NeuronConfig,
-}
-
-/// The Storb miner
-#[derive(Clone)]
-struct Miner {
-    config: MinerConfig,
-}
-
-impl Miner {
-    pub fn new(config: MinerConfig) -> Self {
-        Miner { config }
-    }
-}
 
 /// Processes a chunk of bytes by computing its BLAKE3 hash
 /// and returning it as a hexadecimal string
@@ -41,7 +22,7 @@ async fn process_chunk(chunk: Bytes) -> String {
 /// - An error if server configuration fails
 fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
     let cert = generate_simple_self_signed(vec!["localhost".into()])?;
-    let cert_der = Certificate::from(cert.cert);
+    let cert_der = cert.cert;
     let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
     let server_config = ServerConfig::with_single_cert(vec![cert_der.into()], priv_key.into());

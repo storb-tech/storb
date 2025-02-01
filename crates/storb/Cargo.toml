@@ -14,8 +14,10 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 config.workspace = true
+crabtensor.workspace = true
 rcgen.workspace = true
 serde.workspace = true
+storb_base.workspace = true
 storb_miner.workspace = true
 storb_validator.workspace = true
 tokio.workspace = true

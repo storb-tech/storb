@@ -1,7 +1,9 @@
 //! Contains arguments that are used by multiple subcommands, e.g.
 //! `miner` and `validator`.
 
-use clap::{value_parser, Arg, ArgAction};
+use crate::{config::Settings, get_config_value};
+use clap::{value_parser, Arg, ArgAction, ArgMatches};
+use neuron::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 
 pub fn common_args() -> Vec<Arg> {
     vec![
@@ -18,9 +20,10 @@ pub fn common_args() -> Vec<Arg> {
             .help("External IP")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("ip_port")
-            .long("ip-port")
+        Arg::new("api_port")
+            .long("api-port")
             .value_name("port")
+            .value_parser(value_parser!(u16))
             .help("API port for the node")
             .action(ArgAction::Set)
             .global(true),
@@ -28,6 +31,12 @@ pub fn common_args() -> Vec<Arg> {
             .long("post-ip")
             .help("Whether to post the IP to the chain or not")
             .action(ArgAction::SetTrue)
+            .global(true),
+        Arg::new("wallet_path")
+            .long("wallet-path")
+            .value_name("wallet")
+            .help("Path of wallets")
+            .action(ArgAction::Set)
             .global(true),
         Arg::new("wallet_name")
             .long("wallet-name")
@@ -54,6 +63,7 @@ pub fn common_args() -> Vec<Arg> {
         Arg::new("min_stake_threshold")
             .long("min-stake-threshold")
             .value_name("threshold")
+            .value_parser(value_parser!(u64))
             .help("Minimum stake threshold")
             .action(ArgAction::Set)
             .global(true),
@@ -88,10 +98,16 @@ pub fn common_args() -> Vec<Arg> {
             .help("Subtensor network address")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("subtensor.insecure")
+            .long("subtensor.insecure")
+            .help("Enable insecure connection to subtensor")
+            .action(ArgAction::SetTrue)
+            .global(true),
         // Neuron
         Arg::new("neuron.sync_frequency")
             .long("neuron.sync-frequency")
             .value_name("frequency")
+            .value_parser(value_parser!(u64))
             .help("The default sync frequency for nodes")
             .action(ArgAction::Set)
             .global(true),
@@ -99,6 +115,7 @@ pub fn common_args() -> Vec<Arg> {
         Arg::new("dht.port")
             .long("dht.port")
             .value_name("port")
+            .value_parser(value_parser!(u16))
             .help("DHT port")
             .action(ArgAction::Set)
             .global(true),
@@ -117,8 +134,89 @@ pub fn common_args() -> Vec<Arg> {
         Arg::new("dht.bootstrap_port")
             .long("dht.bootstrap-port")
             .value_name("port")
+            .value_parser(value_parser!(u16))
             .help("Bootstrap node port for the DHT")
             .action(ArgAction::Set)
             .global(true),
     ]
+}
+
+pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronConfig {
+    let api_port = *get_config_value!(args, "api_port", u16, settings.api_port);
+
+    let subtensor_config = SubtensorConfig {
+        network: get_config_value!(
+            args,
+            "subtensor.network",
+            String,
+            &settings.subtensor.network
+        )
+        .to_string(),
+        address: get_config_value!(
+            args,
+            "subtensor.address",
+            String,
+            &settings.subtensor.address
+        )
+        .to_string(),
+        insecure: *get_config_value!(
+            args,
+            "subtensor.insecure",
+            bool,
+            &settings.subtensor.insecure
+        ),
+    };
+
+    let neuron_config = NeuronConfig {
+        sync_frequency: *get_config_value!(
+            args,
+            "neuron.sync_frequency",
+            u64,
+            &settings.neuron.sync_frequency
+        ),
+    };
+
+    let dht_config = DhtConfig {
+        port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
+        file: get_config_value!(args, "dht.file", String, &settings.dht.file).clone(),
+        bootstrap_ip: get_config_value!(
+            args,
+            "dht.bootstrap_ip",
+            String,
+            &settings.dht.bootstrap_ip
+        )
+        .clone(),
+        bootstrap_port: *get_config_value!(
+            args,
+            "dht.bootstrap_port",
+            u16,
+            &settings.dht.bootstrap_port
+        ),
+    };
+
+    BaseNeuronConfig {
+        netuid: *get_config_value!(args, "netuid", u16, settings.netuid),
+        wallet_path: get_config_value!(args, "wallet_path", String, &settings.wallet_path)
+            .to_string(),
+        wallet_name: get_config_value!(args, "wallet_name", String, &settings.wallet_name)
+            .to_string(),
+        hotkey_name: get_config_value!(args, "hotkey_name", String, &settings.hotkey_name)
+            .to_string(),
+        external_ip: get_config_value!(args, "external_ip", String, &settings.external_ip).clone(),
+        api_port,
+        post_ip: *get_config_value!(args, "post_ip", bool, &settings.post_ip),
+        mock: *get_config_value!(args, "mock", bool, &settings.mock),
+        load_old_nodes: *get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),
+        min_stake_threshold: *get_config_value!(
+            args,
+            "min_stake_threshold",
+            u64,
+            &settings.min_stake_threshold
+        ),
+        db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).to_string(),
+        pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
+        subtensor: subtensor_config,
+        neuron: neuron_config,
+        dht: dht_config,
+    }
 }

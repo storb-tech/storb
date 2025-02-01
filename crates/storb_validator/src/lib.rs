@@ -1,4 +1,6 @@
 mod signature;
+pub mod validator;
+
 use signature::InsecureCertVerifier;
 
 use anyhow::{Context, Result};
@@ -9,13 +11,14 @@ use axum::{
     routing::post,
     Router,
 };
+// TODO[IMMEDDIATE: import settings stuff
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Endpoint};
-use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls::{self};
-use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
+use std::{error::Error, net::SocketAddr, sync::Arc};
 use tracing::{error, info};
+use validator::{Validator, ValidatorConfig};
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
 
@@ -26,27 +29,6 @@ const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
 #[derive(Clone)]
 struct ValidatorState {
     miner_addr: SocketAddr,
-    server_cert: Vec<u8>,
-}
-
-/// Ensures a certificate exists at the default path, generating one if needed
-async fn ensure_certificate_exists() -> Result<Vec<u8>> {
-    let cert_path = Path::new("cert.der");
-
-    if !cert_path.exists() {
-        // Generate new certificate
-        let subject_alt_names = vec!["localhost".to_string()];
-        let CertifiedKey { cert, key_pair: _ } = generate_simple_self_signed(subject_alt_names)?;
-
-        // Save certificate
-        let cert_der = cert.der().to_vec();
-        std::fs::write(cert_path, &cert_der)?;
-
-        Ok(cert_der)
-    } else {
-        // Read existing certificate
-        std::fs::read(cert_path).context("Failed to read server certificate")
-    }
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
@@ -54,21 +36,25 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
 ///
 /// On success returns Ok(()).
 /// On failure returns error with details of the failure.
-pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
+pub async fn run_validator(config: ValidatorConfig, miner_addr: SocketAddr) -> Result<()> {
     // Load or generate server certificate
-    let server_cert = ensure_certificate_exists().await?;
+    // let server_cert = ensure_certificate_exists().await?;
 
     let state = ValidatorState {
         miner_addr,
-        server_cert,
+        // server_cert,
     };
+
+    // Clone config before first use to avoid move
+    let config_clone = config.clone();
+    let _validator = Validator::new(config_clone).await?;
 
     let app = Router::new()
         .route("/upload", post(upload_file))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], http_port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(
@@ -89,7 +75,7 @@ async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut file_data = Vec::new();
+    let file_data;
     // TOOD: filename
     // let mut file_name = String::new();
 
@@ -253,20 +239,20 @@ async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<quinn
 }
 
 /// Main entry point for the validator service
-async fn main() {
+async fn main(config: ValidatorConfig) {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    run_validator(3000, "127.0.0.1:5000".parse().unwrap())
+    run_validator(config, "127.0.0.1:5000".parse().unwrap())
         .await
         .unwrap()
 }
 
 /// Runs the main async runtime
-pub fn run() {
+pub fn run(config: ValidatorConfig) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(main())
+        .block_on(main(config))
 }
