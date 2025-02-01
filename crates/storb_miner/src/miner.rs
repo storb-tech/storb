@@ -1,18 +1,29 @@
-use neuron::NeuronConfig;
+use neuron::{BaseNeuron, BaseNeuronConfig, NeuronError};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct MinerConfig {
-    pub neuron_config: NeuronConfig,
+    pub neuron_config: BaseNeuronConfig,
 }
 
 /// The Storb miner
 #[derive(Clone)]
 pub struct Miner {
-    config: MinerConfig,
+    pub config: MinerConfig,
+    pub neuron: BaseNeuron,
 }
 
-pub impl Miner {
-    pub fn new(config: MinerConfig) -> Self {
-        Miner { config }
+impl Miner {
+    pub async fn new(config: MinerConfig) -> Result<Self, NeuronError> {
+        let neuron_config = config.neuron_config.clone();
+        let neuron = BaseNeuron::new(neuron_config).await?;
+        let miner = Miner { config, neuron };
+        Ok(miner)
+    }
+
+    pub async fn sync(&mut self) {
+        info!("Syncing miner");
+        self.neuron.sync_metagraph().await;
+        info!("Done syncing miner");
     }
 }

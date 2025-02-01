@@ -1,4 +1,5 @@
 use neuron::{BaseNeuron, BaseNeuronConfig, NeuronError};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct ValidatorConfig {
@@ -21,6 +22,8 @@ impl Validator {
     }
 
     pub async fn sync(&mut self) {
+        info!("Syncing validator");
         self.neuron.sync_metagraph().await;
+        info!("Done syncing validator");
     }
 }

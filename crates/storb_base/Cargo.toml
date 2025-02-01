@@ -12,4 +12,5 @@ name = "neuron"
 crabtensor.workspace = true
 dirs.workspace = true
 subxt.workspace = true
+tokio.workspace = true
 tracing.workspace = true

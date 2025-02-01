@@ -139,12 +139,12 @@ impl BaseNeuron {
         // post ip if specified
         info!("Should post ip?: {}", config.post_ip);
         if config.post_ip {
-            // TODO: using Tcp for now
+            // TODO: using Udp for now
             let address = format!("{}:{}", config.external_ip, config.api_port)
                 .parse()
                 .unwrap();
             info!("Serving axon as: {}", address);
-            let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Tcp);
+            let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Udp);
             neuron
                 .subtensor
                 .tx()
@@ -195,4 +195,108 @@ impl BaseNeuron {
 
         *self.neurons.write().unwrap() = neurons;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, create_dir_all};
+    // use std::path::Path;
+
+    fn setup_test_wallet() -> (PathBuf, String) {
+        let temp_dir = std::env::temp_dir().join("storb_test_wallets");
+        create_dir_all(&temp_dir).unwrap();
+
+        let wallet_name = "test_wallet";
+        let hotkey_name = "test_hotkey";
+
+        let wallet_path = temp_dir.join(wallet_name).join("hotkeys");
+        create_dir_all(&wallet_path).unwrap();
+
+        let hotkey_file = wallet_path.join(hotkey_name);
+        let random_seed = vec![0u8; 32];
+        fs::write(&hotkey_file, random_seed).unwrap();
+
+        (temp_dir, wallet_name.to_string())
+    }
+
+    fn get_test_config() -> BaseNeuronConfig {
+        let (wallet_path, wallet_name) = setup_test_wallet();
+
+        BaseNeuronConfig {
+            netuid: 1,
+            external_ip: "127.0.0.1".to_string(),
+            api_port: 8080,
+            post_ip: false,
+            wallet_path: wallet_path.to_str().unwrap().to_string(),
+            wallet_name,
+            hotkey_name: "test_hotkey".to_string(),
+            mock: false,
+            load_old_nodes: false,
+            min_stake_threshold: 0,
+            db_dir: "./test.db".to_string(),
+            pem_file: "cert.pem".to_string(),
+            subtensor: SubtensorConfig {
+                network: "finney".to_string(),
+                address: "wss://test.finney.opentensor.ai:443".to_string(),
+                insecure: false,
+            },
+            neuron: NeuronConfig {
+                sync_frequency: 100,
+            },
+            dht: DhtConfig {
+                port: 8081,
+                file: "dht.db".to_string(),
+                bootstrap_ip: "127.0.0.1".to_string(),
+                bootstrap_port: 8082,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_subtensor_connection() {
+        let config = get_test_config();
+        let result = BaseNeuron::get_subtensor_connection(
+            config.subtensor.insecure,
+            &config.subtensor.address,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_find_neuron_info() {
+        let neurons = vec![];
+        let account_id = AccountId::from([0; 32]);
+        info!("account_id: {account_id}");
+        let result = BaseNeuron::find_neuron_info(&neurons, &account_id);
+        assert!(result.is_none());
+    }
+
+    // TODO: get wallet handling working properly for testing
+    // #[tokio::test]
+    // async fn test_check_registration() {
+    //     let config = get_test_config();
+    //     let neuron = BaseNeuron::new(config).await.unwrap();
+    //     let result = neuron.check_registration().await;
+    //     assert!(result.is_err()); // Should fail since test wallet not registered
+    // }
+
+    // #[tokio::test]
+    // async fn test_sync_metagraph() {
+    //     let config = get_test_config();
+    //     let mut neuron = BaseNeuron::new(config).await.unwrap();
+    //     neuron.sync_metagraph().await;
+    //     let neurons = neuron.get_neurons();
+    //     let neurons_read = neurons.read().unwrap();
+    //     assert!(neurons_read.len() > 0); // Verify we can read neurons after sync
+    // }
+
+    // impl Drop for BaseNeuron {
+    //     fn drop(&mut self) {
+    //         if Path::new(&self.config.wallet_path).exists() {
+    //             let _ = fs::remove_dir_all(&self.config.wallet_path);
+    //         }
+    //     }
+    // }
 }

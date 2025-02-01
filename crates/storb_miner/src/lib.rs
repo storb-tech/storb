@@ -1,13 +1,17 @@
 use bytes::Bytes;
+use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
 use rcgen::generate_simple_self_signed;
 use std::error::Error;
 use std::net::UdpSocket;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use tokio::time;
 use tracing::{error, info};
 
-const QUIC_PORT: u16 = 5000;
+pub mod miner;
 
 /// Processes a chunk of bytes by computing its BLAKE3 hash
 /// and returning it as a hexadecimal string
@@ -30,12 +34,31 @@ fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'sta
     Ok(server_config?)
 }
 
-async fn main() {
+async fn main(config: MinerConfig) {
     info!("Configuring miner server...");
     let server_config = configure_server().unwrap();
 
-    let socket =
-        UdpSocket::bind(format!("0.0.0.0:{}", QUIC_PORT)).expect("Failed to bind UDP socket");
+    let miner = Arc::new(Mutex::new(Miner::new(config.clone()).await.unwrap()));
+
+    // Create weak reference for sync task
+    let sync_miner = Arc::downgrade(&miner);
+
+    // Spawn background sync task
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(
+            config.neuron_config.neuron.sync_frequency,
+        ));
+        loop {
+            interval.tick().await;
+            if let Some(miner) = sync_miner.upgrade() {
+                let mut guard = miner.lock().await;
+                guard.sync().await;
+            }
+        }
+    });
+
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.api_port))
+        .expect("Failed to bind UDP socket");
 
     let endpoint = Endpoint::new(
         Default::default(),
@@ -45,7 +68,10 @@ async fn main() {
     )
     .expect("Failed to create QUIC endpoint");
 
-    info!("Miner listening for chunks on quic://0.0.0.0:{}", QUIC_PORT);
+    info!(
+        "Miner listening for chunks on quic://0.0.0.0:{}",
+        config.neuron_config.api_port
+    );
 
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
@@ -126,10 +152,10 @@ async fn main() {
 }
 
 /// Run the miner
-pub fn run() {
+pub fn run(config: MinerConfig) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(main())
+        .block_on(main(config))
 }
