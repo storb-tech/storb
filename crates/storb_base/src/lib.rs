@@ -16,6 +16,8 @@ use std::{
 };
 use tracing::info;
 
+pub mod dht;
+
 #[derive(Debug)]
 pub enum NeuronError {
     SubtensorError(String),
