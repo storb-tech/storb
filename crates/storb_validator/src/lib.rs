@@ -5,6 +5,7 @@ pub mod validator;
 
 use anyhow::{Context, Result};
 use axum::{extract::DefaultBodyLimit, routing::post, Router};
+use neuron::dht::StorbDHT;
 use routes::upload_file;
 use rustls::{self};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -74,6 +75,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
     let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
+
+    // TODO: Add error handling for the Swarm initialization.
+    let dht = StorbDHT::new().unwrap();
+    dht.run().await.unwrap();
 
     axum::serve(
         tokio::net::TcpListener::bind(addr)

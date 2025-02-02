@@ -1,6 +1,7 @@
 pub mod constants;
 pub mod piece;
 pub mod piece_hash;
+pub mod swarm;
 
 use crabtensor::{
     api::apis,
@@ -16,8 +17,6 @@ use std::{
 };
 use swarm::dht::StorbDHT;
 use tracing::info;
-
-pub mod swarm;
 
 #[derive(Debug)]
 pub enum NeuronError {

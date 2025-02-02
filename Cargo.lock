@@ -12442,14 +12442,21 @@ dependencies = [
  "futures",
 >>>>>>> 65e09fb (feat: add DHT API and integrate StorbDHT into the base neuron)
  "libp2p",
+<<<<<<< HEAD
+=======
+ "lru 0.13.0",
+>>>>>>> 0c1019a (feat: add basic DHT Swarm)
  "rand 0.9.0",
  "rocksdb",
 <<<<<<< HEAD
 =======
  "rustls",
  "serde",
+<<<<<<< HEAD
  "rand 0.9.0",
 >>>>>>> 8d26b31 (feat: wip zfec integration)
+=======
+>>>>>>> 0c1019a (feat: add basic DHT Swarm)
  "subxt",
  "tokio",
  "tracing",
