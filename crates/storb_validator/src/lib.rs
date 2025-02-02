@@ -1,4 +1,6 @@
 mod signature;
+pub mod validator;
+
 use signature::InsecureCertVerifier;
 
 use anyhow::{Context, Result};
@@ -9,15 +11,18 @@ use axum::{
     routing::post,
     Router,
 };
-use quinn::crypto::rustls::QuicClientConfig;
+use futures::future::join_all;
+use quinn::{crypto::rustls::QuicClientConfig, TransportConfig};
 use quinn::{ClientConfig, Endpoint};
-use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls::{self};
-use std::{error::Error, net::SocketAddr, path::Path, sync::Arc};
+use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
+use tokio::{sync::Mutex, time};
 use tracing::{error, info};
+use validator::{Validator, ValidatorConfig};
 
 const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
+const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// State maintained by the validator service
 ///
@@ -25,28 +30,7 @@ const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
 /// as Axum requires state types to be cloneable to share them across requests.
 #[derive(Clone)]
 struct ValidatorState {
-    miner_addr: SocketAddr,
-    server_cert: Vec<u8>,
-}
-
-/// Ensures a certificate exists at the default path, generating one if needed
-async fn ensure_certificate_exists() -> Result<Vec<u8>> {
-    let cert_path = Path::new("cert.der");
-
-    if !cert_path.exists() {
-        // Generate new certificate
-        let subject_alt_names = vec!["localhost".to_string()];
-        let CertifiedKey { cert, key_pair: _ } = generate_simple_self_signed(subject_alt_names)?;
-
-        // Save certificate
-        let cert_der = cert.der().to_vec();
-        std::fs::write(cert_path, &cert_der)?;
-
-        Ok(cert_der)
-    } else {
-        // Read existing certificate
-        std::fs::read(cert_path).context("Failed to read server certificate")
-    }
+    validator: Arc<Mutex<Validator>>,
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
@@ -54,21 +38,39 @@ async fn ensure_certificate_exists() -> Result<Vec<u8>> {
 ///
 /// On success returns Ok(()).
 /// On failure returns error with details of the failure.
-pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()> {
+pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Load or generate server certificate
-    let server_cert = ensure_certificate_exists().await?;
+    // let server_cert = ensure_certificate_exists().await?;
 
-    let state = ValidatorState {
-        miner_addr,
-        server_cert,
-    };
+    // Clone config before first use to avoid move
+    let config_clone = config.clone();
+    let validator = Arc::new(Mutex::new(Validator::new(config_clone).await?));
+
+    // Create weak reference for sync task
+    let sync_validator = Arc::downgrade(&validator);
+
+    // Spawn background sync task
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(
+            config.neuron_config.neuron.sync_frequency,
+        ));
+        loop {
+            interval.tick().await;
+            if let Some(validator) = sync_validator.upgrade() {
+                let mut guard = validator.lock().await;
+                guard.sync().await;
+            }
+        }
+    });
+
+    let state = ValidatorState { validator };
 
     let app = Router::new()
         .route("/upload", post(upload_file))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], http_port));
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(
@@ -85,13 +87,12 @@ pub async fn run_validator(http_port: u16, miner_addr: SocketAddr) -> Result<()>
 
 /// Handles file upload requests
 /// Returns error if file upload or processing fails
+#[axum::debug_handler()]
 async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let mut file_data = Vec::new();
-    // TOOD: filename
-    // let mut file_name = String::new();
+    let file_data;
 
     // Get the first field from multipart
     let field = multipart.next_field().await.map_err(|e| {
@@ -101,9 +102,6 @@ async fn upload_file(
 
     // Check if there's a field
     if let Some(field) = field {
-        // if let Some(name) = field.file_name() {
-        //     file_name = name.to_string();
-        // }
         file_data = field
             .bytes()
             .await
@@ -119,18 +117,59 @@ async fn upload_file(
         return Err((StatusCode::BAD_REQUEST, "No file provided".into()));
     }
 
-    // Send data to miner via QUIC
-    let response = send_via_quic(&state.miner_addr, &file_data)
-        .await
-        .map_err(|e| {
-            error!("QUIC transfer failed: {}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to store file: {}", e),
-            )
-        })?;
+    // Scope the MutexGuard to drop it after we're done with it
+    let miners = {
+        let validator_guard = state.validator.lock().await;
+        let neurons_guard = validator_guard.neuron.neurons.read().unwrap();
+        neurons_guard.clone()
+    };
 
-    Ok((StatusCode::OK, format!("File hashes: {}", response)))
+    let mut tasks = Vec::new();
+    for miner in &miners {
+        let ip_u32 = miner.axon_info.ip;
+        let ip_bytes: [u8; 4] = [
+            (ip_u32 >> 24) as u8,
+            (ip_u32 >> 16) as u8,
+            (ip_u32 >> 8) as u8,
+            ip_u32 as u8,
+        ];
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip_bytes));
+        let miner_addr = SocketAddr::new(ip, miner.axon_info.port);
+        let file_data = file_data.clone();
+
+        tasks.push(tokio::spawn(async move {
+            match send_via_quic(&miner_addr, &file_data).await {
+                Ok(response) => {
+                    info!("File hashes from {}: {}", miner_addr, response);
+                    Ok(miner_addr)
+                }
+                Err(e) => {
+                    error!("QUIC transfer failed for miner at {}: {}", miner_addr, e);
+                    Err(miner_addr)
+                }
+            }
+        }));
+    }
+
+    let results = join_all(tasks).await;
+    let mut failed_deliveries = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok(_)) => (), // Successfully delivered
+            Ok(Err(addr)) => failed_deliveries.push(addr),
+            Err(e) => error!("Task failed: {}", e),
+        }
+    }
+
+    if failed_deliveries.len() == miners.len() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "Failed to store file on any miners".into(),
+        ));
+    }
+
+    Ok((StatusCode::OK, "Uploaded! :)"))
 }
 
 /// Sends data to a QUIC server and receives hashes in response
@@ -213,8 +252,11 @@ fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'sta
         panic!("Failed to create QUIC client config: {:?}", e);
     });
 
-    let client_config = ClientConfig::new(Arc::new(quic_config));
-    // let client_config: ClientConfig = ClientConfig::with_platform_verifier();
+    let mut client_config = ClientConfig::new(Arc::new(quic_config));
+    // Disable segmentation offload
+    let mut transport_config = TransportConfig::default();
+    transport_config.enable_segmentation_offload(false);
+    client_config.transport_config(Arc::new(transport_config));
     Ok(client_config)
 }
 
@@ -248,25 +290,25 @@ fn make_client_endpoint(
 /// Creates QUIC client connection with provided endpoint and address
 async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<quinn::Connection> {
     info!("Creating QUIC client connection");
-    let connection = client.connect(addr, "localhost")?.await?;
+    // TODO: timeout like this?
+    let connection =
+        tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, client.connect(addr, "localhost")?).await??;
     Ok(connection)
 }
 
 /// Main entry point for the validator service
-async fn main() {
+async fn main(config: ValidatorConfig) {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    run_validator(3000, "127.0.0.1:5000".parse().unwrap())
-        .await
-        .unwrap()
+    run_validator(config).await.unwrap()
 }
 
 /// Runs the main async runtime
-pub fn run() {
+pub fn run(config: ValidatorConfig) {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(main())
+        .block_on(main(config))
 }

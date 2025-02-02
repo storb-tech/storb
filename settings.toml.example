@@ -1,10 +1,12 @@
 version = "0.2.2"
+log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 
 netuid = 0
 external_ip = "0.0.0.0"
 api_port = 6969
 post_ip = false
 
+wallet_path = "~/.bittensor/wallets"
 wallet_name = "default"
 hotkey_name = "default"
 
@@ -13,13 +15,13 @@ mock = false
 load_old_nodes = true
 min_stake_threshold = 1000
 
-log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 db_dir = "database.db"
 pem_file = "storb.pem"
 
 [subtensor]
 network = "finney"
 address = "wss://entrypoint-finney.opentensor.ai:443"
+insecure = true
 
 [neuron]
 sync_frequency = 300

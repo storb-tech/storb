@@ -1,8 +1,12 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
+use neuron::BaseNeuronConfig;
 use storb_validator;
+use storb_validator::validator::ValidatorConfig;
 
 use crate::config::Settings;
+
+use super::args::get_neuron_config;
 
 pub fn cli() -> Command {
     Command::new("validator")
@@ -48,9 +52,9 @@ pub fn cli() -> Command {
 }
 
 pub fn exec(args: &ArgMatches, settings: &Settings) {
-    // TODO
-    _ = args;
-    _ = settings;
+    // Get validator config with CLI overrides
+    let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
+    let validator_config = ValidatorConfig { neuron_config };
 
-    storb_validator::run();
+    storb_validator::run(validator_config);
 }
