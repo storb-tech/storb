@@ -113,8 +113,6 @@ impl Settings {
 #[macro_export]
 macro_rules! get_config_value {
     ($args:expr, $arg_name:expr, $arg_type:ty, $settings:expr) => {
-        // TODO: assert that type of arg_type is same as settings type
-
         match $args.try_get_one::<$arg_type>($arg_name) {
             Ok(Some(value)) => value,
             Ok(None) => &$settings,
