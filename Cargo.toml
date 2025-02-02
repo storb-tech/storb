@@ -13,10 +13,17 @@ license = "MIT"
 readme = "README.md"
 
 [workspace.dependencies]
+# Storb
+storb_base = { version = "*", path = "crates/storb_base" }
+storb_miner = { version = "*", path = "crates/storb_miner" }
+storb_validator = { version = "*", path = "crates/storb_validator" }
+
+# Crabtensor
 crabtensor = { git = "https://github.com/fr34kcoders/crabtensor.git", rev = "b91e3272917ce01993fd10bfd685e0ebe588aa86" }
 sp-runtime = "=39.0.2"
 subxt = "=0.38.0"
 
+# Third party
 anyhow = "1.0.95"
 axum = { version = "0.8.1", features = ["multipart", "macros"] }
 blake3 = "1.5.5"
@@ -30,9 +37,6 @@ rand = "0.9.0"
 rcgen = { version = "0.13.2", features = ["crypto", "pem", "ring"] }
 rustls = { version = "0.23.22" }
 serde = { version = "1.0.217", features = ["derive"] }
-storb_base = { version = "*", path = "crates/storb_base" }
-storb_miner = { version = "*", path = "crates/storb_miner" }
-storb_validator = { version = "*", path = "crates/storb_validator" }
 tokio = { version = "1.43.0", features = ["full"] }
 tokio-serde = { version = "0.9.0", features = ["serde"] }
 tracing = "0.1.41"
