@@ -1,6 +1,6 @@
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use neuron::BaseNeuronConfig;
+use base::BaseNeuronConfig;
 use storb_miner;
 use storb_miner::miner::MinerConfig;
 

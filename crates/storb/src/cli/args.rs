@@ -2,8 +2,8 @@
 //! `miner` and `validator`.
 
 use crate::{config::Settings, get_config_value};
+use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
-use neuron::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 
 pub fn common_args() -> Vec<Arg> {
     vec![

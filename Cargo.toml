@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3.19", features = [
 ] }
 utoipa = "5"
 uuid = "1.12.1"
-
+zfec-rs = { git = "https://github.com/thornleywalker/zfec-rs.git" }
 
 [profile.release]
 codegen-units = 1
