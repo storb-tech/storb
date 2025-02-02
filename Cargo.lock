@@ -12444,6 +12444,12 @@ dependencies = [
  "libp2p",
  "rand 0.9.0",
  "rocksdb",
+<<<<<<< HEAD
+=======
+ "rustls",
+ "serde",
+ "rand 0.9.0",
+>>>>>>> 8d26b31 (feat: wip zfec integration)
  "subxt",
  "tokio",
  "tracing",
@@ -14755,7 +14761,11 @@ dependencies = [
 [[package]]
 name = "zfec-rs"
 version = "0.1.0"
+<<<<<<< HEAD
 source = "git+https://github.com/thornleywalker/zfec-rs.git?rev=3f3a3720def2294dc62e65f614862f1a7ddd3187#3f3a3720def2294dc62e65f614862f1a7ddd3187"
+=======
+source = "git+https://github.com/thornleywalker/zfec-rs.git#3f3a3720def2294dc62e65f614862f1a7ddd3187"
+>>>>>>> 8d26b31 (feat: wip zfec integration)
 
 [[package]]
 name = "zstd"
