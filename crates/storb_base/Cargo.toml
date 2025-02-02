@@ -11,6 +11,8 @@ name = "neuron"
 [dependencies]
 crabtensor.workspace = true
 dirs.workspace = true
+libp2p.workspace = true
+rocksdb.workspace = true
 subxt.workspace = true
 tokio.workspace = true
 tracing.workspace = true
