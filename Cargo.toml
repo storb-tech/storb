@@ -48,6 +48,7 @@ tracing-subscriber = { version = "0.3.19", features = [
     "registry",
     "std",
 ] }
+utoipa = "5"
 uuid = "1.12.1"
 
 
