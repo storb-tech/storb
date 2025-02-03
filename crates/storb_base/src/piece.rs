@@ -73,7 +73,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: usize) -> EncodedChunk {
         pieces.push(Piece {
             piece_type,
             data: piece_data,
-            chunk_idx: chunk_idx as usize,
+            chunk_idx,
             piece_idx: i,
         });
     }
@@ -84,7 +84,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: usize) -> EncodedChunk {
 
     EncodedChunk {
         pieces: Some(pieces),
-        chunk_idx: chunk_idx as usize,
+        chunk_idx,
         k,
         m,
         chunk_size: zfec_chunk_size,
@@ -106,8 +106,8 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
     let mut sharenums: Vec<usize> = Vec::new();
 
     // zfec decode requires exactly k blocks
-    if pieces.len() > k as usize {
-        for (i, p) in pieces.iter().take(k as usize).enumerate() {
+    if pieces.len() > k {
+        for (i, p) in pieces.iter().take(k).enumerate() {
             pieces_to_decode.push(ZFecChunk::new(p.data.clone(), i));
             sharenums.push(i);
         }
@@ -118,9 +118,9 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
         }
     }
 
-    let decoder = zfec_rs::Fec::new(k as usize, m as usize).expect("Failed to create decoder");
+    let decoder = zfec_rs::Fec::new(k, m).expect("Failed to create decoder");
     decoder
-        .decode(&pieces_to_decode, padlen as usize)
+        .decode(&pieces_to_decode, padlen)
         .expect("Failed to decode chunk")
 }
 
@@ -156,7 +156,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
         // Ensure at least k pieces are available for decoding
         let k = chunk.k;
         debug!("[reconstruct_data]: k={k}");
-        if relevant_pieces.len() < k as usize {
+        if relevant_pieces.len() < k {
             tracing::error!(
                 "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | # pieces to reconstruct from: {}",
                 chunk_idx,
