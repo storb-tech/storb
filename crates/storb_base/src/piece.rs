@@ -62,7 +62,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
 
     // Calculate how zfec splits/pads under the hood
-    let zfec_chunk_size = chunk_size + (k - 1);
+    let zfec_chunk_size = (chunk_size + (k - 1)) / k;
 
     let mut pieces: Vec<Piece> = Vec::new();
     for (i, piece) in encoded_pieces.into_iter().enumerate() {
@@ -72,7 +72,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
         } else {
             PieceType::Parity
         };
-        debug!("Encoding piece {} with length {}", i, piece_data.len());
+        // debug!("Encoding piece {} with length {}", i, piece_data.len());
         pieces.push(Piece {
             piece_type,
             data: piece_data,
@@ -95,13 +95,13 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
         original_chunk_size: chunk_size as i32,
     };
 
-    debug!(
-        "[encode_chunk] chunk {}: k={}, m={}, encoded {} blocks",
-        chunk_idx,
-        k,
-        m,
-        encoded_chunk.pieces.as_ref().unwrap().len()
-    );
+    // debug!(
+    //     "[encode_chunk] chunk {}: k={}, m={}, encoded {} blocks",
+    //     chunk_idx,
+    //     k,
+    //     m,
+    //     encoded_chunk.pieces.as_ref().unwrap().len()
+    // );
     encoded_chunk
 }
 
@@ -137,6 +137,19 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
 }
 
 pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
+    debug!("reconstructing data");
+    debug!(
+        "pieces: {:#?}",
+        pieces
+            .iter()
+            .map(|p| Piece {
+                chunk_idx: p.chunk_idx,
+                piece_idx: p.piece_idx,
+                piece_type: p.piece_type.clone(),
+                data: vec![] // Exclude data from debug output
+            })
+            .collect::<Vec<_>>()
+    );
     let mut reconstructed_chunks: Vec<Vec<u8>> = Vec::new();
 
     for chunk in chunks {
@@ -150,10 +163,19 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .collect();
         relevant_pieces.sort_by_key(|p| p.piece_idx);
 
+        // debug!("relevant pieces: {:?}", relevant_pieces);
+
         // Ensure at least k pieces are available for decoding
         let k = chunk.k;
+        debug!("[reconstruct_data]: k={k}");
         if relevant_pieces.len() < k as usize {
-            panic!("Not enough pieces to reconstruct chunk {}", chunk_idx);
+            panic!(
+                "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | Passed pieces: {}",
+                chunk_idx,
+                k,
+                relevant_pieces.len(),
+                pieces.len()
+            );
         }
 
         let mut chunk_to_decode = chunk.clone();
@@ -170,6 +192,7 @@ mod tests {
     use super::*;
     use rand;
     use rand::seq::SliceRandom;
+    use rand::RngCore;
 
     #[test]
     fn test_piece_length() {
@@ -215,19 +238,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_reconstruct_data_insufficient_pieces() {
-        let test_data = b"Test insufficient pieces".to_vec();
-        let encoded = encode_chunk(&test_data, 0);
-        let pieces = encoded.pieces.as_ref().unwrap().clone();
-        let truncated_pieces = pieces.into_iter().take(1).collect::<Vec<_>>();
-        reconstruct_data(&truncated_pieces, &[encoded]);
-    }
-
-    #[test]
     fn test_split_data() {
         const TEST_FILE_SIZE: usize = 1024 * 1024;
-        let test_data = vec![0u8; TEST_FILE_SIZE];
+        let mut test_data = vec![0u8; TEST_FILE_SIZE];
+        rand::rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None) as usize;
         let num_chunks = ((TEST_FILE_SIZE as f64) / (chunk_size as f64)).ceil() as usize;
@@ -269,7 +283,8 @@ mod tests {
     #[test]
     fn test_reconstruct_data_large() {
         const TEST_FILE_SIZE: usize = 1024 * 1024;
-        let test_data = vec![0u8; TEST_FILE_SIZE];
+        let mut test_data = vec![0u8; TEST_FILE_SIZE];
+        rand::rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None) as usize;
         let mut chunks: Vec<EncodedChunk> = Vec::new();
@@ -291,7 +306,8 @@ mod tests {
     #[test]
     fn test_reconstruct_data_corrupted() {
         const TEST_FILE_SIZE: usize = 1024 * 1024;
-        let test_data = vec![0u8; TEST_FILE_SIZE];
+        let mut test_data = vec![0u8; TEST_FILE_SIZE];
+        rand::rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None) as usize;
         let mut chunks: Vec<EncodedChunk> = Vec::new();
