@@ -12738,7 +12738,7 @@ dependencies = [
 [[package]]
 name = "zfec-rs"
 version = "0.1.0"
-source = "git+https://github.com/thornleywalker/zfec-rs.git#3f3a3720def2294dc62e65f614862f1a7ddd3187"
+source = "git+https://github.com/thornleywalker/zfec-rs.git?rev=3f3a3720def2294dc62e65f614862f1a7ddd3187#3f3a3720def2294dc62e65f614862f1a7ddd3187"
 
 [[package]]
 name = "zstd"

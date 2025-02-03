@@ -4,8 +4,8 @@ use zfec_rs::Chunk as ZFecChunk;
 
 #[derive(Debug, Clone)]
 pub struct Piece {
-    pub chunk_idx: i32,
-    pub piece_idx: i32,
+    pub chunk_idx: usize,
+    pub piece_idx: usize,
     pub piece_type: PieceType,
     pub data: Vec<u8>,
 }
@@ -19,35 +19,32 @@ pub enum PieceType {
 #[derive(Debug, Clone)]
 pub struct EncodedChunk {
     pub pieces: Option<Vec<Piece>>,
-    pub chunk_idx: i32,
-    pub k: i32, // Number of data blocks
-    pub m: i32, // Total blocks (data + parity)
-    pub chunk_size: i32,
-    pub padlen: i32,
-    pub original_chunk_size: i32,
+    pub chunk_idx: usize,
+    pub k: usize, // Number of data blocks
+    pub m: usize, // Total blocks (data + parity)
+    pub chunk_size: usize,
+    pub padlen: usize,
+    pub original_chunk_size: usize,
 }
 
 pub fn piece_length(
     content_length: usize,
     min_size: Option<usize>,
     max_size: Option<usize>,
-) -> i32 {
-    let min_size: i32 = min_size.unwrap_or(MIN_PIECE_SIZE).try_into().unwrap();
-    let max_size: i32 = max_size.unwrap_or(MAX_PIECE_SIZE).try_into().unwrap();
+) -> usize {
+    let min_size = min_size.unwrap_or(MIN_PIECE_SIZE);
+    let max_size = max_size.unwrap_or(MAX_PIECE_SIZE);
+
+    // Calculate ideal length based on content size using log scaling
     let exponent =
         ((content_length as f64).log2() * PIECE_LENGTH_SCALING + PIECE_LENGTH_OFFSET) as i32;
-    let length: i32 = (1_usize << exponent).try_into().unwrap();
+    let length = 1_usize << exponent;
 
-    if length < min_size {
-        min_size
-    } else if length > max_size {
-        max_size
-    } else {
-        length
-    }
+    // Clamp between min and max bounds
+    length.clamp(min_size, max_size)
 }
 
-pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
+pub fn encode_chunk(chunk: &[u8], chunk_idx: usize) -> EncodedChunk {
     let chunk_size = chunk.len();
     let piece_size = piece_length(chunk_size, None, None);
     debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
@@ -76,8 +73,8 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
         pieces.push(Piece {
             piece_type,
             data: piece_data,
-            chunk_idx: chunk_idx as i32,
-            piece_idx: i as i32,
+            chunk_idx: chunk_idx as usize,
+            piece_idx: i,
         });
     }
 
@@ -87,21 +84,13 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
 
     EncodedChunk {
         pieces: Some(pieces),
-        chunk_idx: chunk_idx as i32,
-        k: k as i32,
-        m: m as i32,
-        chunk_size: zfec_chunk_size as i32,
-        padlen: padlen as i32,
-        original_chunk_size: chunk_size as i32,
+        chunk_idx: chunk_idx as usize,
+        k,
+        m,
+        chunk_size: zfec_chunk_size,
+        padlen,
+        original_chunk_size: chunk_size,
     }
-
-    // debug!(
-    //     "[encode_chunk] chunk {}: k={}, m={}, encoded {} blocks",
-    //     chunk_idx,
-    //     k,
-    //     m,
-    //     encoded_chunk.pieces.as_ref().unwrap().len()
-    // );
 }
 
 pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
@@ -168,13 +157,14 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
         let k = chunk.k;
         debug!("[reconstruct_data]: k={k}");
         if relevant_pieces.len() < k as usize {
-            panic!(
+            tracing::error!(
                 "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | # pieces to reconstruct from: {}",
                 chunk_idx,
                 k,
                 relevant_pieces.len(),
                 pieces.len()
             );
+            return Vec::new(); // Return empty vec to indicate error
         }
 
         let mut chunk_to_decode = chunk.clone();
@@ -209,8 +199,8 @@ mod tests {
     #[test]
     fn test_piece_length() {
         setup_logging();
-        assert!(piece_length(1000, None, None) >= MIN_PIECE_SIZE as i32);
-        assert!(piece_length(1000000, None, None) <= MAX_PIECE_SIZE as i32);
+        assert!(piece_length(1000, None, None) >= MIN_PIECE_SIZE);
+        assert!(piece_length(1000000, None, None) <= MAX_PIECE_SIZE);
     }
 
     #[test]
@@ -265,15 +255,15 @@ mod tests {
 
         let mut chunks: Vec<EncodedChunk> = Vec::new();
         let mut pieces: Vec<Piece> = Vec::new();
-        let mut expected_pieces = 0;
+        let mut expected_pieces: usize = 0;
 
         for (chunk_idx, chunk) in test_data.chunks(chunk_size).enumerate() {
-            let chunk_info = encode_chunk(chunk, chunk_idx as u32);
+            let chunk_info = encode_chunk(chunk, chunk_idx);
             chunks.push(chunk_info.clone());
 
             let piece_size = piece_length(chunk_info.original_chunk_size as usize, None, None);
             let pieces_per_block =
-                ((chunk_info.chunk_size as f64) / (piece_size as f64)).ceil() as i32;
+                ((chunk_info.chunk_size as f64) / (piece_size as f64)).ceil() as usize;
             let num_pieces = chunk_info.m * pieces_per_block;
             expected_pieces += num_pieces;
 
@@ -289,7 +279,7 @@ mod tests {
         );
 
         assert_eq!(
-            pieces.len() as i32,
+            pieces.len(),
             expected_pieces,
             "Mismatch in piece counts! Expected {}, got {}",
             expected_pieces,
@@ -309,7 +299,7 @@ mod tests {
         let mut pieces: Vec<Piece> = Vec::new();
 
         for (chunk_idx, chunk) in test_data.chunks(chunk_size).enumerate() {
-            let chunk_info = encode_chunk(chunk, chunk_idx as u32);
+            let chunk_info = encode_chunk(chunk, chunk_idx);
             chunks.push(chunk_info.clone());
             pieces.extend(chunk_info.pieces.unwrap());
         }
@@ -333,7 +323,7 @@ mod tests {
         let mut pieces: Vec<Piece> = Vec::new();
 
         for (chunk_idx, chunk) in test_data.chunks(chunk_size).enumerate() {
-            let chunk_info = encode_chunk(chunk, chunk_idx as u32);
+            let chunk_info = encode_chunk(chunk, chunk_idx);
             chunks.push(chunk_info.clone());
             pieces.extend(chunk_info.pieces.unwrap());
         }
