@@ -62,7 +62,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
 
     // Calculate how zfec splits/pads under the hood
-    let zfec_chunk_size = (chunk_size + (k - 1)) / k;
+    let zfec_chunk_size = chunk_size.div_ceil(k);
 
     let mut pieces: Vec<Piece> = Vec::new();
     for (i, piece) in encoded_pieces.into_iter().enumerate() {
@@ -85,7 +85,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
         debug!("[encode] Piece length: {}", piece.data.len());
     }
 
-    let encoded_chunk = EncodedChunk {
+    EncodedChunk {
         pieces: Some(pieces),
         chunk_idx: chunk_idx as i32,
         k: k as i32,
@@ -93,7 +93,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
         chunk_size: zfec_chunk_size as i32,
         padlen: padlen as i32,
         original_chunk_size: chunk_size as i32,
-    };
+    }
 
     // debug!(
     //     "[encode_chunk] chunk {}: k={}, m={}, encoded {} blocks",
@@ -102,7 +102,6 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u32) -> EncodedChunk {
     //     m,
     //     encoded_chunk.pieces.as_ref().unwrap().len()
     // );
-    encoded_chunk
 }
 
 pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
@@ -170,7 +169,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
         debug!("[reconstruct_data]: k={k}");
         if relevant_pieces.len() < k as usize {
             panic!(
-                "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | Passed pieces: {}",
+                "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | # pieces to reconstruct from: {}",
                 chunk_idx,
                 k,
                 relevant_pieces.len(),
@@ -193,15 +192,30 @@ mod tests {
     use rand;
     use rand::seq::SliceRandom;
     use rand::RngCore;
+    use std::sync::Once;
+
+    // This runs before any tests
+    static INIT: Once = Once::new();
+
+    fn setup_logging() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_test_writer() // This ensures output goes to the test console
+                .init();
+        });
+    }
 
     #[test]
     fn test_piece_length() {
+        setup_logging();
         assert!(piece_length(1000, None, None) >= MIN_PIECE_SIZE as i32);
         assert!(piece_length(1000000, None, None) <= MAX_PIECE_SIZE as i32);
     }
 
     #[test]
     fn test_encode_decode_chunk() {
+        setup_logging();
         let test_data = b"Hello, World!".to_vec();
         let encoded = encode_chunk(&test_data, 0);
         let decoded = decode_chunk(&encoded);
@@ -210,6 +224,7 @@ mod tests {
 
     #[test]
     fn test_encode_chunk_pieces() {
+        setup_logging();
         let test_data = b"Test data".to_vec();
         let encoded = encode_chunk(&test_data, 0);
         let pieces = encoded.pieces.unwrap();
@@ -230,6 +245,7 @@ mod tests {
 
     #[test]
     fn test_reconstruct_data() {
+        setup_logging();
         let test_data = b"Test reconstruction".to_vec();
         let encoded = encode_chunk(&test_data, 0);
         let pieces = encoded.pieces.as_ref().unwrap().to_vec();
@@ -239,6 +255,7 @@ mod tests {
 
     #[test]
     fn test_split_data() {
+        setup_logging();
         const TEST_FILE_SIZE: usize = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE];
         rand::rng().fill_bytes(&mut test_data);
@@ -282,6 +299,7 @@ mod tests {
 
     #[test]
     fn test_reconstruct_data_large() {
+        setup_logging();
         const TEST_FILE_SIZE: usize = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE];
         rand::rng().fill_bytes(&mut test_data);
@@ -305,6 +323,7 @@ mod tests {
 
     #[test]
     fn test_reconstruct_data_corrupted() {
+        setup_logging();
         const TEST_FILE_SIZE: usize = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE];
         rand::rng().fill_bytes(&mut test_data);
@@ -321,12 +340,13 @@ mod tests {
 
         let mut rng = rand::rngs::ThreadRng::default();
 
-        // Keep 70% of pieces
-        let num_pieces_to_keep = (pieces.len() as f64 * 0.7) as usize;
-        pieces.shuffle(&mut rng);
-        pieces.truncate(num_pieces_to_keep);
-
-        pieces.shuffle(&mut rng);
+        for chunk in &mut chunks {
+            let pieces_vec = chunk.pieces.as_mut().expect("Chunk pieces should exist");
+            let num_pieces_to_keep = ((pieces_vec.len() as f64 * 0.7).ceil()) as usize;
+            pieces_vec.shuffle(&mut rng);
+            pieces_vec.truncate(num_pieces_to_keep);
+            pieces_vec.shuffle(&mut rng);
+        }
 
         let reconstructed_data = reconstruct_data(&pieces, &chunks);
         assert_eq!(test_data, reconstructed_data, "Data mismatch!");

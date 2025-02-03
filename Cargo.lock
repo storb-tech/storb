@@ -10737,6 +10737,7 @@ dependencies = [
  "subxt",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zfec-rs",
 ]
 

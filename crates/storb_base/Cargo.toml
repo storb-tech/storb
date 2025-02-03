@@ -15,4 +15,5 @@ rand.workspace = true
 subxt.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 zfec-rs.workspace = true
