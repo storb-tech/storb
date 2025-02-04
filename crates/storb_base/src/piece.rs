@@ -149,7 +149,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
         // Ensure at least k pieces are available for decoding
         let k = chunk.k;
         debug!("[reconstruct_data]: k={k}");
-        if relevant_pieces.len() < k as usize {
+        if (relevant_pieces.len() as u64) < k {
             tracing::error!(
                 "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces | # pieces to reconstruct from: {}",
                 chunk_idx,
