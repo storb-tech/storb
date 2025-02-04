@@ -169,6 +169,43 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
     reconstructed_chunks.concat()
 }
 
+/// Reconstructs a single chunk from its pieces
+pub fn reconstruct_chunk(pieces: &[Piece], chunk_info: &EncodedChunk) -> Option<Vec<u8>> {
+    debug!("reconstructing single chunk {}", chunk_info.chunk_idx);
+
+    // Filter pieces for this specific chunk and sort them
+    let mut relevant_pieces: Vec<Piece> = pieces
+        .iter()
+        .filter(|piece| piece.chunk_idx == chunk_info.chunk_idx)
+        .cloned()
+        .collect();
+    relevant_pieces.sort_by_key(|p| p.piece_idx);
+
+    // Ensure we have enough pieces to reconstruct (at least k pieces)
+    let k = chunk_info.k;
+    debug!(
+        "[reconstruct_chunk]: k={k}, pieces available={}",
+        relevant_pieces.len()
+    );
+
+    if relevant_pieces.len() < k as usize {
+        tracing::error!(
+            "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces",
+            chunk_info.chunk_idx,
+            k,
+            relevant_pieces.len(),
+        );
+        return None;
+    }
+
+    // Create a new EncodedChunk with just the pieces for this chunk
+    let mut chunk_to_decode = chunk_info.clone();
+    chunk_to_decode.pieces = Some(relevant_pieces);
+
+    // Decode and return the chunk
+    Some(decode_chunk(&chunk_to_decode))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +374,46 @@ mod tests {
 
         let reconstructed_data = reconstruct_data(&pieces, &chunks);
         assert_eq!(test_data, reconstructed_data, "Data mismatch!");
+    }
+
+    #[test]
+    fn test_reconstruct_single_chunk() {
+        setup_logging();
+
+        // Create test data for a single chunk
+        let test_data = vec![0u8; 1024];
+        let chunk_idx = 0;
+
+        // Encode the chunk
+        let encoded_chunk = encode_chunk(&test_data, chunk_idx);
+        let pieces = encoded_chunk.pieces.as_ref().unwrap();
+
+        // Try to reconstruct the chunk
+        let reconstructed =
+            reconstruct_chunk(pieces, &encoded_chunk).expect("Failed to reconstruct chunk");
+
+        assert_eq!(
+            reconstructed, test_data,
+            "Reconstructed chunk doesn't match original"
+        );
+
+        // Test with missing pieces (but still enough to reconstruct)
+        let mut reduced_pieces = pieces.clone();
+        reduced_pieces.truncate((encoded_chunk.k + 1) as usize); // Keep just enough pieces
+
+        let reconstructed_reduced = reconstruct_chunk(&reduced_pieces, &encoded_chunk)
+            .expect("Failed to reconstruct chunk with reduced pieces");
+
+        assert_eq!(
+            reconstructed_reduced, test_data,
+            "Reconstructed chunk from reduced pieces doesn't match original"
+        );
+
+        // Test with too few pieces
+        let too_few_pieces = pieces[0..((encoded_chunk.k - 1) as usize)].to_vec();
+        assert!(
+            reconstruct_chunk(&too_few_pieces, &encoded_chunk).is_none(),
+            "Should return None when there are too few pieces"
+        );
     }
 }
