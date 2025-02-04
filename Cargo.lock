@@ -10724,6 +10724,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zfec-rs",
 ]
 
 [[package]]
@@ -10732,9 +10733,12 @@ version = "0.1.0"
 dependencies = [
  "crabtensor",
  "dirs 6.0.0",
+ "rand 0.9.0",
  "subxt",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "zfec-rs",
 ]
 
 [[package]]
@@ -12730,6 +12734,11 @@ dependencies = [
  "quote",
  "syn 2.0.96",
 ]
+
+[[package]]
+name = "zfec-rs"
+version = "0.1.0"
+source = "git+https://github.com/thornleywalker/zfec-rs.git?rev=3f3a3720def2294dc62e65f614862f1a7ddd3187#3f3a3720def2294dc62e65f614862f1a7ddd3187"
 
 [[package]]
 name = "zstd"

@@ -1,4 +1,4 @@
-use neuron::{BaseNeuron, BaseNeuronConfig, NeuronError};
+use base::{BaseNeuron, BaseNeuronConfig, NeuronError};
 use tracing::info;
 
 #[derive(Clone)]
