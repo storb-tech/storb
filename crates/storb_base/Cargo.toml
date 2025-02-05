@@ -8,11 +8,23 @@ crate-type = ["lib"]
 path = "src/lib.rs"
 name = "neuron"
 
+[dev-dependencies]
+tempfile = "3.2.0" 
+
 [dependencies]
+bincode.workspace = true
+blake3.workspace = true
+chrono.workspace = true
 crabtensor.workspace = true
 dirs.workspace = true
+ed25519.workspace = true
 libp2p.workspace = true
+lru.workspace = true
 rocksdb.workspace = true
+rustls.workspace = true
+serde.workspace = true
 subxt.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
