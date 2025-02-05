@@ -12,6 +12,7 @@ use tokio::time;
 use tracing::{error, info};
 
 pub mod miner;
+pub mod store;
 
 /// Processes a chunk of bytes by computing its BLAKE3 hash
 /// and returning it as a hexadecimal string

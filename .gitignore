@@ -1,10 +1,7 @@
-# certs
-*.der
-
 .DS_Store
 .direnv
-/result
-/target
+result/
+target/
 
 # Cap'n Proto
 *_capnp.rs
@@ -13,3 +10,9 @@
 logs/
 settings.toml
 !settings.toml.example
+
+# Testing
+test_dir_*
+
+# Certificates
+*.der

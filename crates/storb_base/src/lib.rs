@@ -1,5 +1,6 @@
 pub mod constants;
 pub mod piece;
+pub mod piece_hash;
 
 use crabtensor::{
     api::apis,
