@@ -12,7 +12,7 @@ use tokio::{sync::Mutex, time};
 use tracing::info;
 use validator::{Validator, ValidatorConfig};
 
-const MAX_BODY_SIZE: usize = 1024 * 1024 * 1024 * 1024; // 1TiB
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GiB
 
 /// State maintained by the validator service
 ///
