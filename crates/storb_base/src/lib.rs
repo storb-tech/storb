@@ -16,7 +16,7 @@ use std::{
 };
 use tracing::info;
 
-pub mod dht;
+pub mod swarm;
 
 #[derive(Debug)]
 pub enum NeuronError {
@@ -78,7 +78,7 @@ pub struct BaseNeuronConfig {
     pub load_old_nodes: bool,
     pub min_stake_threshold: u64,
 
-    pub db_dir: String,
+    pub db_dir: PathBuf,
     pub pem_file: String,
 
     pub subtensor: SubtensorConfig,
@@ -240,7 +240,7 @@ mod tests {
             mock: false,
             load_old_nodes: false,
             min_stake_threshold: 0,
-            db_dir: "./test.db".to_string(),
+            db_dir: "./test.db".into(),
             pem_file: "cert.pem".to_string(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
