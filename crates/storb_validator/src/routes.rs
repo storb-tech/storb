@@ -1,4 +1,6 @@
 use crate::{quic::establish_miner_connections, ValidatorState};
+use crate::{quic::establish_miner_connections, ValidatorState};
+use anyhow::Result;
 use anyhow::Result;
 use axum::{
     body::Bytes,
@@ -6,18 +8,24 @@ use axum::{
     http::{header::CONTENT_LENGTH, HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use axum::{
+    body::Bytes,
+    extract::Multipart,
+    http::{header::CONTENT_LENGTH, HeaderMap, StatusCode},
+    response::IntoResponse,
+};
+use base::piece::{encode_chunk, piece_length};
 use base::piece::{encode_chunk, piece_length};
 use futures::{Stream, TryStreamExt};
+use futures::{Stream, TryStreamExt};
+use quinn::Connection;
 use quinn::Connection;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const MIN_REQUIRED_MINERS: usize = 1;
-const LOGGING_INTERVAL_MB: u64 = 100;
-const BYTES_PER_MB: u64 = 1024 * 1024;
 
-// Processes upload streams and distributes file pieces to available miners
 struct UploadProcessor {
     miner_connections: Vec<(SocketAddr, Connection)>,
 }
@@ -27,11 +35,7 @@ impl UploadProcessor {
         // Get miner addresses from validator state
         let miners = {
             let validator_guard = state.validator.lock().await;
-            let neurons_guard = validator_guard
-                .neuron
-                .neurons
-                .read()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire neurons read lock: {}", e))?;
+            let neurons_guard = validator_guard.neuron.neurons.read().unwrap();
             neurons_guard.clone()
         };
 
@@ -143,8 +147,8 @@ where
                 return Err(anyhow::anyhow!("Upload size exceeds expected size"));
             }
 
-            // Log progress every LOGGING_INTERVAL_MB MB
-            if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
+            // Log progress every 100MB
+            if total_processed % (100 * 1024 * 1024) == 0 {
                 info!(
                     "Processing: {} MB / {} MB",
                     total_processed / (1024 * 1024),

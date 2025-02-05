@@ -1,17 +1,29 @@
 use crate::signature::InsecureCertVerifier;
 use anyhow::{anyhow, Result};
 use crabtensor::rpc::types::NeuronInfoLite;
-use quinn::crypto::rustls::QuicClientConfig;
-use quinn::{ClientConfig, Connection, Endpoint};
+use quinn::{crypto::rustls::QuicClientConfig, TransportConfig};
+use quinn::{ClientConfig, Connection, Endpoint, IdleTimeout};
 use rustls::ClientConfig as RustlsClientConfig;
 use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{error, info};
 
-pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
-// TODO: turn this into a setting?
+pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+// TODO:
+// 1. Producer produces bytes
+//  1a. Read collection of bytes from multipart form
+//  1b. Fill up a shared buffer with that collection
+//  1c. Signal that its done
+// 2. Consumer consumes bytes
+//  2a. Reads a certain chunk of the collection bytes from shared buffer
+//  2b. FECs it into pieces. A background thread is spawned
+//      to:
+//      - distribute these pieces to a selected set of miners
+//      - verify pieces are being stored
+//      - update miner statistics
+
 const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
 
-/// Establishes QUIC connections with a list of miners
 pub async fn establish_miner_connections(
     miners: &[NeuronInfoLite],
 ) -> Result<Vec<(SocketAddr, Connection)>> {
@@ -33,6 +45,40 @@ pub async fn establish_miner_connections(
             0,
         ))
         .map_err(|e| anyhow!(e.to_string()))?;
+
+        connection_futures.push(async move {
+            match create_quic_client(&client, addr).await {
+                Ok(connection) => Some((addr, connection)),
+                Err(_) => None,
+            }
+        });
+    }
+
+    let connections: Vec<_> = futures::future::join_all(connection_futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+
+    if connections.len() < MIN_REQUIRED_MINERS {
+        return Err(anyhow!(
+            "Failed to establish minimum required connections. Got {} out of minimum {}",
+            connections.len(),
+            MIN_REQUIRED_MINERS
+        ));
+    }
+
+    Ok(connections)
+}
+
+/// Sends data to a QUIC server and receives hashes in response
+pub async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
+    info!("Creating QUIC client endpoint for address: {}", addr);
+    let client = make_client_endpoint(SocketAddr::new(
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        0,
+    ))
+    .map_err(|e| anyhow!(e.to_string()))?;
 
         connection_futures.push(async move {
             match create_quic_client(&client, addr).await {
@@ -76,7 +122,16 @@ pub fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 
         panic!("Failed to create QUIC client config: {:?}", e);
     });
 
-    let client_config = ClientConfig::new(Arc::new(quic_config));
+    let mut client_config = ClientConfig::new(Arc::new(quic_config));
+    // Disable segmentation offload
+    let mut transport_config = TransportConfig::default();
+    let timeout = IdleTimeout::try_from(Duration::from_secs(30))?;
+    transport_config
+        .enable_segmentation_offload(true) // Disable segmentation offload
+        .keep_alive_interval(Some(Duration::from_secs(15))) // Add keepalive
+        .max_idle_timeout(Some(timeout)) // Set idle timeout
+        .initial_rtt(Duration::from_millis(100)); // Set initial RTT estimate
+    client_config.transport_config(Arc::new(transport_config));
     Ok(client_config)
 }
 
