@@ -27,7 +27,7 @@ pub struct EncodedChunk {
     pub original_chunk_size: u64,
 }
 
-pub fn piece_length(content_length: usize, min_size: Option<u64>, max_size: Option<u64>) -> u64 {
+pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {
     let min_size = min_size.unwrap_or(MIN_PIECE_SIZE);
     let max_size = max_size.unwrap_or(MAX_PIECE_SIZE);
 
@@ -41,7 +41,7 @@ pub fn piece_length(content_length: usize, min_size: Option<u64>, max_size: Opti
 }
 
 pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
-    let chunk_size = chunk.len();
+    let chunk_size = chunk.len() as u64;
     let piece_size = piece_length(chunk_size, None, None);
     debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
@@ -55,7 +55,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
 
     // Calculate how zfec splits/pads under the hood
-    let zfec_chunk_size = chunk_size.div_ceil(k);
+    let zfec_chunk_size = chunk_size.div_ceil(k as u64);
 
     let mut pieces: Vec<Piece> = Vec::new();
     for (i, piece) in encoded_pieces.into_iter().enumerate() {
@@ -79,13 +79,9 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
         chunk_idx,
         k: k.try_into().expect("Failed to convert k"),
         m: m.try_into().expect("Failed to convert m"),
-        chunk_size: zfec_chunk_size
-            .try_into()
-            .expect("Failed to convert chunk_size"),
+        chunk_size: zfec_chunk_size,
         padlen: padlen.try_into().expect("Failed to convert padlen"),
-        original_chunk_size: chunk_size
-            .try_into()
-            .expect("Failed to convert original_chunk_size"),
+        original_chunk_size: chunk_size,
     }
 }
 

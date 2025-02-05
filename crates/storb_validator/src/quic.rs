@@ -1,77 +1,65 @@
 use crate::signature::InsecureCertVerifier;
 use anyhow::{anyhow, Result};
-use quinn::{crypto::rustls::QuicClientConfig, TransportConfig};
+use crabtensor::rpc::types::NeuronInfoLite;
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::ClientConfig as RustlsClientConfig;
 use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
-use tracing::info;
+use tracing::{error, info};
 
-pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
+pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+// TODO: turn this into a setting?
+const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
 
-/// Sends data to a QUIC server and receives hashes in response
-pub async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
-    info!("Creating QUIC client endpoint for address: {}", addr);
-    let client = make_client_endpoint(SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        0,
-    ))
-    .map_err(|e| anyhow!(e.to_string()))?;
+/// Establishes QUIC connections with a list of miners
+pub async fn establish_miner_connections(
+    miners: &[NeuronInfoLite],
+) -> Result<Vec<(SocketAddr, Connection)>> {
+    let mut connection_futures = Vec::new();
 
-    info!("Establishing QUIC connection");
-    let connection = create_quic_client(&client, *addr).await?;
+    for miner in miners {
+        let ip_u32 = miner.axon_info.ip;
+        let ip_bytes: [u8; 4] = [
+            (ip_u32 >> 24) as u8,
+            (ip_u32 >> 16) as u8,
+            (ip_u32 >> 8) as u8,
+            ip_u32 as u8,
+        ];
+        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip_bytes));
+        let addr = SocketAddr::new(ip, miner.axon_info.port);
 
-    info!("Opening bidirectional stream");
-    let (mut send_stream, mut rcv_stream) = connection.open_bi().await?;
+        let client = make_client_endpoint(SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            0,
+        ))
+        .map_err(|e| anyhow!(e.to_string()))?;
 
-    const CHUNK_SIZE: usize = 1024 * 64; // 64KB chunks
-    info!("Sending file in chunks of {} bytes", CHUNK_SIZE);
-
-    // First send total size as u64
-    let total_size = data.len() as u64;
-    send_stream.write_all(&total_size.to_be_bytes()).await?;
-
-    // Send data in chunks
-    for chunk in data.chunks(CHUNK_SIZE) {
-        send_stream.write_all(chunk).await?;
-        info!("Sent chunk of {} bytes", chunk.len());
+        connection_futures.push(async move {
+            match create_quic_client(&client, addr).await {
+                Ok(connection) => Some((addr, connection)),
+                Err(e) => {
+                    error!("Failed to establish connection with {}: {}", addr, e);
+                    None
+                }
+            }
+        });
     }
 
-    info!("Finishing send stream");
-    send_stream
-        .finish()
-        .map_err(|e| anyhow!("Failed to finish stream: {}", e))?;
+    let connections: Vec<_> = futures::future::join_all(connection_futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
 
-    // Read and collect all hashes
-    let mut all_hashes = Vec::new();
-    let mut current_hash = String::new();
-    let mut buf = [0u8; 1];
-
-    while let Ok(Some(n)) = rcv_stream.read(&mut buf).await {
-        if n == 0 {
-            break;
-        }
-
-        if buf[0] == b'\n' && !current_hash.is_empty() {
-            all_hashes.push(current_hash.clone());
-            current_hash.clear();
-        } else {
-            current_hash.push(buf[0] as char);
-        }
+    if connections.len() < MIN_REQUIRED_MINERS {
+        return Err(anyhow!(
+            "Failed to establish minimum required connections. Got {} out of minimum {}",
+            connections.len(),
+            MIN_REQUIRED_MINERS
+        ));
     }
 
-    if !current_hash.is_empty() {
-        all_hashes.push(current_hash);
-    }
-
-    // Format the response
-    let response = all_hashes.join("\n");
-    info!("Received {} hashes", all_hashes.len());
-
-    // Close the connection
-    connection.close(0u32.into(), b"done");
-    client.close(0u32.into(), b"done");
-
-    Ok(response)
+    Ok(connections)
 }
 
 /// Configures a QUIC client with insecure certificate verification
@@ -88,11 +76,7 @@ pub fn configure_client() -> Result<ClientConfig, Box<dyn Error + Send + Sync + 
         panic!("Failed to create QUIC client config: {:?}", e);
     });
 
-    let mut client_config = ClientConfig::new(Arc::new(quic_config));
-    // Disable segmentation offload
-    let mut transport_config = TransportConfig::default();
-    transport_config.enable_segmentation_offload(false);
-    client_config.transport_config(Arc::new(transport_config));
+    let client_config = ClientConfig::new(Arc::new(quic_config));
     Ok(client_config)
 }
 
@@ -125,8 +109,21 @@ pub fn make_client_endpoint(
 
 /// Creates QUIC client connection with provided endpoint and address
 pub async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<Connection> {
-    info!("Creating QUIC client connection");
-    let connection =
-        tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, client.connect(addr, "localhost")?).await??;
+    info!("Creating QUIC client connection to {}", addr);
+
+    let connection = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, async {
+        let conn = client.connect(addr, "localhost")?;
+        match conn.await {
+            Ok(connection) => Ok(connection),
+            Err(e) => {
+                error!("Failed to establish QUIC connection: {}", e);
+                Err(anyhow!("QUIC onnection failed: {}", e))
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("QUIC connection timed out"))??;
+
+    info!("QUIC connection established successfully");
     Ok(connection)
 }

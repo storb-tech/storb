@@ -1,3 +1,9 @@
+# certs
+*.der
+
+# vscode
+.vscode
+
 .DS_Store
 .direnv
 result/

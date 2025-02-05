@@ -11,6 +11,7 @@ storb_miner.workspace = true
 # Third party
 anyhow.workspace = true
 axum.workspace = true
+crabtensor.workspace = true
 futures.workspace = true
 quinn.workspace = true
 rand.workspace = true
