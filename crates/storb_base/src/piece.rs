@@ -79,13 +79,9 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
         chunk_idx,
         k: k.try_into().expect("Failed to convert k"),
         m: m.try_into().expect("Failed to convert m"),
-        chunk_size: zfec_chunk_size
-            .try_into()
-            .expect("Failed to convert chunk_size"),
+        chunk_size: zfec_chunk_size,
         padlen: padlen.try_into().expect("Failed to convert padlen"),
-        original_chunk_size: chunk_size
-            .try_into()
-            .expect("Failed to convert original_chunk_size"),
+        original_chunk_size: chunk_size,
     }
 }
 

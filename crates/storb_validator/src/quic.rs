@@ -7,7 +7,7 @@ use rustls::ClientConfig as RustlsClientConfig;
 use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{error, info};
 
-pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
+pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 
 // TODO:
 // 1. Producer produces bytes
@@ -69,72 +69,6 @@ pub async fn establish_miner_connections(
     }
 
     Ok(connections)
-}
-
-/// Sends data to a QUIC server and receives hashes in response
-pub async fn send_via_quic(addr: &SocketAddr, data: &[u8]) -> Result<String> {
-    info!("Creating QUIC client endpoint for address: {}", addr);
-    let client = make_client_endpoint(SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        0,
-    ))
-    .map_err(|e| anyhow!(e.to_string()))?;
-
-    info!("Establishing QUIC connection");
-    let connection = create_quic_client(&client, *addr).await?;
-
-    info!("Opening bidirectional stream");
-    let (mut send_stream, mut rcv_stream) = connection.open_bi().await?;
-
-    const CHUNK_SIZE: usize = 1024 * 64; // 64KB chunks
-    info!("Sending file in chunks of {} bytes", CHUNK_SIZE);
-
-    // First send total size as u64
-    let total_size = data.len() as u64;
-    send_stream.write_all(&total_size.to_be_bytes()).await?;
-
-    // Send data in chunks
-    for chunk in data.chunks(CHUNK_SIZE) {
-        send_stream.write_all(chunk).await?;
-        info!("Sent chunk of {} bytes", chunk.len());
-    }
-
-    info!("Finishing send stream");
-    send_stream
-        .finish()
-        .map_err(|e| anyhow!("Failed to finish stream: {}", e))?;
-
-    // Read and collect all hashes
-    let mut all_hashes = Vec::new();
-    let mut current_hash = String::new();
-    let mut buf = [0u8; 1];
-
-    while let Ok(Some(n)) = rcv_stream.read(&mut buf).await {
-        if n == 0 {
-            break;
-        }
-
-        if buf[0] == b'\n' && !current_hash.is_empty() {
-            all_hashes.push(current_hash.clone());
-            current_hash.clear();
-        } else {
-            current_hash.push(buf[0] as char);
-        }
-    }
-
-    if !current_hash.is_empty() {
-        all_hashes.push(current_hash);
-    }
-
-    // Format the response
-    let response = all_hashes.join("\n");
-    info!("Received {} hashes", all_hashes.len());
-
-    // Close the connection
-    connection.close(0u32.into(), b"done");
-    client.close(0u32.into(), b"done");
-
-    Ok(response)
 }
 
 /// Configures a QUIC client with insecure certificate verification
