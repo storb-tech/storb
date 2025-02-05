@@ -14,7 +14,10 @@ use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 const MIN_REQUIRED_MINERS: usize = 1;
+const LOGGING_INTERVAL_MB: u64 = 100;
+const BYTES_PER_MB: u64 = 1024 * 1024;
 
+// Processes upload streams and distributes file pieces to available miners
 struct UploadProcessor {
     miner_connections: Vec<(SocketAddr, Connection)>,
 }
@@ -24,7 +27,11 @@ impl UploadProcessor {
         // Get miner addresses from validator state
         let miners = {
             let validator_guard = state.validator.lock().await;
-            let neurons_guard = validator_guard.neuron.neurons.read().unwrap();
+            let neurons_guard = validator_guard
+                .neuron
+                .neurons
+                .read()
+                .map_err(|e| anyhow::anyhow!("Failed to acquire neurons read lock: {}", e))?;
             neurons_guard.clone()
         };
 
@@ -136,8 +143,8 @@ where
                 return Err(anyhow::anyhow!("Upload size exceeds expected size"));
             }
 
-            // Log progress every 100MB
-            if total_processed % (100 * 1024 * 1024) == 0 {
+            // Log progress every LOGGING_INTERVAL_MB MB
+            if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
                 info!(
                     "Processing: {} MB / {} MB",
                     total_processed / (1024 * 1024),

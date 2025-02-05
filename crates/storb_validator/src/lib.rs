@@ -25,6 +25,18 @@ struct ValidatorState {
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
 /// This server serves as an intermediary between HTTP clients and the backing storage+processing miner.
+/// Below is an overview of how it works:
+/// 1. Producer produces bytes
+///  1a. Read collection of bytes from multipart form
+///  1b. Fill up a shared buffer with that collection
+///  1c. Signal that its done
+/// 2. Consumer consumes bytes
+///  2a. Reads a certain chunk of the collection bytes from shared buffer
+///  2b. FECs it into pieces. A background thread is spawned
+///      to:
+///      - distribute these pieces to a selected set of miners
+///      - verify pieces are being stored
+///      - update miner statistics
 ///
 /// On success returns Ok(()).
 /// On failure returns error with details of the failure.
