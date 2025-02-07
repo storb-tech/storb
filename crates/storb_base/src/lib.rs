@@ -10,6 +10,7 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+use swarm::dht::StorbDHT;
 use tracing::info;
 
 pub mod swarm;
@@ -127,6 +128,21 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
+        let secret = ed25519_dalek::SecretKey::from(seed);
+        let keypair = ed25519_dalek::SigningKey::from(secret);
+        let key_bytes: [u8; 32] = keypair.to_bytes();
+        let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(key_bytes)
+            .unwrap_or_else(|_| {
+                panic!("Failed to create libp2p keypair from bytes");
+            });
+
+        let dht = StorbDHT::new(
+            config.db_dir.clone(),
+            config.dht.port.clone(),
+            libp2p_keypair,
+        )
+        .unwrap();
+
         let mut neuron = BaseNeuron {
             config: config.clone(),
             subtensor,
@@ -155,6 +171,8 @@ impl BaseNeuron {
                 .unwrap();
             info!("Successfully served axon!");
         }
+
+        dht.run().await.unwrap();
 
         Ok(neuron)
     }

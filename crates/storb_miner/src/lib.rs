@@ -1,6 +1,5 @@
 use bytes::Bytes;
 use miner::{Miner, MinerConfig};
-use neuron::dht::StorbDHT;
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
 use rcgen::generate_simple_self_signed;
@@ -73,10 +72,6 @@ async fn main(config: MinerConfig) {
         "Miner listening for chunks on quic://0.0.0.0:{}",
         config.neuron_config.api_port
     );
-
-    // TODO: Add error handling for the Swarm initialization.
-    let dht = StorbDHT::new().unwrap();
-    dht.run().await.unwrap();
 
     while let Some(incoming) = endpoint.accept().await {
         tokio::spawn(async move {
