@@ -12,7 +12,7 @@ use tokio::runtime::Handle;
 pub struct StorbStore {
     rec: Mutex<LruCache<RecordKey, Record>>,
     prv: Mutex<LruCache<RecordKey, Vec<ProviderRecord>>>,
-    pub db: Arc<RocksDBStore>,
+    db: Arc<RocksDBStore>,
 }
 
 impl StorbStore {
@@ -43,11 +43,21 @@ impl RecordStore for StorbStore {
         }
 
         let kb = k.as_ref();
-        // Attempt to load the serialized record from the default CF.
-        if let Ok(Some(bytes)) = Handle::current().block_on(self.db.get(CfType::Default, kb)) {
-            // Deserialize into the wrapper.
+
+        // Use block_in_place to safely perform a blocking wait.
+        let db_result = tokio::task::block_in_place(|| {
+            // Create a small single-threaded runtime to await our async call.
+            // (Note: Creating a runtime per call can be expensive. If this path is hit frequently,
+            // consider caching the runtime or, preferably, converting the function to async.)
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to build runtime");
+            rt.block_on(self.db.get(CfType::Default, kb))
+        });
+
+        if let Ok(Some(bytes)) = db_result {
             if let Ok(wrapper) = bincode::deserialize::<StorbRecord>(&bytes) {
-                // Convert wrapper into the original Record.
                 let rec: Record = wrapper.into();
                 // Cache the deserialized record.
                 self.rec
@@ -71,7 +81,9 @@ impl RecordStore for StorbStore {
         let wrapper = StorbRecord::from(r.clone());
         // MUST CATCH THIS PANIC IN THE CONTEXT OF THE CALLER
         let vb = bincode::serialize(&wrapper).expect("serialization failed");
-        Handle::current().block_on(self.db.schedule_put(kb, &vb));
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.db.schedule_put(kb, &vb))
+        });
         Ok(())
     }
 

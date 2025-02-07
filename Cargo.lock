@@ -12435,6 +12435,12 @@ version = "0.1.0"
 dependencies = [
  "crabtensor",
  "dirs 6.0.0",
+<<<<<<< HEAD
+=======
+ "ed25519",
+ "ed25519-dalek",
+ "futures",
+>>>>>>> 65e09fb (feat: add DHT API and integrate StorbDHT into the base neuron)
  "libp2p",
  "rand 0.9.0",
  "rocksdb",
@@ -12453,7 +12459,9 @@ dependencies = [
  "axum",
  "blake3",
  "bytes",
+ "crabtensor",
  "futures",
+ "libp2p",
  "quinn",
  "rand 0.9.0",
  "rcgen 0.13.2",
@@ -12475,6 +12483,7 @@ dependencies = [
  "axum",
  "crabtensor",
  "futures",
+ "libp2p",
  "quinn",
  "rand 0.9.0",
  "rcgen 0.13.2",
