@@ -213,7 +213,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             u64,
             &settings.min_stake_threshold
         ),
-        db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).to_string(),
+        db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).into(),
         pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
         subtensor: subtensor_config,
         neuron: neuron_config,
