@@ -5,6 +5,10 @@ use libp2p::kad::RecordKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Represents a chunk entry in the DHT.
+///
+/// Contains metadata for a chunk including its hash, associated piece hashes,
+/// and other relevant information along with a cryptographic signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkDHTValue {
     pub chunk_hash: RecordKey,
@@ -19,6 +23,10 @@ pub struct ChunkDHTValue {
     pub signature: Signature,
 }
 
+/// Represents a tracker entry in the DHT.
+///
+/// This struct holds the information required to track a file,
+/// including its infohash, filename, size parameters, and a cryptographic signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackerDHTValue {
     pub infohash: RecordKey,
@@ -32,12 +40,19 @@ pub struct TrackerDHTValue {
     pub signature: Signature,
 }
 
+/// Enum representing the type of a piece stored in the DHT.
+///
+/// It distinguishes between data and parity pieces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PieceType {
     Data,
     Parity,
 }
 
+/// Represents a piece entry in the DHT.
+///
+/// Contains the piece hash, indices indicating its position, its type,
+/// and a signature to ensure integrity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceDHTValue {
     pub piece_hash: RecordKey,
@@ -48,6 +63,9 @@ pub struct PieceDHTValue {
     pub signature: Signature,
 }
 
+/// Internal enumeration for DHT value types.
+///
+/// Each variant is represented as a single byte tag for serialization purposes.
 #[repr(u8)]
 enum DHTType {
     Chunk = 1,
@@ -55,6 +73,7 @@ enum DHTType {
     Tracker = 3,
 }
 
+/// Errors that can occur during DHT serialization or deserialization.
 #[derive(Error, Debug)]
 pub enum DHTError {
     #[error("Unknown DHT type tag: {0}")]
@@ -67,6 +86,7 @@ pub enum DHTError {
     SerializationError(#[from] bincode::Error),
 }
 
+/// Represents a DHT value, which can be a chunk, piece, or tracker entry.
 #[derive(Debug, PartialEq)]
 pub enum DHTValue {
     Chunk(ChunkDHTValue),
@@ -74,6 +94,15 @@ pub enum DHTValue {
     Tracker(TrackerDHTValue),
 }
 
+/// Serializes a DHTValue into a binary representation.
+///
+/// The output consists of a one-byte type tag followed by the bincode-serialized data
+/// of the corresponding value. This function uses little-endian encoding with fixed integer
+/// representation and rejects trailing bytes.
+///
+/// # Errors
+///
+/// Returns a `DHTError` if serialization fails.
 pub fn serialize_dht_value(value: &DHTValue) -> Result<Vec<u8>, DHTError> {
     let mut buf = Vec::new();
     let bincode_opts = bincode::DefaultOptions::new()
@@ -97,20 +126,28 @@ pub fn serialize_dht_value(value: &DHTValue) -> Result<Vec<u8>, DHTError> {
     Ok(buf)
 }
 
+/// Deserializes a byte slice into a DHTValue.
+///
+/// The function reads the first byte as a type tag and then uses bincode to decode
+/// the remaining bytes according to the specified type. It rejects extra trailing bytes.
+///
+/// # Errors
+///
+/// Returns a `DHTError` if the input is empty, the type tag is unknown, or if deserialization fails.
 pub fn deserialize_dht_value(bytes: &[u8]) -> Result<DHTValue, DHTError> {
     let bincode_opts = bincode::DefaultOptions::new()
         .with_little_endian()
         .with_fixint_encoding()
         .reject_trailing_bytes();
 
-    // Ensure there's at least one byte to read
+    // Ensure there's at least one byte to read.
     if bytes.is_empty() {
         return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Empty bytes").into());
     }
 
-    // The first byte is the tag
+    // The first byte is the type tag.
     let tag = bytes[0];
-    // Everything after the first byte is for bincode to parse the DHTValue
+    // The remaining bytes contain the serialized data.
     let rest = &bytes[1..];
 
     match tag {
@@ -135,6 +172,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    /// Creates a sample ChunkDHTValue for testing purposes.
     fn sample_chunk_dht_value() -> ChunkDHTValue {
         ChunkDHTValue {
             chunk_hash: RecordKey::new(&[0xAA; 32]),
@@ -150,6 +188,7 @@ mod tests {
         }
     }
 
+    /// Creates a sample PieceDHTValue for testing purposes.
     fn sample_piece_dht_value() -> PieceDHTValue {
         PieceDHTValue {
             piece_hash: RecordKey::new(&[0x99; 32]),
@@ -161,6 +200,7 @@ mod tests {
         }
     }
 
+    /// Creates a sample TrackerDHTValue for testing purposes.
     fn sample_tracker_dht_value() -> TrackerDHTValue {
         TrackerDHTValue {
             infohash: RecordKey::new(&[0x01; 32]),
@@ -175,6 +215,7 @@ mod tests {
         }
     }
 
+    /// Tests serialization and deserialization of a ChunkDHTValue.
     #[test]
     fn test_serialize_deserialize_chunk() {
         let chunk = sample_chunk_dht_value();
@@ -186,6 +227,7 @@ mod tests {
         assert_eq!(deserialized, DHTValue::Chunk(chunk));
     }
 
+    /// Tests serialization and deserialization of a PieceDHTValue.
     #[test]
     fn test_serialize_deserialize_piece() {
         let piece = sample_piece_dht_value();
@@ -197,6 +239,7 @@ mod tests {
         assert_eq!(deserialized, DHTValue::Piece(piece));
     }
 
+    /// Tests serialization and deserialization of a TrackerDHTValue.
     #[test]
     fn test_serialize_deserialize_tracker() {
         let tracker = sample_tracker_dht_value();
@@ -208,10 +251,11 @@ mod tests {
         assert_eq!(deserialized, DHTValue::Tracker(tracker));
     }
 
+    /// Tests that deserialization fails when encountering an unknown type tag.
     #[test]
     fn test_unknown_tag_deserialization() {
-        // Manually craft a buffer with a fake tag = 99
-        let bytes = [99, 0, 1, 2, 3, 4]; // The rest is random filler
+        // Manually craft a buffer with a fake tag = 99.
+        let bytes = [99, 0, 1, 2, 3, 4]; // The rest is random filler.
         let err = deserialize_dht_value(&bytes).unwrap_err();
         match err {
             DHTError::UnknownTag(tag) => assert_eq!(tag, 99),
@@ -219,19 +263,21 @@ mod tests {
         }
     }
 
+    /// Tests that deserialization rejects buffers with trailing bytes.
     #[test]
     fn test_trailing_bytes_rejected() {
-        // Serialize a valid ChunkDHTValue
+        // Serialize a valid ChunkDHTValue.
         let chunk = sample_chunk_dht_value();
         let dht_value = DHTValue::Chunk(chunk);
         let mut serialized = serialize_dht_value(&dht_value).expect("Serialization failed");
 
+        // Append extra trailing bytes.
         serialized.push(0xFF);
 
         let err = deserialize_dht_value(&serialized).unwrap_err();
         match err {
             DHTError::SerializationError(_inner) => {
-                // This is expected: Bincode sees leftover data
+                // Expected: bincode rejects extra trailing data.
             }
             e => panic!("Expected trailing byte error, got {:?}", e),
         }
