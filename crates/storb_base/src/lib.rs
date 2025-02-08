@@ -175,9 +175,10 @@ impl BaseNeuron {
                 .unwrap();
             info!("Successfully served axon!");
         }
-
-        dht.run().await.unwrap();
-
+        // start dht in background
+        tokio::spawn(async {
+            dht.run().await.unwrap();
+        });
         Ok(neuron)
     }
 

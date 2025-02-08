@@ -6,6 +6,10 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info};
 
+/// Configuration for the RocksDBStore.
+///
+/// This configuration includes the path to the database,
+/// the maximum number of operations in a batch, and the maximum delay before flushing a batch.
 #[derive(Debug, Clone)]
 pub struct RocksDBConfig {
     pub path: PathBuf,
@@ -13,7 +17,7 @@ pub struct RocksDBConfig {
     pub max_batch_delay: Duration,
 }
 
-/// An enum to indicate which column family to use.
+/// An enum indicating which column family to use in the database.
 #[derive(Debug, Clone, Copy)]
 pub enum CfType {
     Default,
@@ -21,6 +25,7 @@ pub enum CfType {
 }
 
 impl CfType {
+    /// Returns the name of the column family as a string slice.
     fn name(&self) -> &str {
         match self {
             CfType::Default => "default",
@@ -28,6 +33,9 @@ impl CfType {
         }
     }
 
+    /// Retrieves the handle for the column family from the given database.
+    ///
+    /// Returns an error if the column family is not found.
     fn handle<'a>(&self, db: &'a DB) -> Result<&'a ColumnFamily, Error> {
         let cf_name = self.name();
         db.cf_handle(cf_name).ok_or_else(|| {
@@ -39,6 +47,9 @@ impl CfType {
     }
 }
 
+/// Represents a database operation to be performed.
+///
+/// This enum supports both put and delete operations for a specified column family.
 pub enum DbOp {
     Put {
         cf: CfType,
@@ -51,12 +62,20 @@ pub enum DbOp {
     },
 }
 
+/// An asynchronous wrapper around a RocksDB instance.
+///
+/// This store encapsulates a RocksDB database and uses a background worker to process
+/// write operations in batches.
 pub struct RocksDBStore {
     pub db: Arc<DB>,
     sender: mpsc::Sender<DbOp>,
 }
 
 impl RocksDBStore {
+    /// Creates a new RocksDBStore with the provided configuration.
+    ///
+    /// This function initializes the database, creates any missing column families,
+    /// and spawns a background worker to process write operations in batches.
     pub fn new(config: RocksDBConfig) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
@@ -116,7 +135,9 @@ impl RocksDBStore {
         Ok(Self { db, sender })
     }
 
-    /// Schedules a put in the default CF.
+    /// Schedules a put operation in the default column family.
+    ///
+    /// The provided key and value are queued for an asynchronous write.
     pub async fn schedule_put(&self, key: &[u8], val: &[u8]) {
         let op = DbOp::Put {
             cf: CfType::Default,
@@ -128,7 +149,9 @@ impl RocksDBStore {
         }
     }
 
-    /// Schedules a delete in the default CF.
+    /// Schedules a delete operation in the default column family.
+    ///
+    /// The key provided will be queued for deletion.
     pub async fn schedule_delete(&self, key: &[u8]) {
         let op = DbOp::Del {
             cf: CfType::Default,
@@ -139,7 +162,9 @@ impl RocksDBStore {
         }
     }
 
-    /// Schedules a put in the provider CF.
+    /// Schedules a put operation in the provider column family.
+    ///
+    /// The provided key and value are queued for an asynchronous write in the provider CF.
     pub async fn schedule_put_provider(&self, key: &[u8], val: &[u8]) {
         let op = DbOp::Put {
             cf: CfType::Provider,
@@ -151,7 +176,9 @@ impl RocksDBStore {
         }
     }
 
-    /// Schedules a delete in the provider CF.
+    /// Schedules a delete operation in the provider column family.
+    ///
+    /// The key provided will be queued for deletion in the provider CF.
     pub async fn schedule_delete_provider(&self, key: &[u8]) {
         let op = DbOp::Del {
             cf: CfType::Provider,
@@ -162,7 +189,9 @@ impl RocksDBStore {
         }
     }
 
-    /// Retrieves a value from the specified column family.
+    /// Retrieves a value from the specified column family using the provided key.
+    ///
+    /// This function spawns a blocking task to perform the database read operation.
     pub async fn get(&self, cf: CfType, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let db = self.db.clone();
         let key = key.to_vec();
@@ -178,6 +207,10 @@ impl RocksDBStore {
         .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
     }
 
+    /// Background worker that processes queued database operations in batches.
+    ///
+    /// This internal asynchronous function collects operations into a WriteBatch,
+    /// waits for a maximum delay or batch size to be reached, and then writes them atomically.
     async fn bg_worker(
         db: Arc<DB>,
         mut rx: mpsc::Receiver<DbOp>,
@@ -242,7 +275,9 @@ impl RocksDBStore {
         }
     }
 
-    /// Applies a DbOp to the WriteBatch.
+    /// Applies a database operation to the given write batch.
+    ///
+    /// This internal function updates the WriteBatch with either a put or delete operation.
     fn apply_op(db: &DB, batch: &mut WriteBatch, op: DbOp) -> Result<(), Error> {
         match op {
             DbOp::Put { cf, key, val } => {
@@ -267,6 +302,7 @@ impl RocksDBStore {
         Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use std::sync::Once;
