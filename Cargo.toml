@@ -39,7 +39,6 @@ futures = "0.3.31"
 libp2p = { version = "0.55.0", features = ["full", "serde"] }
 lru = "0.13.0"
 quinn = "0.11.2"
-libp2p = { version = "0.55.0", features = ["full"] }
 rand = "0.9.0"
 rcgen = { version = "0.13.2", features = ["crypto", "pem", "ring"] }
 rocksdb = "0.23.0"
