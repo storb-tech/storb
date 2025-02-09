@@ -242,20 +242,23 @@ impl StorbDHT {
                     if let Some(QueryChannel::GetRecord(ref mut quorum, ref mut records, _)) =
                         queries.get_mut(&query_id)
                     {
-                        match res {
-                            GetRecordOk::FoundRecord(record) => records.push(record),
-                            GetRecordOk::FinishedWithNoAdditionalRecord { .. } => {}
+                        if let GetRecordOk::FoundRecord(record) = res {
+                            records.push(record);
                         }
 
+                        // If this is the last response or we've met the required quorum...
                         if last || records.len() >= *quorum {
-                            if let Some(mut q) = self.swarm.behaviour_mut().kademlia.query_mut(&id)
+                            // Finish the query in the Kademlia behaviour.
+                            if let Some(mut query) =
+                                self.swarm.behaviour_mut().kademlia.query_mut(&id)
                             {
-                                q.finish();
+                                query.finish();
                             }
-                            if let Some(QueryChannel::GetRecord(_, records, ch)) =
+                            // Remove the query channel and send back the accumulated records.
+                            if let Some(QueryChannel::GetRecord(_, records, sender)) =
                                 queries.remove(&query_id)
                             {
-                                let _ = ch.send(Ok(records));
+                                let _ = sender.send(Ok(records));
                             }
                         }
                     }
@@ -359,142 +362,141 @@ impl StorbDHT {
     pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
         loop {
             let event: SwarmEvent<StorbEvent> = self.swarm.select_next_some().await;
-            let queries_ref = self.queries.clone();
-            {
-                let mut queries = queries_ref.lock().await;
+            let queries_clone = self.queries.clone();
+            let mut queries = queries_clone.lock().await;
 
-                match event {
-                    SwarmEvent::NewListenAddr { address, .. } => {
-                        debug!("Swarm is listening on {:?}", address);
-                    }
-                    SwarmEvent::Behaviour(event) => match event {
-                        StorbEvent::Mdns(event) => {
-                            self.inject_mdns_event(event);
-                        }
-                        StorbEvent::Kademlia(event) => {
-                            self.inject_kad_event(event, &mut queries);
-                        }
-                        StorbEvent::Identify(event) => {
-                            trace!("Identify event: {:?}", event);
-                        }
-                        StorbEvent::Ping(event) => {
-                            trace!("Ping event: {:?}", event);
-                        }
-                    },
-                    SwarmEvent::ConnectionEstablished {
-                        peer_id,
-                        connection_id,
-                        endpoint,
-                        num_established,
-                        concurrent_dial_errors,
-                        established_in,
-                    } => {
-                        trace!(
-                            "Connection established: {:?} to {:?}",
-                            connection_id,
-                            peer_id
-                        );
-                        trace!("Endpoint: {:?}", endpoint);
-                        trace!("Num established: {:?}", num_established);
-                        trace!("Concurrent dial errors: {:?}", concurrent_dial_errors);
-                        trace!("Established in: {:?}", established_in);
-                    }
-                    SwarmEvent::ConnectionClosed {
-                        peer_id,
-                        connection_id,
-                        endpoint,
-                        num_established,
-                        cause,
-                    } => {
-                        trace!("Connection closed: {:?} to {:?}", connection_id, peer_id);
-                        trace!("Endpoint: {:?}", endpoint);
-                        trace!("Num established: {:?}", num_established);
-                        trace!("Cause: {:?}", cause);
-                    }
-                    SwarmEvent::IncomingConnection {
-                        connection_id,
-                        local_addr,
-                        send_back_addr,
-                    } => {
-                        trace!(
-                            "Incoming connection: {:?} from {:?}",
-                            connection_id,
-                            local_addr
-                        );
-                        trace!("Send back address: {:?}", send_back_addr);
-                    }
-                    SwarmEvent::IncomingConnectionError {
-                        connection_id,
-                        local_addr,
-                        send_back_addr,
-                        error,
-                    } => {
-                        trace!(
-                            "Incoming connection error: {:?} from {:?}",
-                            connection_id,
-                            local_addr
-                        );
-                        trace!("Send back address: {:?}", send_back_addr);
-                        trace!("Error: {:?}", error);
-                    }
-                    SwarmEvent::OutgoingConnectionError {
-                        connection_id,
-                        peer_id,
-                        error,
-                    } => {
-                        trace!(
-                            "Outgoing connection error: {:?} to {:?}",
-                            connection_id,
-                            peer_id
-                        );
-                        trace!("Error: {:?}", error);
-                    }
-                    SwarmEvent::ExpiredListenAddr {
-                        listener_id,
-                        address,
-                    } => {
-                        trace!(
-                            "Expired listen address: {:?} from {:?}",
-                            listener_id,
-                            address
-                        );
-                    }
-                    SwarmEvent::ListenerClosed {
-                        listener_id,
-                        addresses,
-                        reason,
-                    } => {
-                        trace!("Listener closed: {:?} from {:?}", listener_id, addresses);
-                        trace!("Reason: {:?}", reason);
-                    }
-                    SwarmEvent::ListenerError { listener_id, error } => {
-                        trace!("Listener error: {:?} from {:?}", listener_id, error);
-                    }
-                    SwarmEvent::Dialing {
-                        peer_id,
-                        connection_id,
-                    } => {
-                        trace!("Dialing: {:?} to {:?}", connection_id, peer_id);
-                    }
-                    SwarmEvent::NewExternalAddrCandidate { address } => {
-                        trace!("New external address candidate: {:?}", address);
-                    }
-                    SwarmEvent::ExternalAddrConfirmed { address } => {
-                        trace!("External address confirmed: {:?}", address);
-                    }
-                    SwarmEvent::ExternalAddrExpired { address } => {
-                        trace!("External address expired: {:?}", address);
-                    }
-                    SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
-                        trace!(
-                            "New external address of peer: {:?} at {:?}",
-                            peer_id,
-                            address
-                        );
-                    }
-                    _ => {}
+            match event {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    debug!("Swarm is listening on {:?}", address);
                 }
+                SwarmEvent::Behaviour(event) => match event {
+                    StorbEvent::Mdns(event) => {
+                        self.inject_mdns_event(event);
+                    }
+                    StorbEvent::Kademlia(event) => {
+                        self.inject_kad_event(event, &mut queries);
+                    }
+                    StorbEvent::Identify(event) => {
+                        trace!("Identify event: {:?}", event);
+                    }
+                    StorbEvent::Ping(event) => {
+                        trace!("Ping event: {:?}", event);
+                    }
+                },
+                SwarmEvent::ConnectionEstablished {
+                    peer_id,
+                    connection_id,
+                    endpoint,
+                    num_established,
+                    concurrent_dial_errors,
+                    established_in,
+                } => {
+                    trace!(
+                        "Connection established: {:?} to {:?}",
+                        connection_id,
+                        peer_id
+                    );
+                    trace!("Endpoint: {:?}", endpoint);
+                    trace!("Num established: {:?}", num_established);
+                    trace!("Concurrent dial errors: {:?}", concurrent_dial_errors);
+                    trace!("Established in: {:?}", established_in);
+                }
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    connection_id,
+                    endpoint,
+                    num_established,
+                    cause,
+                } => {
+                    trace!("Connection closed: {:?} to {:?}", connection_id, peer_id);
+                    trace!("Endpoint: {:?}", endpoint);
+                    trace!("Num established: {:?}", num_established);
+                    trace!("Cause: {:?}", cause);
+                }
+                SwarmEvent::IncomingConnection {
+                    connection_id,
+                    local_addr,
+                    send_back_addr,
+                } => {
+                    trace!(
+                        "Incoming connection: {:?} from {:?}",
+                        connection_id,
+                        local_addr
+                    );
+                    trace!("Send back address: {:?}", send_back_addr);
+                }
+                SwarmEvent::IncomingConnectionError {
+                    connection_id,
+                    local_addr,
+                    send_back_addr,
+                    error,
+                } => {
+                    trace!(
+                        "Incoming connection error: {:?} from {:?}",
+                        connection_id,
+                        local_addr
+                    );
+                    trace!("Send back address: {:?}", send_back_addr);
+                    trace!("Error: {:?}", error);
+                }
+                SwarmEvent::OutgoingConnectionError {
+                    connection_id,
+                    peer_id,
+                    error,
+                } => {
+                    trace!(
+                        "Outgoing connection error: {:?} to {:?}",
+                        connection_id,
+                        peer_id
+                    );
+                    trace!("Error: {:?}", error);
+                }
+                SwarmEvent::ExpiredListenAddr {
+                    listener_id,
+                    address,
+                } => {
+                    trace!(
+                        "Expired listen address: {:?} from {:?}",
+                        listener_id,
+                        address
+                    );
+                }
+                SwarmEvent::ListenerClosed {
+                    listener_id,
+                    addresses,
+                    reason,
+                } => {
+                    trace!("Listener closed: {:?} from {:?}", listener_id, addresses);
+                    trace!("Reason: {:?}", reason);
+                }
+                SwarmEvent::ListenerError { listener_id, error } => {
+                    trace!("Listener error: {:?} from {:?}", listener_id, error);
+                }
+                SwarmEvent::Dialing {
+                    peer_id,
+                    connection_id,
+                } => {
+                    trace!("Dialing: {:?} to {:?}", connection_id, peer_id);
+                }
+                SwarmEvent::NewExternalAddrCandidate { address } => {
+                    trace!("New external address candidate: {:?}", address);
+                }
+                SwarmEvent::ExternalAddrConfirmed { address } => {
+                    trace!("External address confirmed: {:?}", address);
+                }
+                SwarmEvent::ExternalAddrExpired { address } => {
+                    trace!("External address expired: {:?}", address);
+                }
+                SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
+                    trace!(
+                        "New external address of peer: {:?} at {:?}",
+                        peer_id,
+                        address
+                    );
+                }
+                _ => {}
             }
+            drop(queries);
         }
     }
 
