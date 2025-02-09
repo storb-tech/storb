@@ -6,6 +6,9 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info};
 
+// TODO: is this a good size?
+const DB_CHANNEL_BUF_SIZE: usize = 100;
+
 /// Configuration for the RocksDBStore.
 ///
 /// This configuration includes the path to the database,
@@ -120,7 +123,7 @@ impl RocksDBStore {
         debug!("Successfully opened DB with all column families.");
 
         // Create an mpsc channel for scheduling operations.
-        let (sender, receiver) = mpsc::channel(100);
+        let (sender, receiver) = mpsc::channel(DB_CHANNEL_BUF_SIZE);
         let db_clone = db.clone();
         tokio::spawn(async move {
             Self::bg_worker(
@@ -204,7 +207,6 @@ impl RocksDBStore {
         })
         .await
         .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
-        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
     }
 
     /// Background worker that processes queued database operations in batches.
@@ -324,10 +326,10 @@ mod tests {
 
     fn setup_logging() {
         INIT.call_once(|| {
-            tracing_subscriber::fmt()
+            let _ = tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::DEBUG)
                 .with_test_writer() // This ensures output goes to the test console
-                .init();
+                .try_init();
         });
     }
 
@@ -358,7 +360,7 @@ mod tests {
         };
         let piece_val = PieceDHTValue {
             piece_hash: RecordKey::new(&[4u8; 32]),
-            validator_id: 777,
+            validator_id: 77,
             chunk_idx: 456,
             piece_idx: 2,
             piece_type: PieceType::Data,
@@ -366,7 +368,7 @@ mod tests {
         };
         let tracker_val = TrackerDHTValue {
             infohash: RecordKey::new(&[5u8; 32]),
-            validator_id: 999,
+            validator_id: 99,
             filename: "example.txt".to_string(),
             length: 4096,
             chunk_size: 512,

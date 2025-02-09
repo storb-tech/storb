@@ -8,9 +8,6 @@ crate-type = ["lib"]
 path = "src/lib.rs"
 name = "base"
 
-[dev-dependencies]
-tempfile = "3.2.0" 
-
 [dependencies]
 bincode.workspace = true
 blake3.workspace = true
@@ -26,6 +23,7 @@ rocksdb.workspace = true
 rustls.workspace = true
 subxt.workspace = true
 serde.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

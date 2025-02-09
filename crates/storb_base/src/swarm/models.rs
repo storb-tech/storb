@@ -12,7 +12,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkDHTValue {
     pub chunk_hash: RecordKey,
-    pub validator_id: u32,
+    pub validator_id: u8,
     pub piece_hashes: Vec<[u8; 32]>,
     pub chunk_idx: u64,
     pub k: u64,
@@ -30,7 +30,7 @@ pub struct ChunkDHTValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackerDHTValue {
     pub infohash: RecordKey,
-    pub validator_id: u32,
+    pub validator_id: u8,
     pub filename: String,
     pub length: u64,
     pub chunk_size: u64,
@@ -56,7 +56,7 @@ pub enum PieceType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceDHTValue {
     pub piece_hash: RecordKey,
-    pub validator_id: u32,
+    pub validator_id: u8,
     pub chunk_idx: u64,
     pub piece_idx: u64,
     pub piece_type: PieceType,
@@ -176,7 +176,7 @@ mod tests {
     fn sample_chunk_dht_value() -> ChunkDHTValue {
         ChunkDHTValue {
             chunk_hash: RecordKey::new(&[0xAA; 32]),
-            validator_id: 1234,
+            validator_id: 128,
             piece_hashes: vec![[0xBB; 32], [0xCC; 32]],
             chunk_idx: 42,
             k: 2,
@@ -192,7 +192,7 @@ mod tests {
     fn sample_piece_dht_value() -> PieceDHTValue {
         PieceDHTValue {
             piece_hash: RecordKey::new(&[0x99; 32]),
-            validator_id: 98765,
+            validator_id: 98,
             chunk_idx: 55,
             piece_idx: 99,
             piece_type: PieceType::Data,
@@ -204,7 +204,7 @@ mod tests {
     fn sample_tracker_dht_value() -> TrackerDHTValue {
         TrackerDHTValue {
             infohash: RecordKey::new(&[0x01; 32]),
-            validator_id: 666,
+            validator_id: 66,
             filename: "myfile.txt".to_string(),
             length: 123456,
             chunk_size: 4096,

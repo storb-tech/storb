@@ -173,10 +173,10 @@ impl BaseNeuron {
             config.dht.port.clone(),
             libp2p_keypair,
         )
-        .unwrap();
+        .expect("Failed to create StorbDHT instance");
 
         tokio::spawn(async {
-            dht.run().await.unwrap();
+            dht.run().await.expect("Failed to run StorbDHT");
         });
 
         Ok(neuron)

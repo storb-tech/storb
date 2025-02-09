@@ -139,8 +139,8 @@ impl StorbDHT {
         })?;
         let store = StorbStore::new(
             std::sync::Arc::new(db),
-            NonZeroUsize::new(20).unwrap(), // 20 is non-zero.
-            NonZeroUsize::new(20).unwrap(),
+            NonZeroUsize::new(20).ok_or("Invalid size parameter")?,
+            NonZeroUsize::new(20).ok_or("Invalid size parameter")?,
         );
 
         // Create Kademlia with a minimal configuration.
@@ -527,10 +527,10 @@ impl StorbDHT {
             .kademlia
             .put_record(record, Quorum::Majority)
             .map_err(|e| format!("Failed to store tracker entry: {:?}", e))?;
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::PutRecord(tx));
-        }
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        drop(queries);
 
         // Wait for the tx response with a timeout of 10 seconds.
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
@@ -612,10 +612,11 @@ impl StorbDHT {
             .kademlia
             .put_record(record, Quorum::Majority)
             .map_err(|e| format!("Failed to store chunk entry: {:?}", e))?;
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::PutRecord(tx));
-        }
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        drop(queries);
+
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
             Ok(result) => match result {
                 Ok(Ok(())) => {}
@@ -644,27 +645,27 @@ impl StorbDHT {
             .behaviour_mut()
             .kademlia
             .get_record(chunk_key.into());
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
-        }
-        let records = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(records)) => records,
-                Ok(Err(_)) => return Err("Failed to get chunk entry".into()),
-                Err(_) => return Err("Timed out waiting for get_chunk_entry response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for get_chunk_entry response.".into()),
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        drop(queries);
+
+        let timeout = Duration::from_secs(DHT_QUERY_TIMEOUT);
+        let records = tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| "Timed out waiting for get_chunk_entry response.")?
+            .map_err(|_| "Failed to receive response")?
+            .map_err(|_| "Failed to get chunk entry")?;
+
+        let record = match records.first() {
+            None => return Ok(None),
+            Some(r) => r,
         };
-        if let Some(record) = records.first() {
-            let dht_value = models::deserialize_dht_value(&record.record.value)?;
-            if let models::DHTValue::Chunk(chunk) = dht_value {
-                Ok(Some(chunk))
-            } else {
-                Err("Record retrieved is not a chunk entry".into())
-            }
-        } else {
-            Ok(None)
+
+        let dht_value = models::deserialize_dht_value(&record.record.value)?;
+        match dht_value {
+            models::DHTValue::Chunk(chunk) => Ok(Some(chunk)),
+            _ => Err("Record retrieved is not a chunk entry".into()),
         }
     }
 
@@ -695,10 +696,11 @@ impl StorbDHT {
             .kademlia
             .put_record(record, Quorum::Majority)
             .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::PutRecord(tx));
-        }
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        drop(queries);
+
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
             Ok(result) => match result {
                 Ok(Ok(())) => {}
@@ -727,27 +729,29 @@ impl StorbDHT {
             .behaviour_mut()
             .kademlia
             .get_record(piece_key.into());
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
-        }
-        let records = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(records)) => records,
-                Ok(Err(_)) => return Err("Failed to get piece entry".into()),
-                Err(_) => return Err("Timed out waiting for get_piece_entry response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for get_piece_entry response.".into()),
+
+        // Insert query channel
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        drop(queries);
+
+        // Wait for response with timeout
+        let timeout = Duration::from_secs(DHT_QUERY_TIMEOUT);
+        let records = tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| "Timed out waiting for get_piece_entry response.")?
+            .map_err(|_| "Failed to receive response")?
+            .map_err(|_| "Failed to get piece entry")?;
+
+        let record = match records.first() {
+            None => return Ok(None),
+            Some(r) => r,
         };
-        if let Some(record) = records.first() {
-            let dht_value = models::deserialize_dht_value(&record.record.value)?;
-            if let models::DHTValue::Piece(piece) = dht_value {
-                Ok(Some(piece))
-            } else {
-                Err("Record retrieved is not a piece entry".into())
-            }
-        } else {
-            Ok(None)
+
+        let dht_value = models::deserialize_dht_value(&record.record.value)?;
+        match dht_value {
+            models::DHTValue::Piece(piece) => Ok(Some(piece)),
+            _ => Err("Record retrieved is not a piece entry".into()),
         }
     }
 
@@ -768,10 +772,11 @@ impl StorbDHT {
             .kademlia
             .start_providing(piece_key.into())
             .map_err(|e| format!("Failed to start providing piece: {:?}", e))?;
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::StartProviding(tx));
-        }
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::StartProviding(tx));
+        drop(queries);
+
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
             Ok(result) => match result {
                 Ok(Ok(())) => {}
@@ -800,10 +805,11 @@ impl StorbDHT {
             .behaviour_mut()
             .kademlia
             .get_providers(piece_key.into());
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::GetProviders(HashSet::new(), tx));
-        }
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::GetProviders(HashSet::new(), tx));
+        drop(queries);
+
         let providers = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await
         {
             Ok(result) => match result {
