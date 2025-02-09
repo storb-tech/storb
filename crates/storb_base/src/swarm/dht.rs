@@ -563,10 +563,9 @@ impl StorbDHT {
             .behaviour_mut()
             .kademlia
             .get_record(infohash.into());
-        {
-            let mut queries = self.queries.lock().await;
-            queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
-        }
+        let mut queries = self.queries.lock().await;
+        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        drop(queries);
         let records = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
             Ok(result) => match result {
                 Ok(Ok(records)) => records,
