@@ -1,6 +1,7 @@
 pub mod constants;
 pub mod piece;
 pub mod piece_hash;
+pub mod swarm;
 
 use crabtensor::{
     api::apis,
@@ -10,10 +11,12 @@ use crabtensor::{
     wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer},
     AccountId,
 };
+use ed25519_dalek::{SecretKey, SigningKey};
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+use swarm::dht::StorbDHT;
 use tracing::info;
 
 #[derive(Debug)]
@@ -76,7 +79,7 @@ pub struct BaseNeuronConfig {
     pub load_old_nodes: bool,
     pub min_stake_threshold: u64,
 
-    pub db_dir: String,
+    pub db_dir: PathBuf,
     pub pem_file: String,
 
     pub subtensor: SubtensorConfig,
@@ -158,6 +161,24 @@ impl BaseNeuron {
             info!("Successfully served axon!");
         }
 
+        let secret_key = SecretKey::from(seed);
+        let keypair_bytes = SigningKey::from(secret_key).to_bytes();
+        let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(keypair_bytes)
+            .unwrap_or_else(|_| {
+                panic!("Failed to create libp2p keypair from bytes");
+            });
+
+        let dht = StorbDHT::new(
+            config.db_dir.clone(),
+            config.dht.port.clone(),
+            libp2p_keypair,
+        )
+        .expect("Failed to create StorbDHT instance");
+
+        tokio::spawn(async {
+            dht.run().await.expect("Failed to run StorbDHT");
+        });
+
         Ok(neuron)
     }
 
@@ -238,7 +259,7 @@ mod tests {
             mock: false,
             load_old_nodes: false,
             min_stake_threshold: 0,
-            db_dir: "./test.db".to_string(),
+            db_dir: "./test.db".into(),
             pem_file: "cert.pem".to_string(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
