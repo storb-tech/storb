@@ -6,8 +6,7 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info};
 
-// TODO: is this a good size?
-const DB_CHANNEL_BUF_SIZE: usize = 100;
+use crate::constants::DB_MPSC_BUFFER_SIZE;
 
 /// Configuration for the RocksDBStore.
 ///
@@ -123,7 +122,7 @@ impl RocksDBStore {
         debug!("Successfully opened DB with all column families.");
 
         // Create an mpsc channel for scheduling operations.
-        let (sender, receiver) = mpsc::channel(DB_CHANNEL_BUF_SIZE);
+        let (sender, receiver) = mpsc::channel(DB_MPSC_BUFFER_SIZE);
         let db_clone = db.clone();
         tokio::spawn(async move {
             Self::bg_worker(
