@@ -13,7 +13,9 @@ in
 
     buildInputs = [
       pkgs.rustToolchain
+      pkgs.llvmPackages_18.clang
     ];
 
     LD_LIBRARY_PATH = lib.makeLibraryPath buildInputs;
+    LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
   }
