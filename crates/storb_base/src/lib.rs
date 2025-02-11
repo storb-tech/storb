@@ -168,12 +168,8 @@ impl BaseNeuron {
                 panic!("Failed to create libp2p keypair from bytes");
             });
 
-        let dht = StorbDHT::new(
-            config.db_dir.clone(),
-            config.dht.port.clone(),
-            libp2p_keypair,
-        )
-        .expect("Failed to create StorbDHT instance");
+        let dht = StorbDHT::new(config.db_dir.clone(), config.dht.port, libp2p_keypair)
+            .expect("Failed to create StorbDHT instance");
 
         tokio::spawn(async {
             dht.run().await.expect("Failed to run StorbDHT");

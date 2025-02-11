@@ -33,15 +33,15 @@ impl From<Record> for StorbRecord {
     }
 }
 
-impl Into<Record> for StorbRecord {
+impl From<StorbRecord> for Record {
     /// Converts a `StorbRecord` into a libp2p `Record`.
     ///
     /// The resulting record will have `expires` set to `None`.
-    fn into(self) -> Record {
+    fn from(record: StorbRecord) -> Self {
         Record {
-            key: self.key,
-            value: self.value,
-            publisher: self.publisher,
+            key: record.key,
+            value: record.value,
+            publisher: record.publisher,
             expires: None,
         }
     }
@@ -56,11 +56,11 @@ pub struct StorbProviderRecord {
     pub key: RecordKey,
     /// The peer that provides the record.
     pub provider: PeerId,
+    /// A list of network addresses associated with the provider.
+    pub addresses: Vec<Multiaddr>,
     /// The expiration time of the record, skipped during serialization.
     #[serde(skip)]
     pub expires: Option<u64>,
-    /// A list of network addresses associated with the provider.
-    pub addresses: Vec<Multiaddr>,
 }
 
 impl From<ProviderRecord> for StorbProviderRecord {
@@ -71,22 +71,22 @@ impl From<ProviderRecord> for StorbProviderRecord {
         StorbProviderRecord {
             key: p.key,
             provider: p.provider,
-            expires: None,
             addresses: p.addresses,
+            expires: None,
         }
     }
 }
 
-impl Into<ProviderRecord> for StorbProviderRecord {
+impl From<StorbProviderRecord> for ProviderRecord {
     /// Converts a `StorbProviderRecord` into a libp2p `ProviderRecord`.
     ///
     /// The resulting provider record will have `expires` set to `None`.
-    fn into(self) -> ProviderRecord {
+    fn from(record: StorbProviderRecord) -> Self {
         ProviderRecord {
-            key: self.key.into(),
-            provider: self.provider,
+            key: record.key,
+            provider: record.provider,
+            addresses: record.addresses,
             expires: None,
-            addresses: self.addresses,
         }
     }
 }

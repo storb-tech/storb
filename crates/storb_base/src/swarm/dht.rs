@@ -50,7 +50,7 @@ pub enum StorbEvent {
     /// Event from the mDNS protocol.
     Mdns(mdns::Event),
     /// Event from the Identify protocol.
-    Identify(identify::Event),
+    Identify(Box<identify::Event>),
     /// Event from the Ping protocol.
     Ping(ping::Event),
 }
@@ -69,7 +69,7 @@ impl From<mdns::Event> for StorbEvent {
 
 impl From<identify::Event> for StorbEvent {
     fn from(event: identify::Event) -> Self {
-        StorbEvent::Identify(event)
+        StorbEvent::Identify(Box::new(event))
     }
 }
 
@@ -211,7 +211,7 @@ impl StorbDHT {
             ..
         } = event
         {
-            let query_id: QueryId = id.into();
+            let query_id = id;
 
             match result {
                 QueryResult::Bootstrap(Ok(BootstrapOk {
@@ -514,9 +514,9 @@ impl StorbDHT {
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Tracker(value))?;
         let record = Record {
-            key: infohash.clone().into(),
+            key: infohash.clone(),
             value: serialized_value,
-            publisher: Some(self.swarm.local_peer_id().clone()),
+            publisher: Some(*self.swarm.local_peer_id()),
             expires: None,
         };
 
@@ -531,7 +531,7 @@ impl StorbDHT {
             .map_err(|e| format!("Failed to store tracker entry: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        queries.insert(id, QueryChannel::PutRecord(tx));
         drop(queries);
 
         // Wait for the tx response with a timeout of 10 seconds.
@@ -558,13 +558,9 @@ impl StorbDHT {
         // Create a oneshot channel for the get operation.
         let (tx, rx) = oneshot::channel();
         let quorum = 1;
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .get_record(infohash.into());
+        let id = self.swarm.behaviour_mut().kademlia.get_record(infohash);
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
         drop(queries);
         let records = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
             Ok(result) => match result {
@@ -600,9 +596,9 @@ impl StorbDHT {
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Chunk(value))?;
         let record = Record {
-            key: chunk_key.clone().into(),
+            key: chunk_key.clone(),
             value: serialized_value,
-            publisher: Some(self.swarm.local_peer_id().clone()),
+            publisher: Some(*self.swarm.local_peer_id()),
             expires: None,
         };
 
@@ -615,7 +611,7 @@ impl StorbDHT {
             .map_err(|e| format!("Failed to store chunk entry: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        queries.insert(id, QueryChannel::PutRecord(tx));
         drop(queries);
 
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
@@ -641,14 +637,10 @@ impl StorbDHT {
 
         let (tx, rx) = oneshot::channel();
         let quorum = 1;
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .get_record(chunk_key.into());
+        let id = self.swarm.behaviour_mut().kademlia.get_record(chunk_key);
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
         drop(queries);
 
         let timeout = Duration::from_secs(DHT_QUERY_TIMEOUT);
@@ -684,9 +676,9 @@ impl StorbDHT {
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Piece(value))?;
         let record = Record {
-            key: piece_key.clone().into(),
+            key: piece_key.clone(),
             value: serialized_value,
-            publisher: Some(self.swarm.local_peer_id().clone()),
+            publisher: Some(*self.swarm.local_peer_id()),
             expires: None,
         };
 
@@ -699,7 +691,7 @@ impl StorbDHT {
             .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::PutRecord(tx));
+        queries.insert(id, QueryChannel::PutRecord(tx));
         drop(queries);
 
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
@@ -725,15 +717,11 @@ impl StorbDHT {
 
         let (tx, rx) = oneshot::channel();
         let quorum = 1;
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .get_record(piece_key.into());
+        let id = self.swarm.behaviour_mut().kademlia.get_record(piece_key);
 
         // Insert query channel
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::GetRecord(quorum, vec![], tx));
+        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
         drop(queries);
 
         // Wait for response with timeout
@@ -771,11 +759,11 @@ impl StorbDHT {
             .swarm
             .behaviour_mut()
             .kademlia
-            .start_providing(piece_key.into())
+            .start_providing(piece_key)
             .map_err(|e| format!("Failed to start providing piece: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::StartProviding(tx));
+        queries.insert(id, QueryChannel::StartProviding(tx));
         drop(queries);
 
         match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
@@ -801,14 +789,10 @@ impl StorbDHT {
         self.wait_for_bootstrap().await?;
 
         let (tx, rx) = oneshot::channel();
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .get_providers(piece_key.into());
+        let id = self.swarm.behaviour_mut().kademlia.get_providers(piece_key);
 
         let mut queries = self.queries.lock().await;
-        queries.insert(id.into(), QueryChannel::GetProviders(HashSet::new(), tx));
+        queries.insert(id, QueryChannel::GetProviders(HashSet::new(), tx));
         drop(queries);
 
         let providers = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await
