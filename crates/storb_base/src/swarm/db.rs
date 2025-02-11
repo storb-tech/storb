@@ -282,7 +282,7 @@ impl RocksDBStore {
     fn apply_op(db: &DB, batch: &mut WriteBatch, op: DbOp) -> Result<(), Error> {
         match op {
             DbOp::Put { cf, key, val } => {
-                let cf_handle = cf.handle(&db).map_err(|e| {
+                let cf_handle = cf.handle(db).map_err(|e| {
                     Error::new(
                         ErrorKind::NotFound,
                         format!("Column family not found: {}", e),
@@ -291,7 +291,7 @@ impl RocksDBStore {
                 batch.put_cf(cf_handle, &key, &val);
             }
             DbOp::Del { cf, key } => {
-                let cf_handle = cf.handle(&db).map_err(|e| {
+                let cf_handle = cf.handle(db).map_err(|e| {
                     Error::new(
                         ErrorKind::NotFound,
                         format!("Column family not found: {}", e),

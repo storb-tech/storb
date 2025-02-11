@@ -276,7 +276,7 @@ mod tests {
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
         rand::rng().fill_bytes(&mut test_data);
 
-        let chunk_size = piece_length(TEST_FILE_SIZE.try_into().unwrap(), None, None) as u64;
+        let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let num_chunks = ((TEST_FILE_SIZE as f64) / (chunk_size as f64)).ceil() as usize;
 
         let mut chunks: Vec<EncodedChunk> = Vec::new();
@@ -287,11 +287,7 @@ mod tests {
             let chunk_info = encode_chunk(chunk, chunk_idx.try_into().unwrap());
             chunks.push(chunk_info.clone());
 
-            let piece_size = piece_length(
-                chunk_info.original_chunk_size.try_into().unwrap(),
-                None,
-                None,
-            );
+            let piece_size = piece_length(chunk_info.original_chunk_size, None, None);
             let pieces_per_block =
                 ((chunk_info.chunk_size as f64) / (piece_size as f64)).ceil() as usize;
             let num_pieces = chunk_info.m as usize * pieces_per_block;
@@ -324,7 +320,7 @@ mod tests {
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
         rand::rng().fill_bytes(&mut test_data);
 
-        let chunk_size = piece_length(TEST_FILE_SIZE.try_into().unwrap(), None, None) as u64;
+        let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let mut chunks: Vec<EncodedChunk> = Vec::new();
         let mut pieces: Vec<Piece> = Vec::new();
 
@@ -348,7 +344,7 @@ mod tests {
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
         rand::rng().fill_bytes(&mut test_data);
 
-        let chunk_size = piece_length(TEST_FILE_SIZE.try_into().unwrap(), None, None) as u64;
+        let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let mut chunks: Vec<EncodedChunk> = Vec::new();
         let mut pieces: Vec<Piece> = Vec::new();
 
