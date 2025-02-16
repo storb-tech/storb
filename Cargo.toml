@@ -19,7 +19,7 @@ storb_miner = { version = "*", path = "crates/storb_miner" }
 storb_validator = { version = "*", path = "crates/storb_validator" }
 
 # Crabtensor
-crabtensor = { git = "https://github.com/fr34kcoders/crabtensor.git", rev = "b91e3272917ce01993fd10bfd685e0ebe588aa86" }
+crabtensor = { git = "https://github.com/fr34kcoders/crabtensor.git", version = "0.4.1" }
 sp-runtime = "=39.0.2"
 subxt = "=0.38.0"
 

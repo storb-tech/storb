@@ -2059,8 +2059,8 @@ dependencies = [
 
 [[package]]
 name = "crabtensor"
-version = "0.3.0"
-source = "git+https://github.com/fr34kcoders/crabtensor.git?rev=b91e3272917ce01993fd10bfd685e0ebe588aa86#b91e3272917ce01993fd10bfd685e0ebe588aa86"
+version = "0.4.1"
+source = "git+https://github.com/fr34kcoders/crabtensor.git#f367e6103df83a592fc609e024c2e90048246bbf"
 dependencies = [
  "dirs 5.0.1",
  "hex",
@@ -8475,8 +8475,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e69bf016dc406eff7d53a7d3f7cf1c2e72c82b9088aac1118591e36dd2cd3e9"
 dependencies = [
  "bitcoin_hashes",
- "rand 0.8.5",
- "rand_core 0.6.4",
+ "rand 0.7.3",
+ "rand_core 0.5.1",
  "serde",
  "unicode-normalization",
 ]
@@ -13366,7 +13366,7 @@ checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
  "digest 0.10.7",
- "rand 0.8.5",
+ "rand 0.7.3",
  "static_assertions",
 ]
 
