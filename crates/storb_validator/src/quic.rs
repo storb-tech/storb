@@ -1,6 +1,7 @@
 use crate::signature::InsecureCertVerifier;
 use anyhow::{anyhow, Result};
-use crabtensor::rpc::types::NeuronInfoLite;
+use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
+use crabtensor::AccountId;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::ClientConfig as RustlsClientConfig;
@@ -13,7 +14,7 @@ const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for ope
 
 /// Establishes QUIC connections with a list of miners
 pub async fn establish_miner_connections(
-    miners: &[NeuronInfoLite],
+    miners: &[NeuronInfoLite<AccountId>],
 ) -> Result<Vec<(SocketAddr, Connection)>> {
     let mut connection_futures = Vec::new();
 

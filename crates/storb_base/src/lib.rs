@@ -3,14 +3,12 @@ pub mod piece;
 pub mod piece_hash;
 pub mod swarm;
 
-use crabtensor::{
-    api::apis,
-    axon::{serve_axon_payload, AxonProtocol},
-    rpc::{call_runtime_api_decoded, types::NeuronInfoLite},
-    subtensor::Subtensor,
-    wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer},
-    AccountId,
-};
+use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
+use crabtensor::axon::{serve_axon_payload, AxonProtocol};
+use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
+use crabtensor::subtensor::Subtensor;
+use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
+use crabtensor::AccountId;
 use ed25519_dalek::{SecretKey, SigningKey};
 use std::{
     path::PathBuf,
@@ -92,7 +90,7 @@ pub struct BaseNeuronConfig {
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
-    pub neurons: Arc<RwLock<Vec<NeuronInfoLite>>>,
+    pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
     pub signer: Signer,
     pub subtensor: Subtensor,
 }
@@ -179,13 +177,13 @@ impl BaseNeuron {
     }
 
     fn find_neuron_info<'a>(
-        neurons: &'a [NeuronInfoLite],
+        neurons: &'a [NeuronInfoLite<AccountId>],
         account_id: &AccountId,
-    ) -> Option<&'a NeuronInfoLite> {
+    ) -> Option<&'a NeuronInfoLite<AccountId>> {
         neurons.iter().find(|neuron| &neuron.hotkey == account_id)
     }
 
-    pub fn get_neurons(&self) -> Arc<RwLock<Vec<NeuronInfoLite>>> {
+    pub fn get_neurons(&self) -> Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>> {
         self.neurons.clone()
     }
 
@@ -201,18 +199,21 @@ impl BaseNeuron {
         }
     }
 
+    // TODO: Remove unwraps and handle errors properly
     /// Synchronise the local metagraph state with chain
     pub async fn sync_metagraph(&mut self) {
         let current_block = self.subtensor.blocks().at_latest().await.unwrap();
         let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
 
-        let neurons_payload = apis()
-            .neuron_info_runtime_api()
-            .get_neurons_lite(self.config.netuid);
+        // TODO: do this? specifically with needing to pass &self
+        let neurons_payload =
+            NeuronInfoRuntimeApi::get_neurons_lite(&NeuronInfoRuntimeApi {}, self.config.netuid);
 
-        let neurons = call_runtime_api_decoded(&runtime_api, neurons_payload)
-            .await
-            .unwrap();
+        // let neurons = call_runtime_api_decoded(&runtime_api, neurons_payload)
+        //     .await
+        //     .unwrap();
+
+        let neurons = runtime_api.call(neurons_payload).await.unwrap();
 
         *self.neurons.write().unwrap() = neurons;
     }
