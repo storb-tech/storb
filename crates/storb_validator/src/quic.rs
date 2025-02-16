@@ -12,6 +12,7 @@ pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO: turn this into a setting?
 const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
 
+// TODO: add filtering so we only connecto to miners that are online, etc??
 /// Establishes QUIC connections with a list of miners
 pub async fn establish_miner_connections(
     miners: &[NeuronInfoLite<AccountId>],

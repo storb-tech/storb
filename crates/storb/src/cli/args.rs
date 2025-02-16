@@ -79,6 +79,12 @@ pub fn common_args() -> Vec<Arg> {
             .help("Path to the database")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("dht_dir")
+            .long("dht-dir")
+            .value_name("path")
+            .help("Path to the dht rocksdb folder")
+            .action(ArgAction::Set)
+            .global(true),
         Arg::new("pem_file")
             .long("pem-file")
             .value_name("path")
@@ -117,12 +123,6 @@ pub fn common_args() -> Vec<Arg> {
             .value_name("port")
             .value_parser(value_parser!(u16))
             .help("DHT port")
-            .action(ArgAction::Set)
-            .global(true),
-        Arg::new("dht.file")
-            .long("dht.file")
-            .value_name("path")
-            .help("Path to file for the DHT to save state")
             .action(ArgAction::Set)
             .global(true),
         Arg::new("dht.bootstrap_ip")
@@ -178,7 +178,6 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
 
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
-        file: get_config_value!(args, "dht.file", String, &settings.dht.file).clone(),
         bootstrap_ip: get_config_value!(
             args,
             "dht.bootstrap_ip",
@@ -214,6 +213,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             &settings.min_stake_threshold
         ),
         db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).into(),
+        dht_dir: get_config_value!(args, "dht_dir", String, &settings.dht_dir).into(),
         pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
         subtensor: subtensor_config,
         neuron: neuron_config,

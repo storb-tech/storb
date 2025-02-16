@@ -16,6 +16,7 @@ load_old_nodes = true
 min_stake_threshold = 1000
 
 db_dir = "database.db"
+dht_dir = "dht-db.storb-local"
 pem_file = "storb.pem"
 
 [subtensor]
@@ -28,7 +29,6 @@ sync_frequency = 300
 
 [dht]
 port = 6942
-file = "dht.bin"
 bootstrap_ip = ""     # IPv4 format
 bootstrap_port = 6942
 

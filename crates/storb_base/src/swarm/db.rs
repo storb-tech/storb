@@ -68,6 +68,7 @@ pub enum DbOp {
 ///
 /// This store encapsulates a RocksDB database and uses a background worker to process
 /// write operations in batches.
+#[derive(Debug, Clone)]
 pub struct RocksDBStore {
     pub db: Arc<DB>,
     sender: mpsc::Sender<DbOp>,
@@ -208,6 +209,33 @@ impl RocksDBStore {
         .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
     }
 
+    pub async fn iter(&self, cf: CfType) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>, Error> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            let cf_handle = cf
+                .handle(&db)
+                .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+            let iter = db.iterator_cf(cf_handle, rocksdb::IteratorMode::Start);
+            let mut results = Vec::new();
+            for item in iter {
+                match item {
+                    Ok((key, val)) => {
+                        results.push((
+                            key.to_vec().into_boxed_slice(),
+                            val.to_vec().into_boxed_slice(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(Error::new(ErrorKind::Other, e.to_string()));
+                    }
+                }
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
+    }
+
     /// Background worker that processes queued database operations in batches.
     ///
     /// This internal asynchronous function collects operations into a WriteBatch,
@@ -312,13 +340,16 @@ mod tests {
     use crate::swarm::db::{CfType, RocksDBConfig, RocksDBStore};
     use crate::swarm::models::{
         deserialize_dht_value, serialize_dht_value, ChunkDHTValue, DHTValue, PieceDHTValue,
-        PieceType, TrackerDHTValue,
+        TrackerDHTValue,
     };
     use chrono::Utc;
-    use ed25519_dalek::Signature;
+    use crabtensor::sign::KeypairSignature;
     use libp2p::kad::RecordKey;
+    use subxt::ext::codec::Compact;
     use tempfile::tempdir;
     use tracing::error;
+
+    use crate::piece::PieceType;
 
     // This runs before any tests
     static INIT: Once = Once::new();
@@ -347,7 +378,7 @@ mod tests {
 
         let chunk_val = ChunkDHTValue {
             chunk_hash: RecordKey::new(&[1u8; 32]),
-            validator_id: 42,
+            validator_id: Compact(42u16),
             piece_hashes: vec![[2u8; 32], [3u8; 32]],
             chunk_idx: 123,
             k: 5,
@@ -355,26 +386,26 @@ mod tests {
             chunk_size: 1024,
             padlen: 16,
             original_chunk_size: 1000,
-            signature: Signature::from_bytes(&[8u8; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         };
         let piece_val = PieceDHTValue {
             piece_hash: RecordKey::new(&[4u8; 32]),
-            validator_id: 77,
+            validator_id: Compact(77u16),
             chunk_idx: 456,
             piece_idx: 2,
             piece_type: PieceType::Data,
-            signature: Signature::from_bytes(&[9u8; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         };
         let tracker_val = TrackerDHTValue {
             infohash: RecordKey::new(&[5u8; 32]),
-            validator_id: 99,
+            validator_id: Compact(99),
             filename: "example.txt".to_string(),
             length: 4096,
             chunk_size: 512,
             chunk_count: 8,
             chunk_hashes: vec![[6u8; 32], [7u8; 32]],
             creation_timestamp: Utc::now(),
-            signature: Signature::from_bytes(&[10u8; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         };
 
         let chunk_enum = DHTValue::Chunk(chunk_val.clone());

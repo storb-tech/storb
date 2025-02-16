@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
-use axum::{extract::DefaultBodyLimit, routing::post, Router};
-use routes::upload_file;
-use rustls::{self};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
+};
+use routes::{download_file, upload_file};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
 use tracing::info;
@@ -9,17 +12,20 @@ use validator::{Validator, ValidatorConfig};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GiB
 
+mod download;
 mod quic;
 mod routes;
 mod signature;
+mod upload;
 pub mod validator;
+
 /// State maintained by the validator service
 ///
 /// We derive Clone here to allow this state to be shared between request handlers,
 /// as Axum requires state types to be cloneable to share them across requests.
 #[derive(Clone)]
 struct ValidatorState {
-    validator: Arc<Mutex<Validator>>,
+    pub validator: Arc<Mutex<Validator>>,
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
@@ -67,7 +73,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let state = ValidatorState { validator };
 
     let app = Router::new()
-        .route("/upload", post(upload_file))
+        .route("/file", post(upload_file))
+        .route("/file", get(download_file))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
@@ -91,7 +98,9 @@ async fn main(config: ValidatorConfig) {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    run_validator(config).await.unwrap()
+    run_validator(config)
+        .await
+        .expect("Failed to run the validator")
 }
 
 /// Runs the main async runtime

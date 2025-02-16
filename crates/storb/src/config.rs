@@ -21,7 +21,6 @@ pub struct Neuron {
 #[derive(Debug, Deserialize)]
 pub struct Dht {
     pub port: u16,
-    pub file: String,
     pub bootstrap_ip: String,
     pub bootstrap_port: u16,
 }
@@ -77,6 +76,7 @@ pub struct Settings {
 
     pub log_level: String, // TODO: Add function to convert str -> enum
     pub db_dir: String,
+    pub dht_dir: String,
     pub pem_file: String,
 
     pub subtensor: Subtensor,

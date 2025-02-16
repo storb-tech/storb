@@ -1,4 +1,6 @@
-use bytes::Bytes;
+use base::piece_hash::PieceHash;
+use base::swarm;
+use libp2p;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
@@ -7,6 +9,7 @@ use std::error::Error;
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
+use store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time;
 use tracing::{error, info};
@@ -14,10 +17,8 @@ use tracing::{error, info};
 pub mod miner;
 pub mod store;
 
-/// Processes a piece of bytes by computing its BLAKE3 hash
-/// and returning it as a hexadecimal string
-async fn process_piece(piece: Bytes) -> String {
-    blake3::hash(&piece).to_hex().to_string()
+struct MinerState {
+    pub miner: Arc<Mutex<Miner>>,
 }
 
 /// Configures the QUIC server with a self-signed certificate for localhost
@@ -44,6 +45,9 @@ async fn main(config: MinerConfig) {
     // Create weak reference for sync task
     let sync_miner = Arc::downgrade(&miner);
 
+    let object_store =
+        Arc::new(ObjectStore::new(&config.store_dir).expect("Failed to initialize object store"));
+
     // Spawn background sync task
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(
@@ -57,6 +61,8 @@ async fn main(config: MinerConfig) {
             }
         }
     });
+
+    let state = MinerState { miner };
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.api_port))
         .expect("Failed to bind UDP socket");
@@ -73,8 +79,8 @@ async fn main(config: MinerConfig) {
         "Miner listening for pieces on quic://0.0.0.0:{}",
         config.neuron_config.api_port
     );
-
     while let Some(incoming) = endpoint.accept().await {
+        let object_store = Arc::clone(&object_store);
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => {
@@ -117,7 +123,17 @@ async fn main(config: MinerConfig) {
 
                         info!("Received piece of exactly {} bytes", bytes_read);
 
-                        let hash = process_piece(piece.into()).await;
+                        let hash_raw = blake3::hash(&piece);
+                        let hash = hash_raw.to_hex().to_string();
+                        let piece_key = libp2p::kad::RecordKey::new(&hash.as_bytes());
+
+                        // Add miner as a provider for the piece
+                        // let dht_sender = state.miner.lock().await.neuron.command_sender.clone();
+                        // match swarm::dht::StorbDHT::start_providing_piece(dht_sender, piece_key) {
+                        //     Ok(_) => info!("Added miner as provider for piece"),
+                        //     Err(e) => error!("Failed to add miner as provider for piece: {}", e),
+                        // }
+
                         if let Err(e) = send.write_all(hash.as_bytes()).await {
                             error!("Failed to send hash: {}", e);
                             continue;
@@ -128,7 +144,12 @@ async fn main(config: MinerConfig) {
                             continue;
                         }
 
-                        info!("Finished processing piece of size: {}", bytes_read);
+                        let piece_hash = PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
+                        object_store
+                            .write(&piece_hash, &piece)
+                            .await
+                            .expect("Failed to write piece to store");
+                        info!("Finished storing piece of size: {}", bytes_read);
                     }
                 }
                 Err(e) => {

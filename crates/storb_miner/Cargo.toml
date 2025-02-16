@@ -13,6 +13,7 @@ axum.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 futures.workspace = true
+libp2p.workspace = true
 quinn.workspace = true
 rand.workspace = true
 rcgen.workspace = true

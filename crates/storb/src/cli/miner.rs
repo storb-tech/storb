@@ -5,6 +5,7 @@ use storb_miner;
 use storb_miner::miner::MinerConfig;
 
 use crate::config::Settings;
+use crate::get_config_value;
 
 use super::args::get_neuron_config;
 
@@ -19,13 +20,14 @@ pub fn cli() -> Command {
 }
 
 pub fn exec(args: &ArgMatches, settings: &Settings) {
-    // TODO
-    _ = args;
-    _ = settings;
-
+    let store_dir =
+        get_config_value!(args, "store_dir", String, settings.miner.store_dir).to_string();
     // Get validator config with CLI overrides
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
-    let miner_config = MinerConfig { neuron_config };
+    let miner_config = MinerConfig {
+        neuron_config,
+        store_dir,
+    };
 
     storb_miner::run(miner_config);
 }

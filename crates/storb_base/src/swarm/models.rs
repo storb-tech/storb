@@ -1,9 +1,12 @@
 use bincode::Options;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::Signature;
+use crabtensor::sign::KeypairSignature;
 use libp2p::kad::RecordKey;
 use serde::{Deserialize, Serialize};
+use subxt::ext::codec::Compact;
 use thiserror::Error;
+
+use crate::piece::PieceType;
 
 /// Represents a chunk entry in the DHT.
 ///
@@ -12,7 +15,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkDHTValue {
     pub chunk_hash: RecordKey,
-    pub validator_id: u8,
+    pub validator_id: Compact<u16>,
     pub piece_hashes: Vec<[u8; 32]>,
     pub chunk_idx: u64,
     pub k: u64,
@@ -20,7 +23,7 @@ pub struct ChunkDHTValue {
     pub chunk_size: u64,
     pub padlen: u64,
     pub original_chunk_size: u64,
-    pub signature: Signature,
+    pub signature: KeypairSignature,
 }
 
 /// Represents a tracker entry in the DHT.
@@ -30,23 +33,14 @@ pub struct ChunkDHTValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrackerDHTValue {
     pub infohash: RecordKey,
-    pub validator_id: u8,
+    pub validator_id: Compact<u16>,
     pub filename: String,
     pub length: u64,
     pub chunk_size: u64,
     pub chunk_count: u64,
     pub chunk_hashes: Vec<[u8; 32]>,
     pub creation_timestamp: DateTime<Utc>,
-    pub signature: Signature,
-}
-
-/// Enum representing the type of a piece stored in the DHT.
-///
-/// It distinguishes between data and parity pieces.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum PieceType {
-    Data,
-    Parity,
+    pub signature: KeypairSignature,
 }
 
 /// Represents a piece entry in the DHT.
@@ -56,11 +50,11 @@ pub enum PieceType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceDHTValue {
     pub piece_hash: RecordKey,
-    pub validator_id: u8,
+    pub validator_id: Compact<u16>,
     pub chunk_idx: u64,
     pub piece_idx: u64,
     pub piece_type: PieceType,
-    pub signature: Signature,
+    pub signature: KeypairSignature,
 }
 
 /// Internal enumeration for DHT value types.
@@ -176,7 +170,7 @@ mod tests {
     fn sample_chunk_dht_value() -> ChunkDHTValue {
         ChunkDHTValue {
             chunk_hash: RecordKey::new(&[0xAA; 32]),
-            validator_id: 128,
+            validator_id: Compact(128),
             piece_hashes: vec![[0xBB; 32], [0xCC; 32]],
             chunk_idx: 42,
             k: 2,
@@ -184,7 +178,7 @@ mod tests {
             chunk_size: 1024,
             padlen: 16,
             original_chunk_size: 1000,
-            signature: Signature::from_bytes(&[0x00; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         }
     }
 
@@ -192,11 +186,11 @@ mod tests {
     fn sample_piece_dht_value() -> PieceDHTValue {
         PieceDHTValue {
             piece_hash: RecordKey::new(&[0x99; 32]),
-            validator_id: 98,
+            validator_id: Compact(98),
             chunk_idx: 55,
             piece_idx: 99,
             piece_type: PieceType::Data,
-            signature: Signature::from_bytes(&[0x11; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         }
     }
 
@@ -204,14 +198,14 @@ mod tests {
     fn sample_tracker_dht_value() -> TrackerDHTValue {
         TrackerDHTValue {
             infohash: RecordKey::new(&[0x01; 32]),
-            validator_id: 66,
+            validator_id: Compact(66),
             filename: "myfile.txt".to_string(),
             length: 123456,
             chunk_size: 4096,
             chunk_count: 30,
             chunk_hashes: vec![[0x10; 32], [0x20; 32], [0x30; 32]],
             creation_timestamp: Utc::now(),
-            signature: Signature::from_bytes(&[0x22; 64]),
+            signature: KeypairSignature::from_raw([0x11; 64]),
         }
     }
 

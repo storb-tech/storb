@@ -1,222 +1,20 @@
-use crate::{quic::establish_miner_connections, ValidatorState};
+use std::collections::HashMap;
+
 use anyhow::Result;
 use axum::{
-    body::Bytes,
-    extract::Multipart,
+    extract::{Multipart, Query},
     http::{header::CONTENT_LENGTH, HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use base::piece::{encode_chunk, piece_length};
-use futures::{Stream, TryStreamExt};
-use quinn::Connection;
-use std::net::SocketAddr;
-use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use libp2p::kad::RecordKey;
+use tracing::{error, info};
 
-const MIN_REQUIRED_MINERS: usize = 1;
-const LOGGING_INTERVAL_MB: u64 = 100;
-const BYTES_PER_MB: u64 = 1024 * 1024;
-
-// Processes upload streams and distributes file pieces to available miners
-struct UploadProcessor {
-    miner_connections: Vec<(SocketAddr, Connection)>,
-}
-
-impl UploadProcessor {
-    async fn new(state: &ValidatorState) -> Result<Self> {
-        // Get miner addresses from validator state
-        let miners = {
-            let validator_guard = state.validator.lock().await;
-            let neurons_guard = validator_guard
-                .neuron
-                .neurons
-                .read()
-                .map_err(|e| anyhow::anyhow!("Failed to acquire neurons read lock: {}", e))?;
-            neurons_guard.clone()
-        };
-
-        if miners.is_empty() {
-            return Err(anyhow::anyhow!("No miners available in validator state"));
-        }
-
-        // Establish QUIC connections with miners
-        let miner_connections = match establish_miner_connections(&miners).await {
-            Ok(connections) => {
-                if connections.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "Failed to establish connections with any miners"
-                    ));
-                }
-                if connections.len() < MIN_REQUIRED_MINERS {
-                    warn!(
-                        "Connected to fewer miners than recommended: {}",
-                        connections.len()
-                    );
-                }
-                connections
-            }
-            Err(e) => {
-                error!("Failed to establish connections with miners: {}", e);
-                return Err(anyhow::anyhow!(
-                    "Failed to establish miner connections: {}",
-                    e
-                ));
-            }
-        };
-
-        info!(
-            "Successfully connected to {} miners",
-            miner_connections.len()
-        );
-        Ok(Self { miner_connections })
-    }
-
-    async fn process_upload<S, E>(&self, stream: S, total_size: u64) -> Result<String>
-    where
-        S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
-        E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
-    {
-        info!("Processing upload of size {} bytes...", total_size);
-
-        if self.miner_connections.is_empty() {
-            return Err(anyhow::anyhow!("No active miner connections available"));
-        }
-
-        let chunk_size = piece_length(total_size, None, None) as usize;
-        let (tx, rx) = mpsc::channel(chunk_size);
-
-        // Spawn producer task
-        let producer_handle = {
-            let stream = Box::pin(stream);
-            tokio::spawn(async move {
-                if let Err(e) = produce_bytes(stream, tx, total_size, chunk_size).await {
-                    error!("Producer error: {}", e);
-                    return Err(e);
-                }
-                Ok(())
-            })
-        };
-
-        // Spawn consumer task
-        let miner_conns = self.miner_connections.clone();
-        let consumer_handle = tokio::spawn(async move {
-            if let Err(e) = consume_bytes(rx, miner_conns).await {
-                error!("Consumer error: {}", e);
-                return Err(e);
-            }
-            Ok(())
-        });
-
-        // Wait for both tasks to complete
-        let (producer_result, consumer_result) = tokio::join!(producer_handle, consumer_handle);
-        producer_result??;
-        consumer_result??;
-
-        Ok("Upload processed successfully".to_string())
-    }
-}
-
-async fn produce_bytes<S, E>(
-    stream: S,
-    tx: mpsc::Sender<Vec<u8>>,
-    total_size: u64,
-    chunk_size: usize,
-) -> Result<()>
-where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<Box<dyn std::error::Error + Send + Sync>>,
-{
-    let mut total_processed: u64 = 0;
-    let mut buffer = Vec::with_capacity(chunk_size);
-
-    let mut stream = stream.map_err(|e| anyhow::anyhow!("Stream error: {}", e.into()));
-
-    while let Some(chunk_result) = stream.try_next().await? {
-        buffer.extend_from_slice(&chunk_result);
-
-        // Process full chunks
-        while buffer.len() >= chunk_size {
-            let chunk_data = buffer.drain(..chunk_size).collect::<Vec<u8>>();
-            total_processed += chunk_data.len() as u64;
-
-            if total_processed > total_size {
-                return Err(anyhow::anyhow!("Upload size exceeds expected size"));
-            }
-
-            // Log progress every LOGGING_INTERVAL_MB MB
-            if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
-                info!(
-                    "Processing: {} MB / {} MB",
-                    total_processed / (1024 * 1024),
-                    total_size / (1024 * 1024)
-                );
-            }
-
-            tx.send(chunk_data).await?;
-        }
-    }
-
-    // Send any remaining data
-    if !buffer.is_empty() {
-        total_processed += buffer.len() as u64;
-        tx.send(buffer).await?;
-    }
-
-    info!("Total bytes processed: {}", total_processed);
-    Ok(())
-}
-
-async fn consume_bytes(
-    mut rx: mpsc::Receiver<Vec<u8>>,
-    miner_connections: Vec<(SocketAddr, Connection)>,
-) -> Result<()> {
-    let mut chunk_idx = 0;
-    while let Some(chunk) = rx.recv().await {
-        // Encode the chunk using FEC
-        let encoded = encode_chunk(&chunk, chunk_idx);
-        chunk_idx += 1;
-
-        // Distribute pieces to miners
-        if let Some(pieces) = encoded.pieces {
-            for (piece_idx, piece) in pieces.iter().enumerate() {
-                // Round-robin distribution to miners
-                let (addr, conn) = &miner_connections[piece_idx % miner_connections.len()];
-
-                info!("Sending piece {} to miner {}", piece_idx, addr);
-
-                // Send piece to miner via QUIC connection
-                let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
-
-                send_stream
-                    .write_all(&(piece.data.len() as u64).to_be_bytes())
-                    .await?;
-                send_stream.write_all(&piece.data).await?;
-                send_stream.finish()?;
-
-                // Read hash response
-                let mut hash = String::new();
-                let mut buf = [0u8; 1];
-                while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
-                    if n == 0 || buf[0] == b'\n' {
-                        break;
-                    }
-                    hash.push(buf[0] as char);
-                }
-
-                info!(
-                    "Received hash {} for piece {} from miner {}",
-                    hash, piece_idx, addr
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
+use crate::{upload::UploadProcessor, ValidatorState};
+use base::swarm;
 
 #[utoipa::path(
     post,
-    path = "/upload",
+    path = "/file",
     responses(
         (status = 200, description = "File uploaded successfully", body = String),
         (status = 400, description = "Bad request - invalid file or missing content length", body = String),
@@ -224,6 +22,7 @@ async fn consume_bytes(
     ),
     tag = "Upload"
 )]
+#[axum::debug_handler]
 pub async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     headers: HeaderMap,
@@ -267,8 +66,121 @@ pub async fn upload_file(
         Ok::<_, std::io::Error>(bytes)
     }));
 
-    match processor.process_upload(stream, content_length).await {
+    match processor
+        .process_upload(stream, content_length, processor.validator_id)
+        .await
+    {
         Ok(_) => Ok((StatusCode::OK, "Upload successful".to_string())),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/file",
+    responses(
+        (status = 200, description = "File downloaded successfully", body = String),
+        (status = 500, description = "Internal server error during download", body = String)
+    ),
+    tag = "Download"
+)]
+#[axum::debug_handler]
+pub async fn download_file(
+    state: axum::extract::State<ValidatorState>,
+    _headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let infohash = params.get("infohash").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing infohash parameter".to_string(),
+        )
+    })?;
+    let key = RecordKey::new(&infohash.as_bytes().to_vec());
+    info!("Downloading file with infohash: {:?}", &key);
+
+    let dht_sender = state.validator.lock().await.neuron.command_sender.clone();
+    let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(dht_sender.clone(), key)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error getting tracker entry: {}", e),
+            )
+        })?;
+    let tracker = tracker_res.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Tracker entry not found".to_string(),
+    ))?;
+    info!("Tracker hash: {:?}", tracker.infohash);
+    let chunk_hashes = tracker.chunk_hashes;
+    let mut pieces: Vec<swarm::models::PieceDHTValue> = Vec::new();
+    for chunk_hash in chunk_hashes {
+        // convert chunk_hash to a string
+        let chunk_key = RecordKey::new(&chunk_hash);
+        info!("RecordKey of chunk hash: {:?}", chunk_key);
+        let chunk_res =
+            match swarm::dht::StorbDHT::get_chunk_entry(dht_sender.clone(), chunk_key).await {
+                Ok(chunk) => Some(chunk),
+                Err(e) => {
+                    error!("Error getting chunk entry: {}", e);
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Error getting chunk entry: {}", e),
+                    ));
+                }
+            };
+
+        let chunk_pieces_data: Vec<u8> = Vec::new();
+
+        let chunk = match chunk_res {
+            Some(chunk) => chunk,
+            None => {
+                error!("Chunk entry not found");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Chunk entry not found".to_string(),
+                ));
+            }
+        };
+        let chunk = chunk.ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Chunk entry not found".to_string(),
+        ))?;
+        info!(
+            "Found chunk hash: {:?} with {:?} pieces",
+            &chunk.chunk_hash,
+            &chunk.piece_hashes.len()
+        );
+        let piece_hashes = chunk.piece_hashes;
+        for piece_hash in piece_hashes {
+            let piece_key = RecordKey::new(&piece_hash);
+            info!("RecordKey of piece hash: {:?}", &piece_key);
+            let piece_res = swarm::dht::StorbDHT::get_piece_entry(dht_sender.clone(), piece_key)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Error getting piece entry: {}", e),
+                    )
+                })?;
+            let piece = match piece_res {
+                Some(piece) => piece,
+                None => {
+                    error!("Piece entry not found");
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Piece entry not found".to_string(),
+                    ));
+                }
+            };
+
+            pieces.push(piece.clone());
+            info!(
+                "Found Piece hash: {:?} | Piece type {:?}",
+                piece.piece_hash, piece.piece_type
+            );
+        }
+    }
+    Ok((StatusCode::OK, "Download successful".to_string()))
 }

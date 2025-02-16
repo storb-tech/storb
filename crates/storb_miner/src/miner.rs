@@ -4,6 +4,7 @@ use tracing::info;
 #[derive(Clone)]
 pub struct MinerConfig {
     pub neuron_config: BaseNeuronConfig,
+    pub store_dir: String,
 }
 
 /// The Storb miner

@@ -95,13 +95,19 @@ impl RecordStore for StorbStore {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .put(r.key.clone(), r.clone());
-        let kb = r.key.as_ref();
+        let kb = r.key.as_ref().to_vec();
         // Wrap the record for serialization.
         let wrapper = StorbRecord::from(r.clone());
         // Serialize the record; panics if serialization fails.
         let vb = bincode::serialize(&wrapper).expect("serialization failed");
+        // Handle::current().block_on(self.db.schedule_put(kb, &vb));
         // Schedule the put operation on the RocksDB store.
-        tokio::runtime::Handle::current().block_on(self.db.schedule_put(kb, &vb));
+        // TODO: is there a better way to do this instead of having to clone the db?
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            db.schedule_put(&kb, &vb).await;
+        });
+        // tokio::runtime::Handle::current().block_on(self.db.schedule_put(kb, &vb));
         Ok(())
     }
 

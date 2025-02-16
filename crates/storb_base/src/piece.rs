@@ -1,4 +1,5 @@
 use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
+use serde::Serialize;
 use tracing::debug;
 use zfec_rs::Chunk as ZFecChunk;
 
@@ -10,7 +11,7 @@ pub struct Piece {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PieceType {
     Data,
     Parity,
@@ -27,6 +28,39 @@ pub struct EncodedChunk {
     pub original_chunk_size: u64,
 }
 
+#[derive(Serialize)]
+struct InfoHashData {
+    filename: String,
+    timestamp: i64,
+    chunk_size: u64,
+    total_size: u64,
+    pieces: Vec<[u8; 32]>,
+}
+
+pub fn get_infohash(
+    filename: String,
+    timestamp: i64,
+    chunk_size: u64,
+    total_size: u64,
+    pieces: Vec<[u8; 32]>,
+) -> String {
+    let infohash_data = InfoHashData {
+        filename,
+        timestamp,
+        chunk_size,
+        total_size,
+        pieces,
+    };
+
+    // Serialize the struct to a compact JSON string.
+    let infohash_json =
+        serde_json::to_string(&infohash_data).expect("Failed to serialize infohash_data to JSON");
+
+    let infohash_bytes = infohash_json.as_bytes();
+
+    blake3::hash(infohash_bytes).to_hex().to_string()
+}
+
 pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {
     let min_size = min_size.unwrap_or(MIN_PIECE_SIZE);
     let max_size = max_size.unwrap_or(MAX_PIECE_SIZE);
@@ -40,16 +74,24 @@ pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option
     length.clamp(min_size, max_size)
 }
 
-pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
-    let chunk_size = chunk.len() as u64;
+pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     let piece_size = piece_length(chunk_size, None, None);
-    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
     let expected_data_pieces = ((chunk_size as f64) / (piece_size as f64)).ceil() as usize;
     let expected_parity_pieces = ((expected_data_pieces as f64) / 2.0).ceil() as usize;
 
     let k = expected_data_pieces;
     let m = k + expected_parity_pieces;
+
+    (k, m)
+}
+
+pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
+    let chunk_size = chunk.len() as u64;
+    let piece_size = piece_length(chunk_size, None, None);
+    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
+    // Calculate how many data blocks (k) and parity blocks
+    let (k, m) = get_k_and_m(chunk_size);
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");

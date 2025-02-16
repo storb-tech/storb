@@ -14,8 +14,13 @@ use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+use subxt::{
+    ext::{codec::Encode, sp_core::Pair},
+    runtime_api::StaticPayload,
+};
 use swarm::dht::StorbDHT;
-use tracing::info;
+use tokio::sync::{mpsc, Mutex};
+use tracing::{error, info};
 
 #[derive(Debug)]
 pub enum NeuronError {
@@ -55,7 +60,6 @@ pub struct NeuronConfig {
 #[derive(Clone)]
 pub struct DhtConfig {
     pub port: u16,
-    pub file: String,
     pub bootstrap_ip: String,
     pub bootstrap_port: u16,
 }
@@ -78,6 +82,7 @@ pub struct BaseNeuronConfig {
     pub min_stake_threshold: u64,
 
     pub db_dir: PathBuf,
+    pub dht_dir: PathBuf,
     pub pem_file: String,
 
     pub subtensor: SubtensorConfig,
@@ -87,14 +92,22 @@ pub struct BaseNeuronConfig {
     pub dht: DhtConfig,
 }
 
+// TODO(420): use this instead of neurons directly? (see TODO(69) )
+// #[derive(Clone)]
+// pub struct NeuronState {
+//     pub peer_ids: Vec<>, // uid -> peer_id
+// }
+
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
+    pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
     pub subtensor: Subtensor,
 }
 
+// TODO: add a function for loading neuron state? (see TODO(420))
 impl BaseNeuron {
     async fn get_subtensor_connection(
         insecure: bool,
@@ -130,15 +143,54 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
+        let hotkey = signer.signer().public();
+        let hotkey_bytes: &[u8; 32] = hotkey.as_ref();
+        let ed25519_key = match libp2p::identity::ed25519::PublicKey::try_from_bytes(hotkey_bytes) {
+            Ok(key) => key,
+            Err(_) => {
+                panic!("Unable to create node peer id")
+            }
+        };
+
+        let public_key = libp2p::identity::PublicKey::from(ed25519_key);
+        let peer_id = libp2p::PeerId::from_public_key(&public_key);
+
+        let (dht_og, command_sender) =
+            StorbDHT::new(config.dht_dir.clone(), config.dht.port, public_key)
+                .expect("Failed to create StorbDHT instance");
+
+        let dht = Arc::new(Mutex::new(dht_og));
+
+        // Spawn a separate task for processing events
+        tokio::spawn(async move {
+            loop {
+                let mut dht_locked = dht.lock().await;
+                dht_locked.process_events().await;
+                drop(dht_locked);
+                tokio::task::yield_now().await;
+            }
+        });
+
         let mut neuron = BaseNeuron {
             config: config.clone(),
+            command_sender,
             subtensor,
             neurons: Arc::new(RwLock::new(Vec::new())),
-            signer,
+            signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
         };
 
         // sync metagraph
         neuron.sync_metagraph().await;
+
+        // TODO: move to sync_metagraph?
+        // Get id of this neuronn
+        let my_neurons = neuron.neurons.read().unwrap();
+        let neuron_info = BaseNeuron::find_neuron_info(&my_neurons, signer.account_id()).unwrap();
+
+        let neuron_uid = neuron_info.uid;
+        // log the neuron id
+        info!("Neuron id: {:?}", neuron_uid);
+
         // check registration status
         neuron.check_registration().await?;
         // post ip if specified
@@ -159,24 +211,10 @@ impl BaseNeuron {
             info!("Successfully served axon!");
         }
 
-        let secret_key = SecretKey::from(seed);
-        let keypair_bytes = SigningKey::from(secret_key).to_bytes();
-        let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(keypair_bytes)
-            .unwrap_or_else(|_| {
-                panic!("Failed to create libp2p keypair from bytes");
-            });
-
-        let dht = StorbDHT::new(config.db_dir.clone(), config.dht.port, libp2p_keypair)
-            .expect("Failed to create StorbDHT instance");
-
-        tokio::spawn(async {
-            dht.run().await.expect("Failed to run StorbDHT");
-        });
-
-        Ok(neuron)
+        Ok(neuron.clone())
     }
 
-    fn find_neuron_info<'a>(
+    pub fn find_neuron_info<'a>(
         neurons: &'a [NeuronInfoLite<AccountId>],
         account_id: &AccountId,
     ) -> Option<&'a NeuronInfoLite<AccountId>> {
@@ -214,6 +252,51 @@ impl BaseNeuron {
         //     .unwrap();
 
         let neurons = runtime_api.call(neurons_payload).await.unwrap();
+
+        // TODO: update things if neurons have changed, etc.
+        // look at the current state of the neurons
+        // compare with the local
+        // update local state if necessary
+        for i in 0..self.neurons.read().unwrap().len() {
+            // TODO: error handling?
+            let neuron = &mut self.neurons.read().unwrap()[i].clone(); // TODO: error handling?
+            if neuron.hotkey == neurons[i].hotkey {
+                let neuron_info = neurons[i].clone();
+                let hotkey = &neuron_info.hotkey.clone();
+                let hotkey_bytes: &[u8; 32] = hotkey.as_ref();
+                let ed25519_key =
+                    match libp2p::identity::ed25519::PublicKey::try_from_bytes(hotkey_bytes) {
+                        Ok(key) => key,
+                        Err(_) => {
+                            error!(
+                                "Failed to create ed25519 key from bytes for neuron {:?}",
+                                neuron_info.uid
+                            );
+                            continue;
+                        }
+                    };
+
+                let public_key = libp2p::identity::PublicKey::from(ed25519_key);
+                let peer_id = libp2p::PeerId::from_public_key(&public_key);
+                info!(
+                    "Neuron Id: {:?} | Public key: {:?} | Peer Id: {:?}",
+                    neuron_info.uid, public_key, peer_id
+                );
+            } else {
+                // if neuron.connection.get_mut().is_none() || neurons[i].axon_info != neuron.info.axon_info {
+                //     // neuron.connection = connect_to_miner(
+                //     //     &self.signer,
+                //     //     self.uid,
+                //     //     &neurons[i],
+                //     //     matches!(*neuron.score.get_mut(), Score::Cheater),
+                //     //     &self.metrics,
+                //     // )
+                //     // .into()
+                // }
+
+                // neuron.info = neurons[i].clone();
+            }
+        }
 
         *self.neurons.write().unwrap() = neurons;
     }
@@ -257,6 +340,7 @@ mod tests {
             load_old_nodes: false,
             min_stake_threshold: 0,
             db_dir: "./test.db".into(),
+            dht_dir: "./test_dht".into(),
             pem_file: "cert.pem".to_string(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
@@ -268,7 +352,6 @@ mod tests {
             },
             dht: DhtConfig {
                 port: 8081,
-                file: "dht.db".to_string(),
                 bootstrap_ip: "127.0.0.1".to_string(),
                 bootstrap_port: 8082,
             },
