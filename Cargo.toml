@@ -37,12 +37,16 @@ ed25519-dalek = { version = "2.1.1", features = ["serde"] }
 futures = "0.3.31"
 libp2p = { version = "0.55.0", features = ["full", "serde"] }
 lru = "0.13.0"
+hmac = "0.12"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"
 quinn = "0.11.2"
-rand = "0.9.0"
+rand = "0.8.5"
 rcgen = { version = "0.13.2", features = ["crypto", "pem", "ring"] }
 rocksdb = "0.23.0"
 rustls = { version = "0.23.22" }
 serde = { version = "1.0.217", features = ["derive"] }
+sha2 = "0.10.8"
 tempfile = "3.2.0"
 thiserror = "2.0.11"
 tokio = { version = "1.43.0", features = ["full"] }
@@ -56,6 +60,7 @@ tracing-subscriber = { version = "0.3.19", features = [
     "registry",
     "std",
 ] }
+rsa = "0.9"
 utoipa = "5"
 uuid = "1.12.1"
 zfec-rs = { git = "https://github.com/thornleywalker/zfec-rs.git", rev = "3f3a3720def2294dc62e65f614862f1a7ddd3187" }

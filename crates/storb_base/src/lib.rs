@@ -1,3 +1,4 @@
+pub mod challenge;
 pub mod constants;
 pub mod piece;
 pub mod piece_hash;
