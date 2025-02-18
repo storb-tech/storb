@@ -92,94 +92,104 @@ async fn main(config: MinerConfig) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port)); // TODO: hard code this for now
     info!("Miner HTTP server listening on {}", addr);
 
-    axum::serve(
-        tokio::net::TcpListener::bind(addr)
-            .await
-            .context("Failed to bind HTTP server")?,
-        app,
-    )
-    .await
-    .context("HTTP server failed")?;
+    let http_server = tokio::spawn(async move {
+        axum::serve(
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .context("Failed to bind HTTP server")
+                .unwrap(),
+            app,
+        )
+        .await
+        .context("HTTP server failed")
+        .unwrap();
+    });
 
-    while let Some(incoming) = endpoint.accept().await {
-        let object_store = Arc::clone(&object_store);
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    info!("New connection from {}", conn.remote_address());
+    let quic_server = tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let object_store = Arc::clone(&object_store);
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        info!("New connection from {}", conn.remote_address());
 
-                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                        info!("New bidirectional stream opened");
+                        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                            info!("New bidirectional stream opened");
 
-                        // Read the piece size
-                        let mut piece_size_buf = [0u8; 8];
-                        if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
-                            error!("Failed to read piece size: {}", e);
-                            continue;
-                        }
-                        let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                        info!("Received piece size: {} bytes", piece_size);
+                            // Read the piece size
+                            let mut piece_size_buf = [0u8; 8];
+                            if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
+                                error!("Failed to read piece size: {}", e);
+                                continue;
+                            }
+                            let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
+                            info!("Received piece size: {} bytes", piece_size);
 
-                        // Process the piece
-                        let mut buffer = vec![0u8; piece_size];
-                        let mut bytes_read = 0;
-                        let mut piece = Vec::new();
+                            // Process the piece
+                            let mut buffer = vec![0u8; piece_size];
+                            let mut bytes_read = 0;
+                            let mut piece = Vec::new();
 
-                        while bytes_read < piece_size {
-                            match recv.read(&mut buffer[..piece_size - bytes_read]).await {
-                                Ok(Some(n)) if n > 0 => {
-                                    piece.extend_from_slice(&buffer[..n]);
-                                    bytes_read += n;
-                                }
-                                Ok(_) => break, // End of stream
-                                Err(e) => {
-                                    error!("Error reading piece: {}", e);
-                                    break;
+                            while bytes_read < piece_size {
+                                match recv.read(&mut buffer[..piece_size - bytes_read]).await {
+                                    Ok(Some(n)) if n > 0 => {
+                                        piece.extend_from_slice(&buffer[..n]);
+                                        bytes_read += n;
+                                    }
+                                    Ok(_) => break, // End of stream
+                                    Err(e) => {
+                                        error!("Error reading piece: {}", e);
+                                        break;
+                                    }
                                 }
                             }
+
+                            if bytes_read == 0 {
+                                continue; // No data received
+                            }
+
+                            info!("Received piece of exactly {} bytes", bytes_read);
+
+                            let hash_raw = blake3::hash(&piece);
+                            let hash = hash_raw.to_hex().to_string();
+                            let piece_key = libp2p::kad::RecordKey::new(&hash.as_bytes());
+
+                            // Add miner as a provider for the piece
+                            // let dht_sender = state.miner.lock().await.neuron.command_sender.clone();
+                            // match swarm::dht::StorbDHT::start_providing_piece(dht_sender, piece_key) {
+                            //     Ok(_) => info!("Added miner as provider for piece"),
+                            //     Err(e) => error!("Failed to add miner as provider for piece: {}", e),
+                            // }
+
+                            if let Err(e) = send.write_all(hash.as_bytes()).await {
+                                error!("Failed to send hash: {}", e);
+                                continue;
+                            }
+                            // Send delimiter after hash
+                            if let Err(e) = send.write_all(b"\n").await {
+                                error!("Failed to send delimiter: {}", e);
+                                continue;
+                            }
+
+                            let piece_hash =
+                                PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
+                            object_store
+                                .write(&piece_hash, &piece)
+                                .await
+                                .expect("Failed to write piece to store");
+                            info!("Finished storing piece of size: {}", bytes_read);
                         }
-
-                        if bytes_read == 0 {
-                            continue; // No data received
-                        }
-
-                        info!("Received piece of exactly {} bytes", bytes_read);
-
-                        let hash_raw = blake3::hash(&piece);
-                        let hash = hash_raw.to_hex().to_string();
-                        let piece_key = libp2p::kad::RecordKey::new(&hash.as_bytes());
-
-                        // Add miner as a provider for the piece
-                        // let dht_sender = state.miner.lock().await.neuron.command_sender.clone();
-                        // match swarm::dht::StorbDHT::start_providing_piece(dht_sender, piece_key) {
-                        //     Ok(_) => info!("Added miner as provider for piece"),
-                        //     Err(e) => error!("Failed to add miner as provider for piece: {}", e),
-                        // }
-
-                        if let Err(e) = send.write_all(hash.as_bytes()).await {
-                            error!("Failed to send hash: {}", e);
-                            continue;
-                        }
-                        // Send delimiter after hash
-                        if let Err(e) = send.write_all(b"\n").await {
-                            error!("Failed to send delimiter: {}", e);
-                            continue;
-                        }
-
-                        let piece_hash = PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
-                        object_store
-                            .write(&piece_hash, &piece)
-                            .await
-                            .expect("Failed to write piece to store");
-                        info!("Finished storing piece of size: {}", bytes_read);
+                    }
+                    Err(e) => {
+                        error!("Connection failed: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("Connection failed: {}", e);
-                }
-            }
-        });
-    }
+            });
+        }
+    });
+
+    let _ = tokio::try_join!(http_server, quic_server);
+
     Ok(())
 }
 
