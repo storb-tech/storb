@@ -4,6 +4,7 @@ log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 netuid = 0
 external_ip = "0.0.0.0"
 api_port = 6969
+quic_port = 6970
 post_ip = false
 
 wallet_path = "~/.bittensor/wallets"

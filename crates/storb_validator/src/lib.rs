@@ -79,7 +79,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(

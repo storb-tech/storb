@@ -27,6 +27,13 @@ pub fn common_args() -> Vec<Arg> {
             .help("API port for the node")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("quic_port")
+            .long("quic-port")
+            .value_name("port")
+            .value_parser(value_parser!(u16))
+            .help("QUIC port for the node")
+            .action(ArgAction::Set)
+            .global(true),
         Arg::new("post_ip")
             .long("post-ip")
             .help("Whether to post the IP to the chain or not")
@@ -143,6 +150,7 @@ pub fn common_args() -> Vec<Arg> {
 
 pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronConfig {
     let api_port = *get_config_value!(args, "api_port", u16, settings.api_port);
+    let quic_port = *get_config_value!(args, "quic_port", u16, settings.quic_port);
 
     let subtensor_config = SubtensorConfig {
         network: get_config_value!(
@@ -203,6 +211,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             .to_string(),
         external_ip: get_config_value!(args, "external_ip", String, &settings.external_ip).clone(),
         api_port,
+        quic_port,
         post_ip: *get_config_value!(args, "post_ip", bool, &settings.post_ip),
         mock: *get_config_value!(args, "mock", bool, &settings.mock),
         load_old_nodes: *get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),

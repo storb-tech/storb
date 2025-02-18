@@ -33,8 +33,14 @@ pub(crate) struct UploadProcessor<'a> {
 impl<'a> UploadProcessor<'a> {
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
         // Scope the validator lock guard
-        let (validator_id, miners) = {
+        let (validator_id, miners, quic_ports) = {
             let validator_guard = state.validator.lock().await;
+            let quic_ports = validator_guard
+                .neuron
+                .quic_ports
+                .read()
+                .expect("Couldn't get quic ports") // TODO: better error handling?
+                .clone();
             let signer = validator_guard.neuron.signer.clone();
 
             // Scope the neurons read guard
@@ -52,7 +58,7 @@ impl<'a> UploadProcessor<'a> {
                 .context("Failed to get neuron info")?;
             let validator_id = Compact(neuron_info.uid);
 
-            (validator_id, neurons)
+            (validator_id, neurons, quic_ports)
         };
 
         if miners.is_empty() {
@@ -60,7 +66,7 @@ impl<'a> UploadProcessor<'a> {
         }
 
         // Establish QUIC connections with miners
-        let miner_connections = match establish_miner_connections(&miners).await {
+        let miner_connections = match establish_miner_connections(&miners, &quic_ports).await {
             Ok(connections) => {
                 if connections.is_empty() {
                     bail!("Failed to establish connections with any miners");

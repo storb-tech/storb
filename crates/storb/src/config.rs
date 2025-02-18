@@ -63,6 +63,7 @@ pub struct Settings {
     pub netuid: u16,
     pub external_ip: String,
     pub api_port: u16,
+    pub quic_port: u16,
     pub post_ip: bool,
 
     pub wallet_path: String,

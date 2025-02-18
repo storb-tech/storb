@@ -5,6 +5,7 @@ use crabtensor::AccountId;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::ClientConfig as RustlsClientConfig;
+use std::collections::HashMap;
 use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{error, info};
 
@@ -16,10 +17,11 @@ const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for ope
 /// Establishes QUIC connections with a list of miners
 pub async fn establish_miner_connections(
     miners: &[NeuronInfoLite<AccountId>],
+    quic_ports: &HashMap<u16, u16>,
 ) -> Result<Vec<(SocketAddr, Connection)>> {
     let mut connection_futures = Vec::new();
 
-    for miner in miners {
+    for (idx, miner) in miners.iter().enumerate() {
         let ip_u32 = miner.axon_info.ip;
         let ip_bytes: [u8; 4] = [
             (ip_u32 >> 24) as u8,
@@ -28,7 +30,15 @@ pub async fn establish_miner_connections(
             ip_u32 as u8,
         ];
         let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip_bytes));
-        let addr = SocketAddr::new(ip, miner.axon_info.port);
+
+        let quic_port = match quic_ports.get(&(idx as u16)) {
+            Some(q_port) => q_port,
+            None => {
+                continue;
+            }
+        };
+
+        let addr = SocketAddr::new(ip, *quic_port);
 
         let client = make_client_endpoint(SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),

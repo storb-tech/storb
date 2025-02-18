@@ -10,11 +10,13 @@ use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
 use libp2p::PeerId;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
 };
+use subxt::ext::codec::Compact;
 use swarm::dht::StorbDHT;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
@@ -67,6 +69,7 @@ pub struct BaseNeuronConfig {
     pub netuid: u16,
     pub external_ip: String,
     pub api_port: u16,
+    pub quic_port: u16,
     pub post_ip: bool,
 
     pub wallet_path: String,
@@ -99,7 +102,8 @@ pub struct BaseNeuronConfig {
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
-    pub peer_ids: Arc<RwLock<Vec<PeerId>>>, // uid -> peer_id
+    pub peer_ids: Arc<RwLock<HashMap<u16, PeerId>>>, // uid -> peer_id
+    pub quic_ports: Arc<RwLock<HashMap<u16, u16>>>,  // uid -> quic server port
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
     pub peer_id: PeerId,
@@ -181,9 +185,10 @@ impl BaseNeuron {
             command_sender,
             subtensor,
             neurons: Arc::new(RwLock::new(Vec::new())),
+            quic_ports: Arc::new(RwLock::new(HashMap::new())),
             signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
             peer_id,
-            peer_ids: Arc::new(RwLock::new(Vec::new())),
+            peer_ids: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // sync metagraph
@@ -256,6 +261,8 @@ impl BaseNeuron {
     // TODO: Remove unwraps and handle errors properly
     /// Synchronise the local metagraph state with chain
     pub async fn sync_metagraph(&mut self) {
+        info!("Syncing metagraph...");
+
         let current_block = self.subtensor.blocks().at_latest().await.unwrap();
         let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
 
@@ -270,6 +277,10 @@ impl BaseNeuron {
         let neurons: Vec<NeuronInfoLite<AccountId>> =
             runtime_api.call(neurons_payload).await.unwrap();
 
+        let neuron_info = BaseNeuron::find_neuron_info(&neurons, self.signer.account_id())
+            .expect("Could not find neuron info");
+        let self_uid = neuron_info.uid;
+
         // TODO: update things if neurons have changed, etc.
         // look at the current state of the neurons
         // compare with the local
@@ -282,7 +293,11 @@ impl BaseNeuron {
             }
 
             let neuron = &mut self.neurons.read().unwrap()[i].clone(); // TODO: error handling?
-            if neuron.hotkey != neurons[i].hotkey {
+                                                                       //                                                            // if neuron.hotkey != neurons[i].hotkey {
+                                                                       // TODO: if hotkeys have changed reset score and statistics for the uid!
+
+            if neuron.uid != self_uid {
+                // TODO: if we don't run this check we will query ourselves and it will create a deadlock ☠️
                 let neuron_info = &neurons[i];
                 let neuron_ip = &neuron_info.axon_info.ip;
                 let neuron_port = &neuron_info.axon_info.port;
@@ -298,7 +313,9 @@ impl BaseNeuron {
                     neuron_info.uid, neuron_ip, neuron_port
                 );
 
-                let peer_id: PeerId = match reqwest::Client::new()
+                let req_client = reqwest::Client::new();
+
+                let peer_id: PeerId = match req_client
                     .get(format!("http://{}:{}/peerid", neuron_ip, neuron_port))
                     .send()
                     .await
@@ -327,29 +344,83 @@ impl BaseNeuron {
                     }
                 };
 
-                info!("uid: {:?} || peed_id: {:?}", neuron_info.uid, peer_id);
+                info!("uid: {:?} || peer_id: {:?}", neuron_info.uid, peer_id);
                 match self.peer_ids.write() {
                     Ok(mut peer_ids) => {
-                        peer_ids.push(peer_id);
+                        peer_ids.insert(
+                            neuron_info
+                                .uid
+                                .try_into()
+                                .expect("could not convert to u16"),
+                            peer_id,
+                        );
                     }
                     Err(e) => {
                         error!("Error writing to peer_ids: {:?}", e);
                     }
                 }
-            } else {
-                // if neuron.connection.get_mut().is_none() || neurons[i].axon_info != neuron.info.axon_info {
-                //     // neuron.connection = connect_to_miner(
-                //     //     &self.signer,
-                //     //     self.uid,
-                //     //     &neurons[i],
-                //     //     matches!(*neuron.score.get_mut(), Score::Cheater),
-                //     //     &self.metrics,
-                //     // )
-                //     // .into()
-                // }
 
-                // neuron.info = neurons[i].clone();
+                let quic_port = match req_client
+                    .get(format!("http://{}:{}/quic", neuron_ip, neuron_port))
+                    .send()
+                    .await
+                {
+                    Ok(response) => match response.text().await {
+                        Ok(port) => port,
+                        Err(e) => {
+                            error!("Failed to parse QUIC port from response: {:?}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        error!(
+                            "Error getting QUIC port from neuron: {:?} with url: {:?}",
+                            e,
+                            e.url()
+                        );
+                        continue;
+                    }
+                };
+
+                let quic_port = match quic_port.parse::<u16>() {
+                    Ok(parsed_port) => parsed_port,
+                    Err(_) => {
+                        error!("Could not parse quic port as u16");
+                        error!("Preview {quic_port}");
+                        continue;
+                    }
+                };
+
+                info!("uid: {:?} || quic_port: {:?}", neuron_info.uid, quic_port);
+                match self.quic_ports.write() {
+                    Ok(mut quic_ports) => {
+                        quic_ports.insert(
+                            neuron_info
+                                .uid
+                                .try_into()
+                                .expect("could not convert to u16"),
+                            quic_port,
+                        );
+                    }
+                    Err(e) => {
+                        error!("Error writing to peer_ids: {:?}", e);
+                    }
+                }
             }
+            // } else {
+            // if neuron.connection.get_mut().is_none() || neurons[i].axon_info != neuron.info.axon_info {
+            //     // neuron.connection = connect_to_miner(
+            //     //     &self.signer,
+            //     //     self.uid,
+            //     //     &neurons[i],
+            //     //     matches!(*neuron.score.get_mut(), Score::Cheater),
+            //     //     &self.metrics,
+            //     // )
+            //     // .into()
+            // }
+
+            // neuron.info = neurons[i].clone();
+            // }
         }
 
         *self.neurons.write().unwrap() = neurons;
@@ -386,6 +457,7 @@ mod tests {
             netuid: 1,
             external_ip: "127.0.0.1".to_string(),
             api_port: 8080,
+            quic_port: 8081,
             post_ip: false,
             wallet_path: wallet_path.to_str().unwrap().to_string(),
             wallet_name,

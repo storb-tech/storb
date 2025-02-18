@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
+use axum::Json;
 use base::piece_hash::PieceHash;
 use libp2p;
 use miner::{Miner, MinerConfig};
@@ -68,7 +69,7 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     let state = MinerState { miner };
 
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.api_port))
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.quic_port))
         .expect("Failed to bind UDP socket");
 
     let endpoint = Endpoint::new(
@@ -81,14 +82,15 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     info!(
         "Miner listening for pieces on quic://0.0.0.0:{}",
-        config.neuron_config.api_port
+        config.neuron_config.quic_port
     );
 
     let app = axum::Router::new()
         .route("/peerid", get(peer_id))
+        .route("/quic", get(quic_port))
         .with_state(state);
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
-    info!("Validator HTTP server listening on {}", addr);
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port)); // TODO: hard code this for now
+    info!("Miner HTTP server listening on {}", addr);
 
     axum::serve(
         tokio::net::TcpListener::bind(addr)
@@ -185,9 +187,17 @@ async fn main(config: MinerConfig) -> Result<()> {
 pub async fn peer_id(
     state: axum::extract::State<MinerState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    let miner = state.miner.lock().await;
-    let peer_id = miner.neuron.peer_id;
+    let peer_id = state.miner.lock().await.neuron.peer_id;
     Ok(peer_id.to_bytes())
+}
+
+pub async fn quic_port(
+    state: axum::extract::State<MinerState>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let miner = state.miner.lock().await;
+    info!("Got quic port req");
+    let quic_port = miner.config.neuron_config.quic_port;
+    Ok(Json(quic_port))
 }
 
 /// Run the miner
