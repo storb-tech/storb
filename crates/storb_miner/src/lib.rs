@@ -1,12 +1,15 @@
+use anyhow::{Context, Result};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::get;
 use base::piece_hash::PieceHash;
-use base::swarm;
 use libp2p;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
 use rcgen::generate_simple_self_signed;
 use std::error::Error;
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 use store::ObjectStore;
@@ -17,7 +20,8 @@ use tracing::{error, info};
 pub mod miner;
 pub mod store;
 
-struct MinerState {
+#[derive(Clone)]
+pub struct MinerState {
     pub miner: Arc<Mutex<Miner>>,
 }
 
@@ -36,7 +40,7 @@ fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'sta
     Ok(server_config?)
 }
 
-async fn main(config: MinerConfig) {
+async fn main(config: MinerConfig) -> Result<()> {
     info!("Configuring miner server...");
     let server_config = configure_server().unwrap();
 
@@ -79,6 +83,22 @@ async fn main(config: MinerConfig) {
         "Miner listening for pieces on quic://0.0.0.0:{}",
         config.neuron_config.api_port
     );
+
+    let app = axum::Router::new()
+        .route("/peerid", get(peer_id))
+        .with_state(state);
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
+    info!("Validator HTTP server listening on {}", addr);
+
+    axum::serve(
+        tokio::net::TcpListener::bind(addr)
+            .await
+            .context("Failed to bind HTTP server")?,
+        app,
+    )
+    .await
+    .context("HTTP server failed")?;
+
     while let Some(incoming) = endpoint.accept().await {
         let object_store = Arc::clone(&object_store);
         tokio::spawn(async move {
@@ -158,13 +178,23 @@ async fn main(config: MinerConfig) {
             }
         });
     }
+    Ok(())
+}
+
+/// Get the peer ID of the miner
+pub async fn peer_id(
+    state: axum::extract::State<MinerState>,
+) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
+    let miner = state.miner.lock().await;
+    let peer_id = miner.neuron.peer_id;
+    Ok(peer_id.to_bytes())
 }
 
 /// Run the miner
 pub fn run(config: MinerConfig) {
-    tokio::runtime::Builder::new_multi_thread()
+    let _ = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(main(config))
+        .block_on(main(config));
 }

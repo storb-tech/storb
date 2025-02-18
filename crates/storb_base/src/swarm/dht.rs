@@ -153,14 +153,14 @@ impl StorbDHT {
     pub fn new(
         dht_dir: PathBuf,
         port: u16,
-        public_key: identity::PublicKey,
+        local_keypair: identity::Keypair,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
 
         assert!(port < 65535, "Invalid port number");
 
         // Generate a local keypair and derive our peer ID.
-        let local_peer_id = libp2p::PeerId::from_public_key(&public_key);
+        let local_peer_id = libp2p::PeerId::from_public_key(&local_keypair.public());
 
         // Create the RocksDB store and our custom StorbStore.
         // (Propagate errors instead of panicking.)
@@ -185,7 +185,8 @@ impl StorbDHT {
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // Configure Identify to gather basic peer metadata.
-        let identify_config = identify::Config::new("0.0.1".to_string(), public_key.clone());
+        let identify_config =
+            identify::Config::new("0.0.1".to_string(), local_keypair.public().clone());
         let identify = identify::Behaviour::new(identify_config);
 
         // Use Ping to check connectivity.
@@ -200,7 +201,7 @@ impl StorbDHT {
         };
 
         // Build the Swarm using QUIC transport and Tokio.
-        let mut swarm = SwarmBuilder::with_new_identity()
+        let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
             .with_tokio()
             .with_quic() // Using QUIC for transport.
             .with_behaviour(|_| Ok(behaviour))?

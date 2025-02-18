@@ -9,14 +9,11 @@ use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info
 use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
-use ed25519_dalek::{SecretKey, SigningKey};
+use libp2p::PeerId;
+use std::net::SocketAddr;
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
-};
-use subxt::{
-    ext::{codec::Encode, sp_core::Pair},
-    runtime_api::StaticPayload,
 };
 use swarm::dht::StorbDHT;
 use tokio::sync::{mpsc, Mutex};
@@ -102,8 +99,10 @@ pub struct BaseNeuronConfig {
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
+    pub peer_ids: Arc<RwLock<Vec<PeerId>>>, // uid -> peer_id
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
+    pub peer_id: PeerId,
     pub subtensor: Subtensor,
 }
 
@@ -143,23 +142,29 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
-        let hotkey = signer.signer().public();
-        let hotkey_bytes: &[u8; 32] = hotkey.as_ref();
-        let ed25519_key = match libp2p::identity::ed25519::PublicKey::try_from_bytes(hotkey_bytes) {
-            Ok(key) => key,
-            Err(_) => {
-                panic!("Unable to create node peer id")
-            }
-        };
+        let mut ed_keypair = ed25519_dalek::SigningKey::from_bytes(&seed).to_keypair_bytes();
+        let libp2p_keypair =
+            match libp2p::identity::ed25519::Keypair::try_from_bytes(&mut ed_keypair) {
+                Ok(keypair) => keypair,
+                Err(_) => {
+                    return Err(NeuronError::ConfigError(
+                        "Failed to create ed25519 keypair from bytes".to_string(),
+                    ));
+                }
+            };
 
-        let public_key = libp2p::identity::PublicKey::from(ed25519_key);
-        let peer_id = libp2p::PeerId::from_public_key(&public_key);
-
-        let (dht_og, command_sender) =
-            StorbDHT::new(config.dht_dir.clone(), config.dht.port, public_key)
-                .expect("Failed to create StorbDHT instance");
+        let (dht_og, command_sender) = StorbDHT::new(
+            config.dht_dir.clone(),
+            config.dht.port,
+            libp2p_keypair.into(),
+        )
+        .expect("Failed to create StorbDHT instance");
 
         let dht = Arc::new(Mutex::new(dht_og));
+
+        let dht_locked = dht.lock().await;
+        let peer_id = dht_locked.swarm.local_peer_id().clone();
+        drop(dht_locked);
 
         // Spawn a separate task for processing events
         tokio::spawn(async move {
@@ -177,6 +182,8 @@ impl BaseNeuron {
             subtensor,
             neurons: Arc::new(RwLock::new(Vec::new())),
             signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
+            peer_id,
+            peer_ids: Arc::new(RwLock::new(Vec::new())),
         };
 
         // sync metagraph
@@ -184,8 +191,18 @@ impl BaseNeuron {
 
         // TODO: move to sync_metagraph?
         // Get id of this neuronn
-        let my_neurons = neuron.neurons.read().unwrap();
-        let neuron_info = BaseNeuron::find_neuron_info(&my_neurons, signer.account_id()).unwrap();
+        let my_neurons = match neuron.neurons.read() {
+            Ok(neuron) => neuron,
+            Err(e) => {
+                panic!("error: {:?}", e);
+            }
+        };
+        let neuron_info = match BaseNeuron::find_neuron_info(&my_neurons, signer.account_id()) {
+            Some(value) => value,
+            None => {
+                panic!("Neuron info for local neuron is none. Check that this neuron is registered to the subnet.")
+            }
+        };
 
         let neuron_uid = neuron_info.uid;
         // log the neuron id
@@ -210,7 +227,6 @@ impl BaseNeuron {
                 .unwrap();
             info!("Successfully served axon!");
         }
-
         Ok(neuron.clone())
     }
 
@@ -251,37 +267,75 @@ impl BaseNeuron {
         //     .await
         //     .unwrap();
 
-        let neurons = runtime_api.call(neurons_payload).await.unwrap();
+        let neurons: Vec<NeuronInfoLite<AccountId>> =
+            runtime_api.call(neurons_payload).await.unwrap();
 
         // TODO: update things if neurons have changed, etc.
         // look at the current state of the neurons
         // compare with the local
         // update local state if necessary
-        for i in 0..self.neurons.read().unwrap().len() {
+        for i in 0..neurons.len() {
             // TODO: error handling?
+            if i >= self.neurons.read().unwrap().len() {
+                let new_neuron = neurons[i].clone();
+                self.neurons.write().unwrap().push(new_neuron);
+            }
+
             let neuron = &mut self.neurons.read().unwrap()[i].clone(); // TODO: error handling?
-            if neuron.hotkey == neurons[i].hotkey {
-                let neuron_info = neurons[i].clone();
-                let hotkey = &neuron_info.hotkey.clone();
-                let hotkey_bytes: &[u8; 32] = hotkey.as_ref();
-                let ed25519_key =
-                    match libp2p::identity::ed25519::PublicKey::try_from_bytes(hotkey_bytes) {
-                        Ok(key) => key,
-                        Err(_) => {
-                            error!(
-                                "Failed to create ed25519 key from bytes for neuron {:?}",
-                                neuron_info.uid
-                            );
+            if neuron.hotkey != neurons[i].hotkey {
+                let neuron_info = &neurons[i];
+                let neuron_ip = &neuron_info.axon_info.ip;
+                let neuron_port = &neuron_info.axon_info.port;
+
+                // Check if its a valid port
+                if *neuron_port == 0 {
+                    error!("Invalid port for neuron: {:?}", neuron_info.uid);
+                    continue;
+                };
+
+                info!(
+                    "Getting peer id from neuron: {:?} at ip: {:?} and port: {:?}",
+                    neuron_info.uid, neuron_ip, neuron_port
+                );
+
+                let peer_id: PeerId = match reqwest::Client::new()
+                    .get(format!("http://{}:{}/peerid", neuron_ip, neuron_port))
+                    .send()
+                    .await
+                {
+                    Ok(response) => match response.bytes().await {
+                        Ok(bytes) => match PeerId::from_bytes(bytes.as_ref()) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                error!("Failed to convert bytes to PeerId: {:?}", e);
+                                continue;
+                            }
+                        },
+                        Err(e) => {
+                            error!("Error getting peer id bytes from neuron: {:?}", e);
                             continue;
                         }
-                    };
+                    },
 
-                let public_key = libp2p::identity::PublicKey::from(ed25519_key);
-                let peer_id = libp2p::PeerId::from_public_key(&public_key);
-                info!(
-                    "Neuron Id: {:?} | Public key: {:?} | Peer Id: {:?}",
-                    neuron_info.uid, public_key, peer_id
-                );
+                    Err(e) => {
+                        error!(
+                            "Error getting peer id from neuron: {:?} with url: {:?}",
+                            e,
+                            e.url()
+                        );
+                        continue;
+                    }
+                };
+
+                info!("uid: {:?} || peed_id: {:?}", neuron_info.uid, peer_id);
+                match self.peer_ids.write() {
+                    Ok(mut peer_ids) => {
+                        peer_ids.push(peer_id);
+                    }
+                    Err(e) => {
+                        error!("Error writing to peer_ids: {:?}", e);
+                    }
+                }
             } else {
                 // if neuron.connection.get_mut().is_none() || neurons[i].axon_info != neuron.info.axon_info {
                 //     // neuron.connection = connect_to_miner(

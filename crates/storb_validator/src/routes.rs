@@ -12,6 +12,14 @@ use tracing::{error, info};
 use crate::{upload::UploadProcessor, ValidatorState};
 use base::swarm;
 
+pub async fn peer_id(
+    state: axum::extract::State<ValidatorState>,
+) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
+    info!("Got peer id req");
+    let peer_id = state.validator.lock().await.neuron.peer_id;
+    Ok(peer_id.to_bytes())
+}
+
 #[utoipa::path(
     post,
     path = "/file",

@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use routes::{download_file, upload_file};
+use routes::{download_file, peer_id, upload_file};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time};
 use tracing::info;
@@ -75,6 +75,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let app = Router::new()
         .route("/file", post(upload_file))
         .route("/file", get(download_file))
+        .route("/peerid", get(peer_id))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
