@@ -164,14 +164,15 @@ pub async fn download_file(
         for piece_hash in piece_hashes {
             let piece_key = RecordKey::new(&piece_hash);
             info!("RecordKey of piece hash: {:?}", &piece_key);
-            let piece_res = swarm::dht::StorbDHT::get_piece_entry(dht_sender.clone(), piece_key)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Error getting piece entry: {}", e),
-                    )
-                })?;
+            let piece_res =
+                swarm::dht::StorbDHT::get_piece_entry(dht_sender.clone(), piece_key.clone())
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Error getting piece entry: {}", e),
+                        )
+                    })?;
             let piece = match piece_res {
                 Some(piece) => piece,
                 None => {
@@ -182,11 +183,22 @@ pub async fn download_file(
                     ));
                 }
             };
-
             pieces.push(piece.clone());
+            let piece_providers =
+                swarm::dht::StorbDHT::get_piece_providers(dht_sender.clone(), piece_key)
+                    .await
+                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, format!("No Miner Found")))
+                    .unwrap();
+            if piece_providers.is_empty() {
+                error!("No providers found for piece");
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "No providers found for piece".to_string(),
+                ));
+            }
             info!(
-                "Found Piece hash: {:?} | Piece type {:?}",
-                piece.piece_hash, piece.piece_type
+                "Found Piece hash: {:?} | Piece type {:?} | Providers: {:?}",
+                piece.piece_hash, piece.piece_type, piece_providers
             );
         }
     }

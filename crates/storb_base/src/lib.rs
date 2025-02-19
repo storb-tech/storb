@@ -12,6 +12,7 @@ use crabtensor::AccountId;
 use libp2p::PeerId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::time::Duration;
 use std::{
     path::PathBuf,
     sync::{Arc, RwLock},
@@ -20,6 +21,8 @@ use subxt::ext::codec::Compact;
 use swarm::dht::StorbDHT;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
+
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 pub enum NeuronError {
@@ -313,7 +316,10 @@ impl BaseNeuron {
                     neuron_info.uid, neuron_ip, neuron_port
                 );
 
-                let req_client = reqwest::Client::new();
+                let req_client = reqwest::Client::builder()
+                    .timeout(CLIENT_TIMEOUT)
+                    .build()
+                    .expect("Could not build client!"); // TODO: better error handling?
 
                 let peer_id: PeerId = match req_client
                     .get(format!("http://{}:{}/peerid", neuron_ip, neuron_port))

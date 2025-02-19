@@ -827,28 +827,26 @@ impl StorbDHT {
     ///
     /// This function issues a get_providers query and waits for the response.
     pub async fn get_piece_providers(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
     ) -> Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
-
-        let (tx, rx) = oneshot::channel();
-        let id = self.swarm.behaviour_mut().kademlia.get_providers(piece_key);
-
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::GetProviders(HashSet::new(), tx));
-        drop(queries);
-
-        let providers = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await
+        let (response_tx, response_rx) = oneshot::channel();
+        match command_sender
+            .send(DhtCommand::GetProviders {
+                key: piece_key.clone(),
+                response_tx,
+            })
+            .await
         {
-            Ok(result) => match result {
-                Ok(Ok(providers)) => providers,
-                Ok(Err(_)) => return Err("Failed to get piece providers".into()),
-                Err(_) => return Err("Timed out waiting for get_piece_providers response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for get_piece_providers response.".into()),
-        };
-        Ok(providers)
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        match response_rx.await {
+            Ok(Ok(providers)) => Ok(providers),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     /// Removes a record from the DHT using its key.

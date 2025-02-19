@@ -1,18 +1,21 @@
+use std::error::Error;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::{self, Arc};
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Json;
 use base::piece_hash::PieceHash;
+use base::swarm;
+use futures::FutureExt;
 use libp2p;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
 use rcgen::generate_simple_self_signed;
-use std::error::Error;
-use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
 use store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time;
@@ -67,7 +70,7 @@ async fn main(config: MinerConfig) -> Result<()> {
         }
     });
 
-    let state = MinerState { miner };
+    let state = Arc::new(Mutex::new(MinerState { miner })); // TODO: clean up
 
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.quic_port))
         .expect("Failed to bind UDP socket");
@@ -88,7 +91,7 @@ async fn main(config: MinerConfig) -> Result<()> {
     let app = axum::Router::new()
         .route("/peerid", get(peer_id))
         .route("/quic", get(quic_port))
-        .with_state(state);
+        .with_state(state.clone());
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port)); // TODO: hard code this for now
     info!("Miner HTTP server listening on {}", addr);
 
@@ -105,9 +108,19 @@ async fn main(config: MinerConfig) -> Result<()> {
         .unwrap();
     });
 
+    let dht_sender = state
+        .lock()
+        .await
+        .miner
+        .lock()
+        .await
+        .neuron
+        .command_sender
+        .clone();
     let quic_server = tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
-            let object_store = Arc::clone(&object_store);
+            let dht_sender_clone = dht_sender.clone();
+            let object_store_clone = object_store.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
@@ -155,11 +168,18 @@ async fn main(config: MinerConfig) -> Result<()> {
                             let piece_key = libp2p::kad::RecordKey::new(&hash.as_bytes());
 
                             // Add miner as a provider for the piece
-                            // let dht_sender = state.miner.lock().await.neuron.command_sender.clone();
-                            // match swarm::dht::StorbDHT::start_providing_piece(dht_sender, piece_key) {
-                            //     Ok(_) => info!("Added miner as provider for piece"),
-                            //     Err(e) => error!("Failed to add miner as provider for piece: {}", e),
-                            // }
+
+                            match swarm::dht::StorbDHT::start_providing_piece(
+                                dht_sender_clone.clone(),
+                                piece_key,
+                            )
+                            .await
+                            {
+                                Ok(_) => info!("Added miner as provider for piece"),
+                                Err(e) => {
+                                    error!("Failed to add miner as provider for piece: {}", e)
+                                }
+                            }
 
                             if let Err(e) = send.write_all(hash.as_bytes()).await {
                                 error!("Failed to send hash: {}", e);
@@ -173,7 +193,7 @@ async fn main(config: MinerConfig) -> Result<()> {
 
                             let piece_hash =
                                 PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
-                            object_store
+                            object_store_clone
                                 .write(&piece_hash, &piece)
                                 .await
                                 .expect("Failed to write piece to store");
@@ -195,18 +215,26 @@ async fn main(config: MinerConfig) -> Result<()> {
 
 /// Get the peer ID of the miner
 pub async fn peer_id(
-    state: axum::extract::State<MinerState>,
+    state: axum::extract::State<Arc<Mutex<MinerState>>>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    let peer_id = state.miner.lock().await.neuron.peer_id;
+    // let peer_id = state.miner.read().lock().await.neuron.peer_id;
+    let peer_id = state.lock().await.miner.lock().await.neuron.peer_id;
     Ok(peer_id.to_bytes())
 }
 
 pub async fn quic_port(
-    state: axum::extract::State<MinerState>,
+    state: axum::extract::State<Arc<Mutex<MinerState>>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let miner = state.miner.lock().await;
+    let quic_port = state
+        .lock()
+        .await
+        .miner
+        .lock()
+        .await
+        .config
+        .neuron_config
+        .quic_port;
     info!("Got quic port req");
-    let quic_port = miner.config.neuron_config.quic_port;
     Ok(Json(quic_port))
 }
 
