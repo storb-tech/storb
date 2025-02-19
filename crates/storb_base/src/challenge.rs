@@ -333,7 +333,13 @@ impl ChallengeSystem {
 
         // TODO: is the following right?
         // Use modpow instead of pow for g^M calculation
+        debug!("g: {:?}", g);
+        debug!("M: {:?}", proof.big_m);
+        debug!("n: {:?}", n);
+        debug!("τ: {:?}", tau);
         let to_check = g.modpow(&proof.big_m, &n);
+        debug!("to_check: {:?}", to_check);
+        // let t = g.pow
 
         let valid_proof = to_check == tau; // TODO: also check that gcd(e, 2(M^* − M )) = 1
 
@@ -346,6 +352,20 @@ mod tests {
     use super::*;
     use num_bigint::BigUint;
     use rand::RngCore;
+
+    use std::sync::Once;
+
+    // This runs before any tests
+    static INIT: Once = Once::new();
+
+    fn setup_logging() {
+        INIT.call_once(|| {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_test_writer() // This ensures output goes to the test console
+                .init();
+        });
+    }
 
     // --- Unit Tests ---
 
@@ -434,6 +454,7 @@ mod tests {
     // however, because the tests are in the same module, they have access.
     #[test]
     fn test_challenge_proof_roundtrip() {
+        setup_logging();
         // Arrange: Create a challenge system and sample data.
         let system = ChallengeSystem::new().expect("Challenge system creation should succeed");
         let data = b"Miner stored piece of data";
