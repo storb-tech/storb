@@ -19,9 +19,11 @@ use tracing::{error, info};
 pub mod miner;
 mod routes;
 pub mod store;
+
 #[derive(Clone)]
 pub struct MinerState {
     pub miner: Arc<Mutex<Miner>>,
+    pub object_store: Arc<Mutex<ObjectStore>>,
 }
 
 /// Configures the QUIC server with a self-signed certificate for localhost
@@ -48,8 +50,9 @@ async fn main(config: MinerConfig) -> Result<()> {
     // Create weak reference for sync task
     let sync_miner = Arc::downgrade(&miner);
 
-    let object_store =
-        Arc::new(ObjectStore::new(&config.store_dir).expect("Failed to initialize object store"));
+    let object_store = Arc::new(Mutex::new(
+        ObjectStore::new(&config.store_dir).expect("Failed to initialize object store"),
+    ));
 
     // Spawn background sync task
     tokio::spawn(async move {
@@ -65,7 +68,10 @@ async fn main(config: MinerConfig) -> Result<()> {
         }
     });
 
-    let state = Arc::new(Mutex::new(MinerState { miner }));
+    let state = Arc::new(Mutex::new(MinerState {
+        miner,
+        object_store,
+    }));
 
     let assigned_quic_port = config
         .neuron_config
@@ -93,6 +99,7 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     let app = axum::Router::new()
         .route("/info", get(routes::node_info))
+        .route("/piece", get(routes::get_piece))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
@@ -120,10 +127,12 @@ async fn main(config: MinerConfig) -> Result<()> {
         .neuron
         .command_sender
         .clone();
+
     let quic_server = tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
             let dht_sender_clone = dht_sender.clone();
-            let object_store_clone = object_store.clone();
+            let object_store_clone = state.lock().await.object_store.lock().await.clone();
+
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {

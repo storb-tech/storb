@@ -12673,6 +12673,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "utoipa",
  "uuid",
 ]
 
