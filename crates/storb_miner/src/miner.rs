@@ -1,3 +1,4 @@
+use base::sync::Synchronizable;
 use base::{BaseNeuron, BaseNeuronConfig, NeuronError};
 use tracing::info;
 
@@ -7,7 +8,7 @@ pub struct MinerConfig {
     pub store_dir: String,
 }
 
-/// The Storb miner
+/// The Storb miner.
 #[derive(Clone)]
 pub struct Miner {
     pub config: MinerConfig,
@@ -22,9 +23,12 @@ impl Miner {
         Ok(miner)
     }
 
-    pub async fn sync(&mut self) {
+    /// Sync the miner with the metagraph.
+    pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Syncing miner");
-        self.neuron.sync_metagraph().await;
+        self.neuron.sync_metagraph().await?;
         info!("Done syncing miner");
+
+        Ok(())
     }
 }

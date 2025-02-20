@@ -1,7 +1,8 @@
-pub mod constants;
-pub mod piece;
-pub mod piece_hash;
-pub mod swarm;
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
 use crabtensor::axon::{serve_axon_payload, AxonProtocol};
@@ -9,25 +10,26 @@ use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info
 use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
-use libp2p::PeerId;
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::time::Duration;
-use std::{
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
-use subxt::ext::codec::Compact;
-use swarm::dht::StorbDHT;
+use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
+use sync::Synchronizable;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{error, info};
+use tracing::info;
 
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
+use crate::swarm::dht::StorbDHT;
+use crate::version::Version;
+
+pub mod constants;
+pub mod piece;
+pub mod piece_hash;
+pub mod swarm;
+pub mod sync;
+pub mod version;
 
 #[derive(Debug)]
 pub enum NeuronError {
     SubtensorError(String),
     ConfigError(String),
+    NodeInfoError(String),
 }
 
 impl std::fmt::Display for NeuronError {
@@ -35,17 +37,12 @@ impl std::fmt::Display for NeuronError {
         match self {
             NeuronError::SubtensorError(e) => write!(f, "Subtensor error: {}", e),
             NeuronError::ConfigError(e) => write!(f, "Configuration error: {}", e),
+            NeuronError::NodeInfoError(e) => write!(f, "Node info error: {}", e),
         }
     }
 }
 
 impl std::error::Error for NeuronError {}
-
-pub struct Version {
-    pub major: u16,
-    pub minor: u16,
-    pub patch: u16,
-}
 
 #[derive(Clone)]
 pub struct SubtensorConfig {
@@ -68,11 +65,11 @@ pub struct DhtConfig {
 
 #[derive(Clone)]
 pub struct BaseNeuronConfig {
-    // pub version: Version,
+    pub version: Version,
     pub netuid: u16,
     pub external_ip: String,
     pub api_port: u16,
-    pub quic_port: u16,
+    pub quic_port: Option<u16>,
     pub post_ip: bool,
 
     pub wallet_path: String,
@@ -95,21 +92,37 @@ pub struct BaseNeuronConfig {
     pub dht: DhtConfig,
 }
 
-// TODO(420): use this instead of neurons directly? (see TODO(69) )
-// #[derive(Clone)]
-// pub struct NeuronState {
-//     pub peer_ids: Vec<>, // uid -> peer_id
-// }
+#[derive(Clone)]
+pub struct NodeInfo {
+    pub neuron_info: NeuronInfoLite<AccountId>,
+    pub peer_id: Option<PeerId>,
+    pub http_address: Option<Multiaddr>,
+    pub quic_address: Option<Multiaddr>,
+    pub version: Version,
+}
+
+pub enum NodeKey {
+    Uid(u16),
+    PeerId(PeerId),
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalNodeInfo {
+    pub uid: Option<u16>,
+    pub peer_id: Option<PeerId>,
+    pub http_address: Option<Multiaddr>,
+    pub quic_address: Option<Multiaddr>,
+    pub version: Version,
+}
 
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
-    pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
-    pub peer_ids: Arc<RwLock<HashMap<u16, PeerId>>>, // uid -> peer_id
-    pub quic_ports: Arc<RwLock<HashMap<u16, u16>>>,  // uid -> quic server port
+    pub address_book: Arc<RwLock<HashMap<PeerId, NodeInfo>>>,
+    pub peer_node_uid: bimap::BiMap<PeerId, u16>,
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
-    pub peer_id: PeerId,
+    pub local_node_info: LocalNodeInfo,
     pub subtensor: Subtensor,
 }
 
@@ -170,7 +183,7 @@ impl BaseNeuron {
         let dht = Arc::new(Mutex::new(dht_og));
 
         let dht_locked = dht.lock().await;
-        let peer_id = dht_locked.swarm.local_peer_id().clone();
+        let peer_id = *dht_locked.swarm.local_peer_id();
         drop(dht_locked);
 
         // Spawn a separate task for processing events
@@ -183,45 +196,44 @@ impl BaseNeuron {
             }
         });
 
+        let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");
+
+        let local_http_address = Some(multiaddr!(Ip4(external_ip), Tcp(config.api_port)));
+
+        let local_quic_address = config
+            .quic_port
+            .map(|port| multiaddr!(Ip4(external_ip), Udp(port)));
+
+        let local_node_info = LocalNodeInfo {
+            uid: None,
+            peer_id: Some(peer_id),
+            http_address: local_http_address,
+            quic_address: local_quic_address,
+            version: config.version.clone(),
+        };
+
         let mut neuron = BaseNeuron {
             config: config.clone(),
             command_sender,
+            address_book: Arc::new(RwLock::new(HashMap::new())),
+            peer_node_uid: bimap::BiMap::new(),
             subtensor,
-            neurons: Arc::new(RwLock::new(Vec::new())),
-            quic_ports: Arc::new(RwLock::new(HashMap::new())),
             signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
-            peer_id,
-            peer_ids: Arc::new(RwLock::new(HashMap::new())),
+            local_node_info,
         };
 
         // sync metagraph
-        neuron.sync_metagraph().await;
+        let _ = neuron.sync_metagraph().await; // TODO: proper error handling
 
-        // TODO: move to sync_metagraph?
-        // Get id of this neuronn
-        let my_neurons = match neuron.neurons.read() {
-            Ok(neuron) => neuron,
-            Err(e) => {
-                panic!("error: {:?}", e);
-            }
-        };
-        let neuron_info = match BaseNeuron::find_neuron_info(&my_neurons, signer.account_id()) {
-            Some(value) => value,
-            None => {
-                panic!("Neuron info for local neuron is none. Check that this neuron is registered to the subnet.")
-            }
-        };
-
-        let neuron_uid = neuron_info.uid;
-        // log the neuron id
+        let neuron_uid = neuron.local_node_info.uid;
         info!("Neuron id: {:?}", neuron_uid);
 
         // check registration status
         neuron.check_registration().await?;
+
         // post ip if specified
         info!("Should post ip?: {}", config.post_ip);
         if config.post_ip {
-            // TODO: using Udp for now
             let address = format!("{}:{}", config.external_ip, config.api_port)
                 .parse()
                 .unwrap();
@@ -238,6 +250,7 @@ impl BaseNeuron {
         Ok(neuron.clone())
     }
 
+    /// Get info of a neuron (node) from a list of neurons that matches the account ID.
     pub fn find_neuron_info<'a>(
         neurons: &'a [NeuronInfoLite<AccountId>],
         account_id: &AccountId,
@@ -245,13 +258,20 @@ impl BaseNeuron {
         neurons.iter().find(|neuron| &neuron.hotkey == account_id)
     }
 
-    pub fn get_neurons(&self) -> Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>> {
-        self.neurons.clone()
-    }
-
-    /// Check whether the neuron is registered in the subnet or not
+    /// Check whether the neuron is registered in the subnet or not.
     pub async fn check_registration(&self) -> Result<(), NeuronError> {
-        let neurons = self.neurons.read().unwrap();
+        let current_block = self.subtensor.blocks().at_latest().await.unwrap();
+        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
+
+        // TODO: is there a nicer way to pass self to NeuronInfoRuntimeApi?
+        let neurons_payload =
+            NeuronInfoRuntimeApi::get_neurons_lite(&NeuronInfoRuntimeApi {}, self.config.netuid);
+
+        // TODO: error out if cant access chain when calling above function
+
+        let neurons: Vec<NeuronInfoLite<AccountId>> =
+            runtime_api.call(neurons_payload).await.unwrap();
+
         let neuron_info = Self::find_neuron_info(&neurons, self.signer.account_id());
         match neuron_info {
             Some(_) => Ok(()),
@@ -260,184 +280,12 @@ impl BaseNeuron {
             )),
         }
     }
-
-    // TODO: Remove unwraps and handle errors properly
-    /// Synchronise the local metagraph state with chain
-    pub async fn sync_metagraph(&mut self) {
-        info!("Syncing metagraph...");
-
-        let current_block = self.subtensor.blocks().at_latest().await.unwrap();
-        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
-
-        // TODO: do this? specifically with needing to pass &self
-        let neurons_payload =
-            NeuronInfoRuntimeApi::get_neurons_lite(&NeuronInfoRuntimeApi {}, self.config.netuid);
-
-        // let neurons = call_runtime_api_decoded(&runtime_api, neurons_payload)
-        //     .await
-        //     .unwrap();
-
-        let neurons: Vec<NeuronInfoLite<AccountId>> =
-            runtime_api.call(neurons_payload).await.unwrap();
-
-        let neuron_info = BaseNeuron::find_neuron_info(&neurons, self.signer.account_id())
-            .expect("Could not find neuron info");
-        let self_uid = neuron_info.uid;
-
-        // TODO: update things if neurons have changed, etc.
-        // look at the current state of the neurons
-        // compare with the local
-        // update local state if necessary
-        for i in 0..neurons.len() {
-            // TODO: error handling?
-            if i >= self.neurons.read().unwrap().len() {
-                let new_neuron = neurons[i].clone();
-                self.neurons.write().unwrap().push(new_neuron);
-            }
-
-            let neuron = &mut self.neurons.read().unwrap()[i].clone(); // TODO: error handling?
-                                                                       //                                                            // if neuron.hotkey != neurons[i].hotkey {
-                                                                       // TODO: if hotkeys have changed reset score and statistics for the uid!
-
-            if neuron.uid != self_uid {
-                // TODO: if we don't run this check we will query ourselves and it will create a deadlock ☠️
-                let neuron_info = &neurons[i];
-                let neuron_ip = &neuron_info.axon_info.ip;
-                let neuron_port = &neuron_info.axon_info.port;
-
-                // Check if its a valid port
-                if *neuron_port == 0 {
-                    error!("Invalid port for neuron: {:?}", neuron_info.uid);
-                    continue;
-                };
-
-                info!(
-                    "Getting peer id from neuron: {:?} at ip: {:?} and port: {:?}",
-                    neuron_info.uid, neuron_ip, neuron_port
-                );
-
-                let req_client = reqwest::Client::builder()
-                    .timeout(CLIENT_TIMEOUT)
-                    .build()
-                    .expect("Could not build client!"); // TODO: better error handling?
-
-                let peer_id: PeerId = match req_client
-                    .get(format!("http://{}:{}/peerid", neuron_ip, neuron_port))
-                    .send()
-                    .await
-                {
-                    Ok(response) => match response.bytes().await {
-                        Ok(bytes) => match PeerId::from_bytes(bytes.as_ref()) {
-                            Ok(id) => id,
-                            Err(e) => {
-                                error!("Failed to convert bytes to PeerId: {:?}", e);
-                                continue;
-                            }
-                        },
-                        Err(e) => {
-                            error!("Error getting peer id bytes from neuron: {:?}", e);
-                            continue;
-                        }
-                    },
-
-                    Err(e) => {
-                        error!(
-                            "Error getting peer id from neuron: {:?} with url: {:?}",
-                            e,
-                            e.url()
-                        );
-                        continue;
-                    }
-                };
-
-                info!("uid: {:?} || peer_id: {:?}", neuron_info.uid, peer_id);
-                match self.peer_ids.write() {
-                    Ok(mut peer_ids) => {
-                        peer_ids.insert(
-                            neuron_info
-                                .uid
-                                .try_into()
-                                .expect("could not convert to u16"),
-                            peer_id,
-                        );
-                    }
-                    Err(e) => {
-                        error!("Error writing to peer_ids: {:?}", e);
-                    }
-                }
-
-                let quic_port = match req_client
-                    .get(format!("http://{}:{}/quic", neuron_ip, neuron_port))
-                    .send()
-                    .await
-                {
-                    Ok(response) => match response.text().await {
-                        Ok(port) => port,
-                        Err(e) => {
-                            error!("Failed to parse QUIC port from response: {:?}", e);
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "Error getting QUIC port from neuron: {:?} with url: {:?}",
-                            e,
-                            e.url()
-                        );
-                        continue;
-                    }
-                };
-
-                let quic_port = match quic_port.parse::<u16>() {
-                    Ok(parsed_port) => parsed_port,
-                    Err(_) => {
-                        error!("Could not parse quic port as u16");
-                        error!("Preview {quic_port}");
-                        continue;
-                    }
-                };
-
-                info!("uid: {:?} || quic_port: {:?}", neuron_info.uid, quic_port);
-                match self.quic_ports.write() {
-                    Ok(mut quic_ports) => {
-                        quic_ports.insert(
-                            neuron_info
-                                .uid
-                                .try_into()
-                                .expect("could not convert to u16"),
-                            quic_port,
-                        );
-                    }
-                    Err(e) => {
-                        error!("Error writing to peer_ids: {:?}", e);
-                    }
-                }
-            }
-            // } else {
-            // if neuron.connection.get_mut().is_none() || neurons[i].axon_info != neuron.info.axon_info {
-            //     // neuron.connection = connect_to_miner(
-            //     //     &self.signer,
-            //     //     self.uid,
-            //     //     &neurons[i],
-            //     //     matches!(*neuron.score.get_mut(), Score::Cheater),
-            //     //     &self.metrics,
-            //     // )
-            //     // .into()
-            // }
-
-            // neuron.info = neurons[i].clone();
-            // }
-        }
-
-        *self.neurons.write().unwrap() = neurons;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::{self, create_dir_all};
-    // use std::path::Path;
 
     fn setup_test_wallet() -> (PathBuf, String) {
         let temp_dir = std::env::temp_dir().join("storb_test_wallets");
@@ -460,10 +308,15 @@ mod tests {
         let (wallet_path, wallet_name) = setup_test_wallet();
 
         BaseNeuronConfig {
+            version: Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            },
             netuid: 1,
             external_ip: "127.0.0.1".to_string(),
             api_port: 8080,
-            quic_port: 8081,
+            quic_port: Some(8081),
             post_ip: false,
             wallet_path: wallet_path.to_str().unwrap().to_string(),
             wallet_name,
@@ -501,14 +354,16 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_find_neuron_info() {
-        let neurons = vec![];
-        let account_id = AccountId::from([0; 32]);
-        info!("account_id: {account_id}");
-        let result = BaseNeuron::find_neuron_info(&neurons, &account_id);
-        assert!(result.is_none());
-    }
+    // TODO: update tests
+
+    // #[tokio::test]
+    // async fn test_find_neuron_info() {
+    //     let neurons = vec![];
+    //     let account_id = AccountId::from([0; 32]);
+    //     info!("account_id: {account_id}");
+    //     let result = BaseNeuron::find_neuron_info(&neurons, &account_id);
+    //     assert!(result.is_none());
+    // }
 
     // TODO: get wallet handling working properly for testing
     // #[tokio::test]

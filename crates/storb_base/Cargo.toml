@@ -9,6 +9,8 @@ path = "src/lib.rs"
 name = "base"
 
 [dependencies]
+axum.workspace = true
+bimap.workspace = true
 bincode.workspace = true
 blake3.workspace = true
 chrono.workspace = true

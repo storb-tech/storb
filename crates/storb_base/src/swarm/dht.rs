@@ -1,31 +1,22 @@
-use libp2p::{
-    futures::StreamExt,
-    identify, identity,
-    identity::Keypair,
-    kad::{
-        self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
-        PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
-    },
-    mdns, ping,
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    Multiaddr, PeerId, SwarmBuilder,
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use libp2p::futures::StreamExt;
+use libp2p::kad::{
+    self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
+    PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    num::NonZeroUsize,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace};
 
 use super::{db, models, store::StorbStore};
-use crate::constants::{DHT_QUERY_TIMEOUT, STORB_KAD_PROTOCOL_NAME};
-
-// TODO:
-// - update command handling (i.e. see put_piece_entry and handle_put_piece)
+use crate::constants::STORB_KAD_PROTOCOL_NAME;
 
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
 ///
@@ -84,9 +75,11 @@ impl From<ping::Event> for StorbEvent {
     }
 }
 
-/// Internal enum used to associate Kademlia query IDs with their corresponding response channels.
+/// Internal enum used to associate Kademlia query IDs with their corresponding
+/// response channels.
 ///
-/// This enum is used to route responses from asynchronous DHT queries back to the requesters.
+/// This enum is used to route responses from asynchronous DHT queries back
+/// to the requesters.
 enum QueryChannel {
     #[allow(dead_code)]
     Bootstrap(oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>),
@@ -119,6 +112,10 @@ pub enum DhtCommand {
         key: RecordKey,
         response_tx:
             oneshot::Sender<Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>>>,
+    },
+    StartProviding {
+        key: RecordKey,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     },
 }
 
@@ -330,7 +327,7 @@ impl StorbDHT {
                         let _ = ch.send(Err(e.into()));
                     }
                 }
-                // Hello there
+
                 QueryResult::GetProviders(Ok(res)) => {
                     trace!("Getting Providers");
                     let mut finish = false;
@@ -358,19 +355,19 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::GetProviders(Err(e)) => {
-                    trace!("Query failed: {:?}", e);
+                    info!("Query failed: {:?}", e);
                     if let Some(QueryChannel::GetProviders(_, ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
                 }
                 QueryResult::StartProviding(Ok(AddProviderOk { key })) => {
-                    trace!("Start providing succeeded for {:?}", key);
+                    info!("Start providing succeeded for {:?}", key);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Ok(()));
                     }
                 }
                 QueryResult::StartProviding(Err(e)) => {
-                    trace!("Start providing failed: {:?}", e);
+                    info!("Start providing failed: {:?}", e);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
@@ -382,7 +379,7 @@ impl StorbDHT {
 
     fn inject_kad_incoming_query(&mut self, event: kad::Event) {
         if let kad::Event::InboundRequest { request } = event {
-            trace!("Incoming request: {:?}", request);
+            info!("Incoming request: {:?}", request);
         }
     }
 
@@ -491,6 +488,15 @@ impl StorbDHT {
                                 }
                             }
                         }
+                        DhtCommand::StartProviding { key, response_tx } => {
+                            info!("Received StartProviding command");
+                            match self.handle_start_providing(key, response_tx).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Error handling StartProviding command: {:?}", e);
+                                }
+                            }
+                        }
                         DhtCommand::GetProviders { key, response_tx } => {
                             info!("Received GetProviders command");
                             match self.handle_get_providers(key, response_tx).await {
@@ -548,6 +554,27 @@ impl StorbDHT {
 
         let mut queries = self.queries.lock().await;
         queries.insert(id, QueryChannel::GetRecord(1, vec![], response_tx));
+        drop(queries);
+
+        Ok(())
+    }
+
+    async fn handle_start_providing(
+        &mut self,
+        key: RecordKey,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wait_for_bootstrap().await?;
+
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .start_providing(key)
+            .map_err(|e| format!("Failed to register as a piece provider: {:?}", e))?;
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id, QueryChannel::StartProviding(response_tx));
         drop(queries);
 
         Ok(())
@@ -805,21 +832,25 @@ impl StorbDHT {
         piece_key: RecordKey,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (response_tx, response_rx) = oneshot::channel();
+        info!("Starting to provide piece {:?}", &piece_key);
         match command_sender
-            .send(DhtCommand::GetProviders {
+            .send(DhtCommand::StartProviding {
                 key: piece_key.clone(),
                 response_tx,
             })
             .await
         {
             Ok(_) => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                error!("Failed to start providing piece: {}", e);
+                return Err(Box::new(e));
+            }
         }
 
         match response_rx.await {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => return Err(e),
-            Err(e) => return Err(Box::new(e)),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
         }
     }
 

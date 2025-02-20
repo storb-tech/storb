@@ -1,7 +1,8 @@
-use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
 use serde::Serialize;
 use tracing::debug;
 use zfec_rs::Chunk as ZFecChunk;
+
+use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
 
 #[derive(Debug, Clone)]
 pub struct Piece {
@@ -21,8 +22,10 @@ pub enum PieceType {
 pub struct EncodedChunk {
     pub pieces: Option<Vec<Piece>>,
     pub chunk_idx: u64,
-    pub k: u64, // Number of data blocks
-    pub m: u64, // Total blocks (data + parity)
+    /// Number of data blocks
+    pub k: u64,
+    /// Total blocks (data + parity)
+    pub m: u64,
     pub chunk_size: u64,
     pub padlen: u64,
     pub original_chunk_size: u64,
@@ -181,8 +184,6 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .cloned()
             .collect();
         relevant_pieces.sort_by_key(|p| p.piece_idx);
-
-        // debug!("relevant pieces: {:?}", relevant_pieces);
 
         // Ensure at least k pieces are available for decoding
         let k = chunk.k;

@@ -1,7 +1,8 @@
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info};
@@ -11,7 +12,8 @@ use crate::constants::DB_MPSC_BUFFER_SIZE;
 /// Configuration for the RocksDBStore.
 ///
 /// This configuration includes the path to the database,
-/// the maximum number of operations in a batch, and the maximum delay before flushing a batch.
+/// the maximum number of operations in a batch, and the maximum delay before
+/// flushing a batch.
 #[derive(Debug, Clone)]
 pub struct RocksDBConfig {
     pub path: PathBuf,
@@ -169,6 +171,7 @@ impl RocksDBStore {
     ///
     /// The provided key and value are queued for an asynchronous write in the provider CF.
     pub async fn schedule_put_provider(&self, key: &[u8], val: &[u8]) {
+        info!("schedule_put_provider for key: {:?}", &key);
         let op = DbOp::Put {
             cf: CfType::Provider,
             key: key.to_vec(),
@@ -198,6 +201,7 @@ impl RocksDBStore {
     pub async fn get(&self, cf: CfType, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let db = self.db.clone();
         let key = key.to_vec();
+        info!("get: cf={:?}, key={:?}", &cf, &key);
         tokio::task::spawn_blocking(move || {
             let cf_handle = cf
                 .handle(&db)

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use axum::{
     extract::{Multipart, Query},
@@ -7,17 +5,27 @@ use axum::{
     response::IntoResponse,
 };
 use libp2p::kad::RecordKey;
+use std::collections::HashMap;
 use tracing::{error, info};
 
 use crate::{upload::UploadProcessor, ValidatorState};
 use base::swarm;
 
-pub async fn peer_id(
+/// Router function to get information on a given node
+pub async fn node_info(
     state: axum::extract::State<ValidatorState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    info!("Got peer id req");
-    let peer_id = state.validator.lock().await.neuron.peer_id;
-    Ok(peer_id.to_bytes())
+    info!("Got node info req");
+    let neuron = state.validator.read().await.neuron.clone();
+    let serialized_local_node_info = bincode::serialize(&neuron.local_node_info).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            bincode::serialize(&format!("Failed to serialize local node info: {}", e))
+                .unwrap_or_default(),
+        )
+    })?;
+
+    Ok((StatusCode::OK, serialized_local_node_info))
 }
 
 #[utoipa::path(
@@ -78,7 +86,7 @@ pub async fn upload_file(
         .process_upload(stream, content_length, processor.validator_id)
         .await
     {
-        Ok(_) => Ok((StatusCode::OK, "Upload successful".to_string())),
+        Ok(infohash) => Ok((StatusCode::OK, infohash)),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
     }
 }
@@ -107,7 +115,7 @@ pub async fn download_file(
     let key = RecordKey::new(&infohash.as_bytes().to_vec());
     info!("Downloading file with infohash: {:?}", &key);
 
-    let dht_sender = state.validator.lock().await.neuron.command_sender.clone();
+    let dht_sender = state.validator.read().await.neuron.command_sender.clone();
     let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(dht_sender.clone(), key)
         .await
         .map_err(|e| {
@@ -122,7 +130,7 @@ pub async fn download_file(
     ))?;
     info!("Tracker hash: {:?}", tracker.infohash);
     let chunk_hashes = tracker.chunk_hashes;
-    let mut pieces: Vec<swarm::models::PieceDHTValue> = Vec::new();
+    let mut piece_infos: Vec<swarm::models::PieceDHTValue> = Vec::new();
     for chunk_hash in chunk_hashes {
         // convert chunk_hash to a string
         let chunk_key = RecordKey::new(&chunk_hash);
@@ -139,7 +147,7 @@ pub async fn download_file(
                 }
             };
 
-        let chunk_pieces_data: Vec<u8> = Vec::new();
+        let _chunk_pieces_data: Vec<u8> = Vec::new();
 
         let chunk = match chunk_res {
             Some(chunk) => chunk,
@@ -173,8 +181,8 @@ pub async fn download_file(
                             format!("Error getting piece entry: {}", e),
                         )
                     })?;
-            let piece = match piece_res {
-                Some(piece) => piece,
+            let piece_info = match piece_res {
+                Some(piece_entry) => piece_entry,
                 None => {
                     error!("Piece entry not found");
                     return Err((
@@ -183,12 +191,23 @@ pub async fn download_file(
                     ));
                 }
             };
-            pieces.push(piece.clone());
-            let piece_providers =
-                swarm::dht::StorbDHT::get_piece_providers(dht_sender.clone(), piece_key)
-                    .await
-                    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, format!("No Miner Found")))
-                    .unwrap();
+            piece_infos.push(piece_info.clone());
+            info!(
+                "Looking for piece providers for {:?}",
+                &piece_info.piece_hash
+            );
+            let piece_providers = swarm::dht::StorbDHT::get_piece_providers(
+                dht_sender.clone(),
+                piece_info.piece_hash.clone(),
+            )
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "No Miner Found".to_string(),
+                )
+            })
+            .unwrap();
             if piece_providers.is_empty() {
                 error!("No providers found for piece");
                 return Err((
@@ -198,8 +217,12 @@ pub async fn download_file(
             }
             info!(
                 "Found Piece hash: {:?} | Piece type {:?} | Providers: {:?}",
-                piece.piece_hash, piece.piece_type, piece_providers
+                piece_info.piece_hash, piece_info.piece_type, piece_providers
             );
+
+            for provider in piece_providers {
+                info!("Provider: {:?}", provider);
+            }
         }
     }
     Ok((StatusCode::OK, "Download successful".to_string()))

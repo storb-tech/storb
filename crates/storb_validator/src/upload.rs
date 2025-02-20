@@ -1,16 +1,14 @@
 use std::net::SocketAddr;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use axum::body::Bytes;
-use base::{
-    piece::{encode_chunk, get_infohash, piece_length},
-    swarm::{self, dht::DhtCommand, models},
-    BaseNeuron,
-};
+use base::piece::{encode_chunk, get_infohash, piece_length};
+use base::swarm::{self, dht::DhtCommand, models};
 use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
+use libp2p::Multiaddr;
 use quinn::Connection;
 use subxt::ext::codec::Compact;
 use tokio::sync::mpsc;
@@ -21,9 +19,8 @@ use crate::{quic::establish_miner_connections, ValidatorState};
 const MIN_REQUIRED_MINERS: usize = 1;
 const LOGGING_INTERVAL_MB: u64 = 100;
 const BYTES_PER_MB: u64 = 1024 * 1024;
-// const DHT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10); // Adjust timeout as needed
 
-/// Processes upload streams and distributes file pieces to available miners
+/// Processes upload streams and distributes file pieces to available miners.
 pub(crate) struct UploadProcessor<'a> {
     pub miner_connections: Vec<(SocketAddr, Connection)>,
     pub validator_id: Compact<u16>,
@@ -31,42 +28,31 @@ pub(crate) struct UploadProcessor<'a> {
 }
 
 impl<'a> UploadProcessor<'a> {
+    /// Create a new instance of the UploadProcessor.
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
-        // Scope the validator lock guard
-        let (validator_id, miners, quic_ports) = {
-            let validator_guard = state.validator.lock().await;
-            let quic_ports = validator_guard
-                .neuron
-                .quic_ports
-                .read()
-                .expect("Couldn't get quic ports") // TODO: better error handling?
-                .clone();
-            let signer = validator_guard.neuron.signer.clone();
+        let (validator_id, quic_addresses) = {
+            let address_book_arc = state.validator.read().await.neuron.address_book.clone();
+            let validator_id = Compact(
+                state
+                    .validator
+                    .read()
+                    .await
+                    .neuron
+                    .local_node_info
+                    .uid
+                    .expect("Could not read node UID"),
+            );
+            let address_book = address_book_arc.read().await;
+            let quic_addresses: Vec<Multiaddr> = address_book
+                .iter()
+                .filter_map(|(_, node_info)| node_info.quic_address.clone())
+                .collect();
 
-            // Scope the neurons read guard
-            let neurons = {
-                let neurons_guard =
-                    validator_guard.neuron.neurons.read().map_err(|e| {
-                        anyhow::anyhow!("Failed to acquire neurons read lock: {}", e)
-                    })?;
-                neurons_guard.clone()
-            };
-
-            // TODO: move this into the base neuron thing
-            // Get validator_id
-            let neuron_info = BaseNeuron::find_neuron_info(&neurons, signer.account_id())
-                .context("Failed to get neuron info")?;
-            let validator_id = Compact(neuron_info.uid);
-
-            (validator_id, neurons, quic_ports)
+            (validator_id, quic_addresses)
         };
 
-        if miners.is_empty() {
-            return Err(anyhow::anyhow!("No miners available in validator state"));
-        }
-
         // Establish QUIC connections with miners
-        let miner_connections = match establish_miner_connections(&miners, &quic_ports).await {
+        let miner_connections = match establish_miner_connections(quic_addresses).await {
             Ok(connections) => {
                 if connections.is_empty() {
                     bail!("Failed to establish connections with any miners");
@@ -95,6 +81,7 @@ impl<'a> UploadProcessor<'a> {
         })
     }
 
+    /// Process the upload of a file and its distribution to miners.
     pub(crate) async fn process_upload<S, E>(
         &self,
         stream: S,
@@ -128,17 +115,18 @@ impl<'a> UploadProcessor<'a> {
 
         // Spawn consumer task
         let miner_conns = self.miner_connections.clone();
-        // TODO: isn't this kinda nasty?
+        // TODO: all these clones are not the most ideal, perhaps fix?
         let dht_sender = self
             .state
             .validator
-            .lock()
+            .read()
             .await
             .neuron
             .command_sender
             .clone();
         let dht_sender_clone = dht_sender.clone();
-        let signer = self.state.validator.lock().await.neuron.signer.clone();
+
+        let signer = self.state.validator.read().await.neuron.signer.clone();
         let signer_clone = signer.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(
@@ -148,6 +136,7 @@ impl<'a> UploadProcessor<'a> {
                 dht_sender_clone,
                 signer_clone,
             )
+            .await
         });
 
         let now = Utc::now();
@@ -157,21 +146,19 @@ impl<'a> UploadProcessor<'a> {
         // Wait for both tasks to complete
         let (_producer_result, consumer_result) = tokio::join!(producer_handle, consumer_handle);
 
-        let (piece_hashes, chunk_hashes) = consumer_result.context("Consumer task failed")?.await?; // TODO: better error handling
+        let (piece_hashes, chunk_hashes) = consumer_result??;
 
         // log the chunk hashes as strings
         info!("Lubed up Chunk hashes: {:?}", chunk_hashes);
-        let chunk_hashes_str: Vec<String> =
-            chunk_hashes.iter().map(|hash| hex::encode(hash)).collect();
+        let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
         info!("Chunk hashes: {:?}", chunk_hashes_str);
 
         let chunk_count = chunk_hashes.len() as u64;
 
-        // TODO: some of this stuff can be moved into its own helper function
         let infohash = get_infohash(
             filename.clone(),
             timestamp,
-            chunk_size, // TODO: handle error
+            chunk_size,
             total_size,
             piece_hashes,
         );
@@ -193,7 +180,7 @@ impl<'a> UploadProcessor<'a> {
             Ok(bytes) => bytes,
             Err(err) => {
                 error!("Failed to serialize msg: {:?}", err);
-                bail!("Failed to serialize tracker message"); // Propagate the error
+                bail!("Failed to serialize tracker message");
             }
         };
 
@@ -216,7 +203,7 @@ impl<'a> UploadProcessor<'a> {
             .expect("Failed to put tracker entry into DHT"); // TODO: handle error
         debug!("Inserted tracker entry with infohash {infohash}");
 
-        Ok("Upload processed successfully".to_string())
+        Ok(infohash)
     }
 }
 
@@ -247,7 +234,6 @@ where
                 return Err(anyhow::anyhow!("Upload size exceeds expected size"));
             }
 
-            // Log progress every LOGGING_INTERVAL_MB MB
             if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
                 info!(
                     "Processing: {} MB / {} MB",
@@ -316,18 +302,17 @@ async fn consume_bytes(
                     if n == 0 || buf[0] == b'\n' {
                         break;
                     }
-                    _hash.push(buf[0] as u8);
+                    _hash.push(buf[0]);
                 }
 
                 // TODO: verification + scoring
 
                 // TODO: maybe do this in a background thread instead of doing it here?
                 // Add piece metadata to DHT
-
                 // TODO: some of this stuff can be moved into its own helper function
-                // b"e19f8b1e"
                 let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
                 info!("UPLOAD PIECE KEY: {:?}", &piece_key);
+
                 let msg = (
                     piece_key.clone(),
                     validator_id,
@@ -353,14 +338,12 @@ async fn consume_bytes(
                     signature,
                 };
 
-                // dht::StorbDHT::put_piece_entry
                 swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
                     .await
                     .expect("Failed to put piece entry in DHT"); // TODO: handle error
 
-                info!("Received hash for piece {piece_idx} from miner {addr}"); // TODO: log piece hash from miner here?
+                info!("Received hash for piece {piece_idx} from miner {addr}");
                 chunk_piece_hashes.push(*piece_hash);
-                // TODO: handle error
                 piece_hashes.extend(chunk_piece_hashes.iter().cloned());
             }
         }
@@ -370,7 +353,6 @@ async fn consume_bytes(
         let chunk_hash_raw = blake3::hash(&chunk);
         let chunk_hash = chunk_hash_raw.as_bytes();
         let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash);
-        // log chunk key
         info!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
 
         let chunk_msg = (

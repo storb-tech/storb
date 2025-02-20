@@ -1,19 +1,23 @@
-use super::db::{CfType, RocksDBStore};
-use super::record::{StorbProviderRecord, StorbRecord};
+use std::borrow::Cow;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex};
+
 use libp2p::kad::store::{RecordStore, Result as StoreRes};
 use libp2p::kad::{ProviderRecord, Record, RecordKey};
 use libp2p::PeerId;
 use lru::LruCache;
-use std::borrow::Cow;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
+use tracing::info;
 
-/// A store that implements libp2p's RecordStore trait using RocksDB as persistent storage
-/// and LRU caches for in-memory caching of records and provider records.
+use super::db::{CfType, RocksDBStore};
+use super::record::{StorbProviderRecord, StorbRecord};
+
+/// A store that implements libp2p's RecordStore trait using RocksDB as
+/// persistent storage and LRU caches for in-memory caching of records and
+/// provider records.
 ///
-/// This store enables asynchronous operations via tokio and supports both record and provider
-/// record management.
+/// This store enables asynchronous operations via tokio and supports both
+/// record and provider record management.
 pub struct StorbStore {
     rec: Mutex<LruCache<RecordKey, Record>>,
     prv: Mutex<LruCache<RecordKey, Vec<ProviderRecord>>>,
@@ -23,8 +27,8 @@ pub struct StorbStore {
 impl StorbStore {
     /// Creates a new `StorbStore` with specified cache capacities.
     ///
-    /// The store maintains separate caches for records and provider records, and uses the provided
-    /// RocksDBStore for persistent storage.
+    /// The store maintains separate caches for records and provider records,
+    /// and uses the provided RocksDBStore for persistent storage.
     pub fn new(db: Arc<RocksDBStore>, cap_r: NonZeroUsize, cap_p: NonZeroUsize) -> Self {
         Self {
             rec: Mutex::new(LruCache::new(cap_r)),
@@ -39,6 +43,7 @@ impl RecordStore for StorbStore {
         = std::vec::IntoIter<Cow<'a, Record>>
     where
         Self: 'a;
+
     type ProvidedIter<'a>
         = std::vec::IntoIter<Cow<'a, ProviderRecord>>
     where
@@ -100,14 +105,14 @@ impl RecordStore for StorbStore {
         let wrapper = StorbRecord::from(r.clone());
         // Serialize the record; panics if serialization fails.
         let vb = bincode::serialize(&wrapper).expect("serialization failed");
-        // Handle::current().block_on(self.db.schedule_put(kb, &vb));
+
         // Schedule the put operation on the RocksDB store.
         // TODO: is there a better way to do this instead of having to clone the db?
         let db = self.db.clone();
         tokio::spawn(async move {
             db.schedule_put(&kb, &vb).await;
         });
-        // tokio::runtime::Handle::current().block_on(self.db.schedule_put(kb, &vb));
+
         Ok(())
     }
 
@@ -145,11 +150,17 @@ impl RecordStore for StorbStore {
         let mut vec = lock.get(&k).cloned().unwrap_or_default();
         vec.push(p.clone());
         lock.put(k.clone(), vec);
-        let kb = k.as_ref();
+        let kb = p.key.as_ref().to_vec();
+
         // Wrap the provider record for serialization.
         let wrapper = StorbProviderRecord::from(p.clone());
         let pb = bincode::serialize(&wrapper).expect("serialization failed");
-        Handle::current().block_on(self.db.schedule_put_provider(kb, &pb));
+        let db = self.db.clone();
+        info!("Adding provider record for key {:?}", k);
+        tokio::spawn(async move {
+            db.schedule_put_provider(&kb, &pb).await;
+        });
+
         Ok(())
     }
 
@@ -157,12 +168,93 @@ impl RecordStore for StorbStore {
     ///
     /// If no provider records are found in the in-memory cache, returns an empty vector.
     fn providers(&self, k: &RecordKey) -> Vec<ProviderRecord> {
-        self.prv
+        // Check in-memory cache first
+        if let Some(providers) = self
+            .prv
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::error!("Cache lock poisoned in providers(): {}", e);
+                e.into_inner()
+            })
             .get(k)
-            .cloned()
-            .unwrap_or_default()
+        {
+            tracing::info!(
+                "Cache hit for key {:?}: found {} providers",
+                k,
+                providers.len()
+            );
+            return providers.clone();
+        }
+        tracing::info!("Cache miss for key {:?}, checking database", k);
+
+        let kb = k.as_ref();
+
+        // Perform a blocking call to retrieve the provider record from RocksDB
+        let db_result = tokio::task::block_in_place(|| {
+            tracing::info!("Creating runtime for database access");
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    tracing::error!("Failed to build runtime in providers(): {}", e);
+                    e
+                })
+                .expect("Failed to build runtime");
+
+            rt.block_on(async {
+                    // Get the serialized provider record from the database
+                    tracing::info!("Querying database for key {:?}", k);
+                    match self.db.get(CfType::Provider, kb).await {
+                        Ok(Some(bytes)) => {
+                            tracing::info!("Found record in database for key {:?}", k);
+                            match bincode::deserialize::<StorbProviderRecord>(&bytes) {
+                                Ok(wrapper) => {
+                                    let provider = ProviderRecord::from(wrapper);
+                                    tracing::info!(
+                                        "Successfully deserialized provider record for key {:?}, provider: {:?}",
+                                        k,
+                                        provider.provider
+                                    );
+
+                                    // Update the in-memory cache with a new vector containing the provider
+                                    if let Err(e) = self.prv.lock().map(|mut lock| {
+                                        let mut providers = lock.get(k).cloned().unwrap_or_default();
+                                        providers.push(provider.clone());
+                                        lock.put(k.clone(), providers);
+                                        tracing::info!("Updated cache with provider for key {:?}", k);
+                                    }) {
+                                        tracing::error!("Failed to acquire cache lock for update in providers(): {}", e);
+                                    }
+
+                                    vec![provider]
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "Failed to deserialize provider record in providers(): {} for key: {:?}",
+                                        e,
+                                        k
+                                    );
+                                    Vec::new()
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::debug!("No provider record found in database for key: {:?}", k);
+                            Vec::new()
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Database error in providers() while fetching key {:?}: {}",
+                                k,
+                                e
+                            );
+                            Vec::new()
+                        }
+                    }
+                })
+        });
+
+        db_result
     }
 
     /// Returns an iterator over all provider records stored in the in-memory cache.
@@ -180,9 +272,9 @@ impl RecordStore for StorbStore {
 
     /// Removes a provider record for a given key and peer ID.
     ///
-    /// The provider record is removed from the in-memory cache. If no provider records remain,
-    /// a delete operation is scheduled on the RocksDB store. Otherwise, the updated provider
-    /// list is serialized and stored persistently.
+    /// The provider record is removed from the in-memory cache. If no provider
+    /// records remain, a delete operation is scheduled on the RocksDB store.
+    /// Otherwise, the updated provider list is serialized and stored persistently.
     fn remove_provider(&mut self, k: &RecordKey, pid: &PeerId) {
         let mut lock = self.prv.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(mut vec) = lock.pop(k) {

@@ -1,17 +1,12 @@
 use std::error::Error;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::{self, Arc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Json;
 use base::piece_hash::PieceHash;
 use base::swarm;
-use futures::FutureExt;
-use libp2p;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
@@ -22,8 +17,8 @@ use tokio::time;
 use tracing::{error, info};
 
 pub mod miner;
+mod routes;
 pub mod store;
-
 #[derive(Clone)]
 pub struct MinerState {
     pub miner: Arc<Mutex<Miner>>,
@@ -65,14 +60,19 @@ async fn main(config: MinerConfig) -> Result<()> {
             interval.tick().await;
             if let Some(miner) = sync_miner.upgrade() {
                 let mut guard = miner.lock().await;
-                guard.sync().await;
+                let _ = guard.sync().await; // TODO: handle error properly
             }
         }
     });
 
-    let state = Arc::new(Mutex::new(MinerState { miner })); // TODO: clean up
+    let state = Arc::new(Mutex::new(MinerState { miner }));
 
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.quic_port))
+    let assigned_quic_port = config
+        .neuron_config
+        .quic_port
+        .expect("Could not assign quic port");
+
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", assigned_quic_port))
         .expect("Failed to bind UDP socket");
 
     let endpoint = Endpoint::new(
@@ -85,14 +85,17 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     info!(
         "Miner listening for pieces on quic://0.0.0.0:{}",
-        config.neuron_config.quic_port
+        config
+            .neuron_config
+            .quic_port
+            .expect("Could not get quic port")
     );
 
     let app = axum::Router::new()
-        .route("/peerid", get(peer_id))
-        .route("/quic", get(quic_port))
+        .route("/info", get(routes::node_info))
         .with_state(state.clone());
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port)); // TODO: hard code this for now
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Miner HTTP server listening on {}", addr);
 
     let http_server = tokio::spawn(async move {
@@ -165,17 +168,20 @@ async fn main(config: MinerConfig) -> Result<()> {
 
                             let hash_raw = blake3::hash(&piece);
                             let hash = hash_raw.to_hex().to_string();
-                            let piece_key = libp2p::kad::RecordKey::new(&hash.as_bytes());
+                            let piece_key = libp2p::kad::RecordKey::new(&hash_raw.as_bytes());
 
                             // Add miner as a provider for the piece
 
                             match swarm::dht::StorbDHT::start_providing_piece(
                                 dht_sender_clone.clone(),
-                                piece_key,
+                                piece_key.clone(),
                             )
                             .await
                             {
-                                Ok(_) => info!("Added miner as provider for piece"),
+                                Ok(_) => info!(
+                                    "Added miner as provider for piece with key {:?}",
+                                    piece_key
+                                ),
                                 Err(e) => {
                                     error!("Failed to add miner as provider for piece: {}", e)
                                 }
@@ -211,31 +217,6 @@ async fn main(config: MinerConfig) -> Result<()> {
     let _ = tokio::try_join!(http_server, quic_server);
 
     Ok(())
-}
-
-/// Get the peer ID of the miner
-pub async fn peer_id(
-    state: axum::extract::State<Arc<Mutex<MinerState>>>,
-) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    // let peer_id = state.miner.read().lock().await.neuron.peer_id;
-    let peer_id = state.lock().await.miner.lock().await.neuron.peer_id;
-    Ok(peer_id.to_bytes())
-}
-
-pub async fn quic_port(
-    state: axum::extract::State<Arc<Mutex<MinerState>>>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let quic_port = state
-        .lock()
-        .await
-        .miner
-        .lock()
-        .await
-        .config
-        .neuron_config
-        .quic_port;
-    info!("Got quic port req");
-    Ok(Json(quic_port))
 }
 
 /// Run the miner

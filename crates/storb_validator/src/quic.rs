@@ -1,56 +1,63 @@
-use crate::signature::InsecureCertVerifier;
-use anyhow::{anyhow, Result};
-use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
-use crabtensor::AccountId;
+use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use libp2p::multiaddr::Protocol;
+use libp2p::Multiaddr;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint};
 use rustls::ClientConfig as RustlsClientConfig;
-use std::collections::HashMap;
-use std::{error::Error, net::SocketAddr, sync::Arc, time::Duration};
 use tracing::{error, info};
+
+use crate::signature::InsecureCertVerifier;
 
 pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO: turn this into a setting?
 const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
+const MAX_ATTEMPTS: i32 = 5;
 
-// TODO: add filtering so we only connecto to miners that are online, etc??
-/// Establishes QUIC connections with a list of miners
+/// Convert Multiaddr to SocketAddr.
+/// The multiaddr format might be something like: `/ip4/127.0.0.1/udp/9000`.
+fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Option<SocketAddr> {
+    let mut iter = addr.iter();
+
+    // Look for IP protocol component
+    let ip = match iter.next()? {
+        Protocol::Ip4(ip) => IpAddr::V4(ip),
+        Protocol::Ip6(ip) => IpAddr::V6(ip),
+        _ => return None,
+    };
+
+    // Look for TCP protocol component with port
+    let port = match iter.next()? {
+        Protocol::Tcp(port) => port,
+        Protocol::Udp(port) => port,
+        _ => return None,
+    };
+
+    // Construct and return the SocketAddr
+    Some(SocketAddr::new(ip, port))
+}
+
+/// Establishes QUIC connections to miners from a list of QUIC addresses.
 pub async fn establish_miner_connections(
-    miners: &[NeuronInfoLite<AccountId>],
-    quic_ports: &HashMap<u16, u16>,
+    quic_addresses: Vec<Multiaddr>,
 ) -> Result<Vec<(SocketAddr, Connection)>> {
     let mut connection_futures = Vec::new();
 
-    for (idx, miner) in miners.iter().enumerate() {
-        let ip_u32 = miner.axon_info.ip;
-        let ip_bytes: [u8; 4] = [
-            (ip_u32 >> 24) as u8,
-            (ip_u32 >> 16) as u8,
-            (ip_u32 >> 8) as u8,
-            ip_u32 as u8,
-        ];
-        let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip_bytes));
-
-        let quic_port = match quic_ports.get(&(idx as u16)) {
-            Some(q_port) => q_port,
-            None => {
-                continue;
-            }
-        };
-
-        let addr = SocketAddr::new(ip, *quic_port);
-
-        let client = make_client_endpoint(SocketAddr::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            0,
-        ))
-        .map_err(|e| anyhow!(e.to_string()))?;
+    for quic_addr in quic_addresses {
+        let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let socket_addr = multiaddr_to_socketaddr(&quic_addr)
+            .context("Could not get SocketAddr from Multiaddr. Ensure that the Multiaddr is not missing any components")?;
 
         connection_futures.push(async move {
-            match create_quic_client(&client, addr).await {
-                Ok(connection) => Some((addr, connection)),
+            match create_quic_client(&client, socket_addr).await {
+                Ok(connection) => Some((socket_addr, connection)),
                 Err(e) => {
-                    error!("Failed to establish connection with {}: {}", addr, e);
+                    error!("Failed to establish connection with {}: {}", socket_addr, e);
                     None
                 }
             }
@@ -99,15 +106,13 @@ pub fn make_client_endpoint(
     let client_cfg = configure_client()?;
 
     let mut attempts = 0;
-    let max_attempts = 5;
-
-    while attempts < max_attempts {
+    while attempts < MAX_ATTEMPTS {
         match Endpoint::client(bind_addr) {
             Ok(mut endpoint) => {
                 endpoint.set_default_client_config(client_cfg.clone());
                 return Ok(endpoint);
             }
-            Err(_) if attempts < max_attempts - 1 => {
+            Err(_) if attempts < MAX_ATTEMPTS - 1 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 continue;

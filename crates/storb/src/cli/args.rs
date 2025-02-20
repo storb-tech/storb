@@ -2,6 +2,7 @@
 //! `miner` and `validator`.
 
 use crate::{config::Settings, get_config_value};
+use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 
@@ -202,6 +203,12 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
     };
 
     BaseNeuronConfig {
+        version: Version {
+            // TODO: should this be defined elsewhere?
+            major: 0,
+            minor: 2,
+            patch: 2,
+        },
         netuid: *get_config_value!(args, "netuid", u16, settings.netuid),
         wallet_path: get_config_value!(args, "wallet_path", String, &settings.wallet_path)
             .to_string(),
@@ -211,7 +218,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             .to_string(),
         external_ip: get_config_value!(args, "external_ip", String, &settings.external_ip).clone(),
         api_port,
-        quic_port,
+        quic_port: Some(quic_port), // TODO: surely there's a better way to do this
         post_ip: *get_config_value!(args, "post_ip", bool, &settings.post_ip),
         mock: *get_config_value!(args, "mock", bool, &settings.mock),
         load_old_nodes: *get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),

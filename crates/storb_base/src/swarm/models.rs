@@ -127,7 +127,8 @@ pub fn serialize_dht_value(value: &DHTValue) -> Result<Vec<u8>, DHTError> {
 ///
 /// # Errors
 ///
-/// Returns a `DHTError` if the input is empty, the type tag is unknown, or if deserialization fails.
+/// Returns a `DHTError` if the input is empty, the type tag is unknown,
+/// or if deserialization fails.
 pub fn deserialize_dht_value(bytes: &[u8]) -> Result<DHTValue, DHTError> {
     let bincode_opts = bincode::DefaultOptions::new()
         .with_little_endian()
