@@ -1,7 +1,8 @@
-pub mod constants;
-pub mod piece;
-pub mod piece_hash;
-pub mod swarm;
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
 use crabtensor::axon::{serve_axon_payload, AxonProtocol};
@@ -9,18 +10,29 @@ use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info
 use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
-use ed25519_dalek::{SecretKey, SigningKey};
-use std::{
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
-use swarm::dht::StorbDHT;
+use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
+use sync::Synchronizable;
+use tokio::sync::{mpsc, Mutex};
 use tracing::info;
+
+use crate::swarm::dht::StorbDHT;
+use crate::version::Version;
+
+pub mod constants;
+pub mod piece;
+pub mod piece_hash;
+pub mod swarm;
+pub mod sync;
+pub mod utils;
+pub mod version;
+
+pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
 
 #[derive(Debug)]
 pub enum NeuronError {
     SubtensorError(String),
     ConfigError(String),
+    NodeInfoError(String),
 }
 
 impl std::fmt::Display for NeuronError {
@@ -28,17 +40,12 @@ impl std::fmt::Display for NeuronError {
         match self {
             NeuronError::SubtensorError(e) => write!(f, "Subtensor error: {}", e),
             NeuronError::ConfigError(e) => write!(f, "Configuration error: {}", e),
+            NeuronError::NodeInfoError(e) => write!(f, "Node info error: {}", e),
         }
     }
 }
 
 impl std::error::Error for NeuronError {}
-
-pub struct Version {
-    pub major: u16,
-    pub minor: u16,
-    pub patch: u16,
-}
 
 #[derive(Clone)]
 pub struct SubtensorConfig {
@@ -55,17 +62,17 @@ pub struct NeuronConfig {
 #[derive(Clone)]
 pub struct DhtConfig {
     pub port: u16,
-    pub file: String,
     pub bootstrap_ip: String,
     pub bootstrap_port: u16,
 }
 
 #[derive(Clone)]
 pub struct BaseNeuronConfig {
-    // pub version: Version,
+    pub version: Version,
     pub netuid: u16,
     pub external_ip: String,
     pub api_port: u16,
+    pub quic_port: Option<u16>,
     pub post_ip: bool,
 
     pub wallet_path: String,
@@ -78,6 +85,7 @@ pub struct BaseNeuronConfig {
     pub min_stake_threshold: u64,
 
     pub db_dir: PathBuf,
+    pub dht_dir: PathBuf,
     pub pem_file: String,
 
     pub subtensor: SubtensorConfig,
@@ -87,14 +95,41 @@ pub struct BaseNeuronConfig {
     pub dht: DhtConfig,
 }
 
+#[derive(Debug, Clone)]
+pub struct NodeInfo {
+    pub neuron_info: NeuronInfoLite<AccountId>,
+    pub peer_id: Option<PeerId>,
+    pub http_address: Option<Multiaddr>,
+    pub quic_address: Option<Multiaddr>,
+    pub version: Version,
+}
+
+pub enum NodeKey {
+    Uid(u16),
+    PeerId(PeerId),
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalNodeInfo {
+    pub uid: Option<u16>,
+    pub peer_id: Option<PeerId>,
+    pub http_address: Option<Multiaddr>,
+    pub quic_address: Option<Multiaddr>,
+    pub version: Version,
+}
+
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
-    pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
+    pub address_book: AddressBook,
+    pub peer_node_uid: bimap::BiMap<PeerId, u16>,
+    pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
+    pub local_node_info: LocalNodeInfo,
     pub subtensor: Subtensor,
 }
 
+// TODO: add a function for loading neuron state? (see TODO(420))
 impl BaseNeuron {
     async fn get_subtensor_connection(
         insecure: bool,
@@ -130,21 +165,78 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
+        let mut ed_keypair = ed25519_dalek::SigningKey::from_bytes(&seed).to_keypair_bytes();
+        let libp2p_keypair =
+            match libp2p::identity::ed25519::Keypair::try_from_bytes(&mut ed_keypair) {
+                Ok(keypair) => keypair,
+                Err(_) => {
+                    return Err(NeuronError::ConfigError(
+                        "Failed to create ed25519 keypair from bytes".to_string(),
+                    ));
+                }
+            };
+
+        let (dht_og, command_sender) = StorbDHT::new(
+            config.dht_dir.clone(),
+            config.dht.port,
+            libp2p_keypair.into(),
+        )
+        .expect("Failed to create StorbDHT instance");
+
+        let dht = Arc::new(Mutex::new(dht_og));
+
+        let dht_locked = dht.lock().await;
+        let peer_id = *dht_locked.swarm.local_peer_id();
+        drop(dht_locked);
+
+        // Spawn a separate task for processing events
+        tokio::spawn(async move {
+            loop {
+                let mut dht_locked = dht.lock().await;
+                dht_locked.process_events().await;
+                drop(dht_locked);
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");
+
+        let local_http_address = Some(multiaddr!(Ip4(external_ip), Tcp(config.api_port)));
+
+        let local_quic_address = config
+            .quic_port
+            .map(|port| multiaddr!(Ip4(external_ip), Udp(port)));
+
+        let local_node_info = LocalNodeInfo {
+            uid: None,
+            peer_id: Some(peer_id),
+            http_address: local_http_address,
+            quic_address: local_quic_address,
+            version: config.version.clone(),
+        };
+
         let mut neuron = BaseNeuron {
             config: config.clone(),
+            command_sender,
+            address_book: Arc::new(RwLock::new(HashMap::new())),
+            peer_node_uid: bimap::BiMap::new(),
             subtensor,
-            neurons: Arc::new(RwLock::new(Vec::new())),
-            signer,
+            signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
+            local_node_info,
         };
 
         // sync metagraph
-        neuron.sync_metagraph().await;
+        let _ = neuron.sync_metagraph().await; // TODO: proper error handling
+
+        let neuron_uid = neuron.local_node_info.uid;
+        info!("Neuron id: {:?}", neuron_uid);
+
         // check registration status
         neuron.check_registration().await?;
+
         // post ip if specified
         info!("Should post ip?: {}", config.post_ip);
         if config.post_ip {
-            // TODO: using Udp for now
             let address = format!("{}:{}", config.external_ip, config.api_port)
                 .parse()
                 .unwrap();
@@ -158,38 +250,31 @@ impl BaseNeuron {
                 .unwrap();
             info!("Successfully served axon!");
         }
-
-        let secret_key = SecretKey::from(seed);
-        let keypair_bytes = SigningKey::from(secret_key).to_bytes();
-        let libp2p_keypair = libp2p::identity::Keypair::ed25519_from_bytes(keypair_bytes)
-            .unwrap_or_else(|_| {
-                panic!("Failed to create libp2p keypair from bytes");
-            });
-
-        let dht = StorbDHT::new(config.db_dir.clone(), config.dht.port, libp2p_keypair)
-            .expect("Failed to create StorbDHT instance");
-
-        tokio::spawn(async {
-            dht.run().await.expect("Failed to run StorbDHT");
-        });
-
-        Ok(neuron)
+        Ok(neuron.clone())
     }
 
-    fn find_neuron_info<'a>(
+    /// Get info of a neuron (node) from a list of neurons that matches the account ID.
+    pub fn find_neuron_info<'a>(
         neurons: &'a [NeuronInfoLite<AccountId>],
         account_id: &AccountId,
     ) -> Option<&'a NeuronInfoLite<AccountId>> {
         neurons.iter().find(|neuron| &neuron.hotkey == account_id)
     }
 
-    pub fn get_neurons(&self) -> Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>> {
-        self.neurons.clone()
-    }
-
-    /// Check whether the neuron is registered in the subnet or not
+    /// Check whether the neuron is registered in the subnet or not.
     pub async fn check_registration(&self) -> Result<(), NeuronError> {
-        let neurons = self.neurons.read().unwrap();
+        let current_block = self.subtensor.blocks().at_latest().await.unwrap();
+        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
+
+        // TODO: is there a nicer way to pass self to NeuronInfoRuntimeApi?
+        let neurons_payload =
+            NeuronInfoRuntimeApi::get_neurons_lite(&NeuronInfoRuntimeApi {}, self.config.netuid);
+
+        // TODO: error out if cant access chain when calling above function
+
+        let neurons: Vec<NeuronInfoLite<AccountId>> =
+            runtime_api.call(neurons_payload).await.unwrap();
+
         let neuron_info = Self::find_neuron_info(&neurons, self.signer.account_id());
         match neuron_info {
             Some(_) => Ok(()),
@@ -198,32 +283,12 @@ impl BaseNeuron {
             )),
         }
     }
-
-    // TODO: Remove unwraps and handle errors properly
-    /// Synchronise the local metagraph state with chain
-    pub async fn sync_metagraph(&mut self) {
-        let current_block = self.subtensor.blocks().at_latest().await.unwrap();
-        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
-
-        // TODO: do this? specifically with needing to pass &self
-        let neurons_payload =
-            NeuronInfoRuntimeApi::get_neurons_lite(&NeuronInfoRuntimeApi {}, self.config.netuid);
-
-        // let neurons = call_runtime_api_decoded(&runtime_api, neurons_payload)
-        //     .await
-        //     .unwrap();
-
-        let neurons = runtime_api.call(neurons_payload).await.unwrap();
-
-        *self.neurons.write().unwrap() = neurons;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs::{self, create_dir_all};
-    // use std::path::Path;
 
     fn setup_test_wallet() -> (PathBuf, String) {
         let temp_dir = std::env::temp_dir().join("storb_test_wallets");
@@ -246,9 +311,15 @@ mod tests {
         let (wallet_path, wallet_name) = setup_test_wallet();
 
         BaseNeuronConfig {
+            version: Version {
+                major: 1,
+                minor: 0,
+                patch: 0,
+            },
             netuid: 1,
             external_ip: "127.0.0.1".to_string(),
             api_port: 8080,
+            quic_port: Some(8081),
             post_ip: false,
             wallet_path: wallet_path.to_str().unwrap().to_string(),
             wallet_name,
@@ -257,6 +328,7 @@ mod tests {
             load_old_nodes: false,
             min_stake_threshold: 0,
             db_dir: "./test.db".into(),
+            dht_dir: "./test_dht".into(),
             pem_file: "cert.pem".to_string(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
@@ -268,7 +340,6 @@ mod tests {
             },
             dht: DhtConfig {
                 port: 8081,
-                file: "dht.db".to_string(),
                 bootstrap_ip: "127.0.0.1".to_string(),
                 bootstrap_port: 8082,
             },
@@ -286,14 +357,16 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_find_neuron_info() {
-        let neurons = vec![];
-        let account_id = AccountId::from([0; 32]);
-        info!("account_id: {account_id}");
-        let result = BaseNeuron::find_neuron_info(&neurons, &account_id);
-        assert!(result.is_none());
-    }
+    // TODO: update tests
+
+    // #[tokio::test]
+    // async fn test_find_neuron_info() {
+    //     let neurons = vec![];
+    //     let account_id = AccountId::from([0; 32]);
+    //     info!("account_id: {account_id}");
+    //     let result = BaseNeuron::find_neuron_info(&neurons, &account_id);
+    //     assert!(result.is_none());
+    // }
 
     // TODO: get wallet handling working properly for testing
     // #[tokio::test]

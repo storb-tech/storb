@@ -1,6 +1,10 @@
-use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
-use tracing::debug;
+use bincode::Options;
+use serde::{ser::Error, Deserialize, Serialize};
+use thiserror::Error;
+use tracing::{debug, error};
 use zfec_rs::Chunk as ZFecChunk;
+
+use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
 
 #[derive(Debug, Clone)]
 pub struct Piece {
@@ -10,7 +14,7 @@ pub struct Piece {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PieceType {
     Data,
     Parity,
@@ -18,13 +22,108 @@ pub enum PieceType {
 
 #[derive(Debug, Clone)]
 pub struct EncodedChunk {
-    pub pieces: Option<Vec<Piece>>,
+    pub pieces: Vec<Piece>,
     pub chunk_idx: u64,
-    pub k: u64, // Number of data blocks
-    pub m: u64, // Total blocks (data + parity)
+    /// Number of data blocks
+    pub k: u64,
+    /// Total blocks (data + parity)
+    pub m: u64,
     pub chunk_size: u64,
     pub padlen: u64,
     pub original_chunk_size: u64,
+}
+
+#[derive(Serialize)]
+struct InfoHashData {
+    filename: String,
+    timestamp: i64,
+    chunk_size: u64,
+    total_size: u64,
+    pieces: Vec<[u8; 32]>,
+}
+
+/// Piece response that is sent from the miner to the validator.
+///
+/// - `piece_hash` is the fixed width piece signature from which we start
+///   reading the piece data.
+/// - `piece_data` is the data itself.
+#[derive(Serialize, Deserialize)]
+#[repr(C)]
+pub struct PieceResponse {
+    pub piece_hash: [u8; 32],
+    pub piece_data: Vec<u8>,
+}
+
+#[derive(Debug, Error)]
+pub enum PieceError {
+    #[error("Not enough pieces to reconstruct chunk {0}, expected k={1} but got {2} pieces")]
+    ReconstructionError(u64, u64, usize),
+}
+
+/// Serialise the piece response struct into a vector of bytes.
+pub fn serialise_piece_response(
+    piece_response: &PieceResponse,
+) -> Result<Vec<u8>, Box<bincode::Error>> {
+    let mut buf = Vec::new();
+    let bincode_opts = bincode::DefaultOptions::new()
+        .with_little_endian()
+        .with_fixint_encoding()
+        .reject_trailing_bytes();
+
+    match bincode_opts.serialize_into(&mut buf, piece_response) {
+        Ok(_) => Ok(buf),
+        Err(e) => Err(Box::new(e)),
+    }
+}
+
+/// Deserialise the piece response in bytes into a piece response struct.
+/// The `piece_hash` is provided so the piece hash can be checked against the
+/// serialised data to determine where the actual payload starts.
+pub fn deserialise_piece_response(
+    serialised_buf: &[u8],
+    piece_hash: &[u8; 32],
+) -> Result<Vec<u8>, Box<bincode::Error>> {
+    let bincode_opts = bincode::DefaultOptions::new()
+        .with_little_endian()
+        .with_fixint_encoding()
+        .reject_trailing_bytes();
+
+    if let Some(pos) = serialised_buf
+        .windows(32)
+        .position(|window| window == piece_hash)
+    {
+        let piece_data = serialised_buf[pos + 32..].to_vec();
+        let deserialized_piece_response = bincode_opts.deserialize(&piece_data)?;
+        Ok(deserialized_piece_response)
+    } else {
+        Err(Box::new(bincode::Error::custom(
+            "Piecehash was not matched in the buffer. Make sure it is a valid piecehash",
+        )))
+    }
+}
+
+pub fn get_infohash(
+    filename: String,
+    timestamp: i64,
+    chunk_size: u64,
+    total_size: u64,
+    pieces: Vec<[u8; 32]>,
+) -> String {
+    let infohash_data = InfoHashData {
+        filename,
+        timestamp,
+        chunk_size,
+        total_size,
+        pieces,
+    };
+
+    // Serialize the struct to a compact JSON string.
+    let infohash_json =
+        serde_json::to_string(&infohash_data).expect("Failed to serialize infohash_data to JSON");
+
+    let infohash_bytes = infohash_json.as_bytes();
+
+    blake3::hash(infohash_bytes).to_hex().to_string()
 }
 
 pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {
@@ -40,16 +139,24 @@ pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option
     length.clamp(min_size, max_size)
 }
 
-pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
-    let chunk_size = chunk.len() as u64;
+pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     let piece_size = piece_length(chunk_size, None, None);
-    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
     let expected_data_pieces = ((chunk_size as f64) / (piece_size as f64)).ceil() as usize;
     let expected_parity_pieces = ((expected_data_pieces as f64) / 2.0).ceil() as usize;
 
     let k = expected_data_pieces;
     let m = k + expected_parity_pieces;
+
+    (k, m)
+}
+
+pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
+    let chunk_size = chunk.len() as u64;
+    let piece_size = piece_length(chunk_size, None, None);
+    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
+    // Calculate how many data blocks (k) and parity blocks
+    let (k, m) = get_k_and_m(chunk_size);
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
@@ -75,7 +182,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     }
 
     EncodedChunk {
-        pieces: Some(pieces),
+        pieces,
         chunk_idx,
         k: k.try_into().expect("Failed to convert k"),
         m: m.try_into().expect("Failed to convert m"),
@@ -89,10 +196,7 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
     let k: usize = encoded_chunk.k as usize;
     let m: usize = encoded_chunk.m as usize;
     let padlen = encoded_chunk.padlen;
-    let pieces = encoded_chunk
-        .pieces
-        .as_ref()
-        .expect("Pieces must be present in EncodedChunk");
+    let pieces = encoded_chunk.pieces.clone();
 
     let mut pieces_to_decode: Vec<ZFecChunk> = Vec::new();
 
@@ -140,8 +244,6 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .collect();
         relevant_pieces.sort_by_key(|p| p.piece_idx);
 
-        // debug!("relevant pieces: {:?}", relevant_pieces);
-
         // Ensure at least k pieces are available for decoding
         let k = chunk.k;
         debug!("[reconstruct_data]: k={k}");
@@ -157,7 +259,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
         }
 
         let mut chunk_to_decode = chunk.clone();
-        chunk_to_decode.pieces = Some(relevant_pieces);
+        chunk_to_decode.pieces = relevant_pieces;
         let reconstructed_chunk = decode_chunk(&chunk_to_decode);
         reconstructed_chunks.push(reconstructed_chunk);
     }
@@ -165,41 +267,47 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
     reconstructed_chunks.concat()
 }
 
-/// Reconstructs a single chunk from its pieces
-pub fn reconstruct_chunk(pieces: &[Piece], chunk_info: &EncodedChunk) -> Option<Vec<u8>> {
-    debug!("reconstructing single chunk {}", chunk_info.chunk_idx);
+/// Reconstructs a single chunk (byte stream) from its pieces in the encoded chunk.
+pub fn reconstruct_chunk(chunk: &EncodedChunk) -> Result<Vec<u8>, PieceError> {
+    debug!("reconstructing single chunk {}", chunk.chunk_idx);
+
+    let pieces = chunk.clone().pieces;
 
     // Filter pieces for this specific chunk and sort them
     let mut relevant_pieces: Vec<Piece> = pieces
         .iter()
-        .filter(|piece| piece.chunk_idx == chunk_info.chunk_idx)
+        .filter(|piece| piece.chunk_idx == chunk.chunk_idx)
         .cloned()
         .collect();
     relevant_pieces.sort_by_key(|p| p.piece_idx);
 
     // Ensure we have enough pieces to reconstruct (at least k pieces)
-    let k = chunk_info.k;
+    let k = chunk.k;
     debug!(
         "[reconstruct_chunk]: k={k}, pieces available={}",
         relevant_pieces.len()
     );
 
     if relevant_pieces.len() < k as usize {
-        tracing::error!(
+        error!(
             "Not enough pieces to reconstruct chunk {}, expected {} but got {} pieces",
-            chunk_info.chunk_idx,
+            chunk.chunk_idx,
             k,
             relevant_pieces.len(),
         );
-        return None;
+        return Err(PieceError::ReconstructionError(
+            chunk.chunk_idx,
+            k,
+            relevant_pieces.len(),
+        ));
     }
 
     // Create a new EncodedChunk with just the pieces for this chunk
-    let mut chunk_to_decode = chunk_info.clone();
-    chunk_to_decode.pieces = Some(relevant_pieces);
+    let mut chunk_to_decode = chunk.clone();
+    chunk_to_decode.pieces = relevant_pieces;
 
     // Decode and return the chunk
-    Some(decode_chunk(&chunk_to_decode))
+    Ok(decode_chunk(&chunk_to_decode))
 }
 
 #[cfg(test)]
@@ -243,7 +351,7 @@ mod tests {
         setup_logging();
         let test_data = b"Test data".to_vec();
         let encoded = encode_chunk(&test_data, 0);
-        let pieces = encoded.pieces.unwrap();
+        let pieces = encoded.pieces;
 
         // Verify we have both data and parity pieces
         let data_pieces: Vec<_> = pieces
@@ -264,7 +372,7 @@ mod tests {
         setup_logging();
         let test_data = b"Test reconstruction".to_vec();
         let encoded = encode_chunk(&test_data, 0);
-        let pieces = encoded.pieces.as_ref().unwrap().to_vec();
+        let pieces = encoded.pieces.to_vec();
         let reconstructed = reconstruct_data(&pieces, &[encoded]);
         assert_eq!(reconstructed, test_data);
     }
@@ -293,7 +401,7 @@ mod tests {
             let num_pieces = chunk_info.m as usize * pieces_per_block;
             expected_pieces += num_pieces;
 
-            pieces.extend(chunk_info.pieces.unwrap());
+            pieces.extend(chunk_info.pieces);
         }
 
         assert_eq!(
@@ -327,7 +435,7 @@ mod tests {
         for (chunk_idx, chunk) in test_data.chunks(chunk_size.try_into().unwrap()).enumerate() {
             let chunk_info = encode_chunk(chunk, chunk_idx.try_into().unwrap());
             chunks.push(chunk_info.clone());
-            pieces.extend(chunk_info.pieces.unwrap());
+            pieces.extend(chunk_info.pieces);
         }
 
         let mut rng = rand::rngs::ThreadRng::default();
@@ -351,13 +459,13 @@ mod tests {
         for (chunk_idx, chunk) in test_data.chunks(chunk_size.try_into().unwrap()).enumerate() {
             let chunk_info = encode_chunk(chunk, chunk_idx.try_into().unwrap());
             chunks.push(chunk_info.clone());
-            pieces.extend(chunk_info.pieces.unwrap());
+            pieces.extend(chunk_info.pieces);
         }
 
         let mut rng = rand::rngs::ThreadRng::default();
 
         for chunk in &mut chunks {
-            let pieces_vec = chunk.pieces.as_mut().expect("Chunk pieces should exist");
+            let mut pieces_vec = chunk.pieces.clone();
             let num_pieces_to_keep = ((pieces_vec.len() as f64 * 0.7).ceil()) as u64;
             pieces_vec.shuffle(&mut rng);
             pieces_vec.truncate(num_pieces_to_keep.try_into().unwrap());
@@ -377,12 +485,10 @@ mod tests {
         let chunk_idx = 0;
 
         // Encode the chunk
-        let encoded_chunk = encode_chunk(&test_data, chunk_idx);
-        let pieces = encoded_chunk.pieces.as_ref().unwrap();
+        let mut encoded_chunk = encode_chunk(&test_data, chunk_idx);
 
         // Try to reconstruct the chunk
-        let reconstructed =
-            reconstruct_chunk(pieces, &encoded_chunk).expect("Failed to reconstruct chunk");
+        let reconstructed = reconstruct_chunk(&encoded_chunk).expect("Failed to reconstruct chunk");
 
         assert_eq!(
             reconstructed, test_data,
@@ -390,10 +496,10 @@ mod tests {
         );
 
         // Test with missing pieces (but still enough to reconstruct)
-        let mut reduced_pieces = pieces.clone();
+        let mut reduced_pieces = encoded_chunk.pieces.clone();
         reduced_pieces.truncate((encoded_chunk.k + 1) as usize); // Keep just enough pieces
 
-        let reconstructed_reduced = reconstruct_chunk(&reduced_pieces, &encoded_chunk)
+        let reconstructed_reduced = reconstruct_chunk(&encoded_chunk)
             .expect("Failed to reconstruct chunk with reduced pieces");
 
         assert_eq!(
@@ -402,10 +508,11 @@ mod tests {
         );
 
         // Test with too few pieces
-        let too_few_pieces = pieces[0..((encoded_chunk.k - 1) as usize)].to_vec();
+        let too_few_pieces = encoded_chunk.pieces[0..((encoded_chunk.k - 1) as usize)].to_vec();
+        encoded_chunk.pieces = too_few_pieces;
         assert!(
-            reconstruct_chunk(&too_few_pieces, &encoded_chunk).is_none(),
-            "Should return None when there are too few pieces"
+            reconstruct_chunk(&encoded_chunk).is_err(),
+            "Should return Err when there are too few pieces"
         );
     }
 }

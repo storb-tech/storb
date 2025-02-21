@@ -1,27 +1,23 @@
-use libp2p::{
-    futures::StreamExt,
-    identify,
-    identity::Keypair,
-    kad::{
-        self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
-        PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
-    },
-    mdns, ping,
-    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
-    Multiaddr, PeerId, SwarmBuilder,
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use libp2p::futures::StreamExt;
+use libp2p::kad::{
+    self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
+    PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
-    num::NonZeroUsize,
-    path::PathBuf,
-    time::Duration,
-};
-use tokio::sync::{oneshot, watch, Mutex};
-use tracing::{debug, trace};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tracing::{debug, error, info, trace};
 
 use super::{db, models, store::StorbStore};
-use crate::constants::{DHT_QUERY_TIMEOUT, STORB_KAD_PROTOCOL_NAME};
+use crate::constants::STORB_KAD_PROTOCOL_NAME;
+
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
 ///
 /// This behaviour aggregates multiple protocols into a single behaviour that can be used
@@ -79,9 +75,11 @@ impl From<ping::Event> for StorbEvent {
     }
 }
 
-/// Internal enum used to associate Kademlia query IDs with their corresponding response channels.
+/// Internal enum used to associate Kademlia query IDs with their corresponding
+/// response channels.
 ///
-/// This enum is used to route responses from asynchronous DHT queries back to the requesters.
+/// This enum is used to route responses from asynchronous DHT queries back
+/// to the requesters.
 enum QueryChannel {
     #[allow(dead_code)]
     Bootstrap(oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>),
@@ -98,6 +96,29 @@ enum QueryChannel {
     StartProviding(oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>),
 }
 
+/// DHT commands that can be issued to the StorbDHT instance.
+pub enum DhtCommand {
+    Put {
+        key: RecordKey,
+        serialized_value: Vec<u8>,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    }, // Add other commands as needed
+    Get {
+        key: RecordKey,
+        response_tx:
+            oneshot::Sender<Result<Vec<PeerRecord>, Box<dyn std::error::Error + Send + Sync>>>,
+    },
+    GetProviders {
+        key: RecordKey,
+        response_tx:
+            oneshot::Sender<Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>>>,
+    },
+    StartProviding {
+        key: RecordKey,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    },
+}
+
 /// A Distributed Hash Table (DHT) for the Storb network.
 ///
 /// This struct encapsulates the libp2p swarm along with mechanisms for bootstrapping,
@@ -110,7 +131,9 @@ pub struct StorbDHT {
     /// Watch channel receiver to observe bootstrap completion.
     bootstrap_done: watch::Receiver<bool>,
     /// Mapping of query IDs to their corresponding response channels.
-    queries: std::sync::Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
+    queries: Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
+    /// Channel receiver for DHT commands
+    command_receiver: mpsc::Receiver<DhtCommand>,
 }
 
 impl StorbDHT {
@@ -121,22 +144,29 @@ impl StorbDHT {
     ///
     /// # Arguments
     ///
-    /// * `db_dir` - Path to the directory for database storage.
+    /// * `dht_dir` - Path to the directory for database storage.
     /// * `port` - Port number to listen on.
     /// * `keys` - Local identity keypair.
-    pub fn new(db_dir: PathBuf, port: u16, keys: Keypair) -> Result<Self, Box<dyn Error>> {
+    pub fn new(
+        dht_dir: PathBuf,
+        port: u16,
+        local_keypair: identity::Keypair,
+    ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
+        let (command_sender, command_receiver) = mpsc::channel(32);
+
         assert!(port < 65535, "Invalid port number");
 
         // Generate a local keypair and derive our peer ID.
-        let local_peer_id = PeerId::from(keys.public());
+        let local_peer_id = libp2p::PeerId::from_public_key(&local_keypair.public());
 
         // Create the RocksDB store and our custom StorbStore.
         // (Propagate errors instead of panicking.)
         let db = db::RocksDBStore::new(db::RocksDBConfig {
-            path: db_dir,
+            path: dht_dir,
             max_batch_delay: Duration::from_millis(10),
             max_batch_size: 100,
         })?;
+
         let store = StorbStore::new(
             std::sync::Arc::new(db),
             NonZeroUsize::new(20).ok_or("Invalid size parameter")?,
@@ -147,11 +177,13 @@ impl StorbDHT {
         let kad_config = kad::Config::new(STORB_KAD_PROTOCOL_NAME);
         let kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
 
+        // TODO: get rid of local peer discovery
         // Use mDNS for local peer discovery.
         let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
         // Configure Identify to gather basic peer metadata.
-        let identify_config = identify::Config::new("0.0.1".to_string(), keys.public());
+        let identify_config =
+            identify::Config::new("0.0.1".to_string(), local_keypair.public().clone());
         let identify = identify::Behaviour::new(identify_config);
 
         // Use Ping to check connectivity.
@@ -166,7 +198,7 @@ impl StorbDHT {
         };
 
         // Build the Swarm using QUIC transport and Tokio.
-        let mut swarm = SwarmBuilder::with_existing_identity(keys.clone())
+        let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
             .with_tokio()
             .with_quic() // Using QUIC for transport.
             .with_behaviour(|_| Ok(behaviour))?
@@ -186,19 +218,23 @@ impl StorbDHT {
         // Create the watch channel that indicates when bootstrap is done.
         let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
 
-        Ok(Self {
-            swarm,
-            bootstrap_done_sender,
-            bootstrap_done,
-            queries: std::sync::Arc::new(Mutex::new(HashMap::new())),
-        })
+        Ok((
+            Self {
+                swarm,
+                bootstrap_done_sender,
+                bootstrap_done,
+                queries: Arc::new(Mutex::new(HashMap::new())),
+                command_receiver,
+            },
+            command_sender,
+        ))
     }
 
     /// Processes a Kademlia event and routes query responses accordingly.
     ///
     /// This function inspects the provided Kademlia event, matches on the query result,
     /// and sends responses through the associated oneshot channels stored in the query map.
-    fn inject_kad_event(
+    async fn inject_kad_event(
         &mut self,
         event: kad::Event,
         queries: &mut HashMap<QueryId, QueryChannel>,
@@ -239,9 +275,12 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::GetRecord(Ok(res)) => {
+                    trace!("Getting Record");
                     if let Some(QueryChannel::GetRecord(ref mut quorum, ref mut records, _)) =
                         queries.get_mut(&query_id)
                     {
+                        info!("DHT: QUERY REC WITH ID: {}", query_id);
+
                         if let GetRecordOk::FoundRecord(record) = res {
                             records.push(record);
                         }
@@ -258,6 +297,7 @@ impl StorbDHT {
                             if let Some(QueryChannel::GetRecord(_, records, sender)) =
                                 queries.remove(&query_id)
                             {
+                                info!("sent query");
                                 let _ = sender.send(Ok(records));
                             }
                         }
@@ -270,18 +310,26 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::PutRecord(Ok(PutRecordOk { key })) => {
-                    trace!("Put record succeeded: {:?}", key);
+                    info!(
+                        "Put record succeeded with key: {:?} and query id: {:?}",
+                        key, query_id
+                    );
                     if let Some(QueryChannel::PutRecord(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Ok(()));
                     }
                 }
                 QueryResult::PutRecord(Err(e)) => {
-                    trace!("Put record failed: {:?}", e);
+                    info!(
+                        "ERROR: Put record failed: {:?} and query id: {:?}",
+                        e, query_id
+                    );
                     if let Some(QueryChannel::PutRecord(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
                 }
+
                 QueryResult::GetProviders(Ok(res)) => {
+                    trace!("Getting Providers");
                     let mut finish = false;
                     if let Some(QueryChannel::GetProviders(ref mut peers, _)) =
                         queries.get_mut(&query_id)
@@ -307,25 +355,31 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::GetProviders(Err(e)) => {
-                    trace!("Query failed: {:?}", e);
+                    info!("Query failed: {:?}", e);
                     if let Some(QueryChannel::GetProviders(_, ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
                 }
                 QueryResult::StartProviding(Ok(AddProviderOk { key })) => {
-                    trace!("Start providing succeeded for {:?}", key);
+                    info!("Start providing succeeded for {:?}", key);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Ok(()));
                     }
                 }
                 QueryResult::StartProviding(Err(e)) => {
-                    trace!("Start providing failed: {:?}", e);
+                    info!("Start providing failed: {:?}", e);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn inject_kad_incoming_query(&mut self, event: kad::Event) {
+        if let kad::Event::InboundRequest { request } = event {
+            info!("Incoming request: {:?}", request);
         }
     }
 
@@ -355,149 +409,193 @@ impl StorbDHT {
         }
     }
 
-    /// Runs the main event loop for the StorbDHT swarm.
+    /// Processes DHT events and commands.
     ///
-    /// This asynchronous function continuously processes swarm events, dispatching them
-    /// to the appropriate handlers (mDNS, Kademlia, Identify, Ping) and managing query responses.
-    pub async fn run(mut self) -> Result<(), Box<dyn Error>> {
+    /// This asynchronous function continuously processes swarm events and DHT commands,
+    /// handling peer discovery, connection management, and DHT operations.
+    pub async fn process_events(&mut self) {
         loop {
-            let event: SwarmEvent<StorbEvent> = self.swarm.select_next_some().await;
-            let queries_clone = self.queries.clone();
-            let mut queries = queries_clone.lock().await;
-
-            match event {
-                SwarmEvent::NewListenAddr { address, .. } => {
-                    debug!("Swarm is listening on {:?}", address);
-                }
-                SwarmEvent::Behaviour(event) => match event {
-                    StorbEvent::Mdns(event) => {
-                        self.inject_mdns_event(event);
+            tokio::select! {
+                Some(event) = self.swarm.next() => {
+                    match event {
+                        SwarmEvent::NewListenAddr { address, .. } => {
+                            debug!("Swarm is listening on {:?}", address);
+                        }
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            debug!("Connection established with peer: {:?}", peer_id);
+                        }
+                        SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                            debug!("Connection closed with peer: {:?}", peer_id);
+                        }
+                        SwarmEvent::IncomingConnection { .. } => {
+                            trace!("Incoming connection");
+                        }
+                        SwarmEvent::IncomingConnectionError { error, .. } => {
+                            error!("Incoming connection failed: {:?}", error);
+                        }
+                        SwarmEvent::OutgoingConnectionError { error, .. } => {
+                            error!("Outgoing connection failed: {:?}", error);
+                        }
+                        SwarmEvent::Behaviour(event) => {
+                            match event {
+                                StorbEvent::Mdns(event) => {
+                                    self.inject_mdns_event(event);
+                                }
+                                StorbEvent::Kademlia(event) => {
+                                    let queries_clone = self.queries.clone();
+                                    let mut queries = queries_clone.lock().await;
+                                    trace!("Kademlia event received: {:?}", event);
+                                    self.inject_kad_event(event.clone(), &mut queries).await;
+                                    self.inject_kad_incoming_query(event);
+                                }
+                                StorbEvent::Identify(event) => {
+                                    trace!("Identify event: {:?}", event);
+                                }
+                                StorbEvent::Ping(event) => {
+                                    trace!("Ping event: {:?}", event);
+                                }
+                            }
+                        }
+                        SwarmEvent::Dialing { peer_id, .. } => {
+                            debug!("Dialing peer: {:?}", peer_id);
+                        }
+                        _ => {
+                            trace!("Other swarm event: {:?}", event);
+                        }
                     }
-                    StorbEvent::Kademlia(event) => {
-                        self.inject_kad_event(event, &mut queries);
+                }
+                Some(command) = self.command_receiver.recv() => {
+                    match command {
+                        DhtCommand::Put {
+                            key,
+                            serialized_value,
+                            response_tx,
+                        } => {
+                            info!("Received Put command");
+                            match self.handle_put(key, serialized_value, response_tx).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Error handling PutPiece command: {:?}", e);
+                                }
+                            }
+                        }
+                        DhtCommand::Get { key, response_tx } => {
+                            info!("Received Get command");
+                            match self.handle_get(key, response_tx).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Error handling Get command: {:?}", e);
+                                }
+                            }
+                        }
+                        DhtCommand::StartProviding { key, response_tx } => {
+                            info!("Received StartProviding command");
+                            match self.handle_start_providing(key, response_tx).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Error handling StartProviding command: {:?}", e);
+                                }
+                            }
+                        }
+                        DhtCommand::GetProviders { key, response_tx } => {
+                            info!("Received GetProviders command");
+                            match self.handle_get_providers(key, response_tx).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    error!("Error handling GetProviders command: {:?}", e);
+                                }
+                            }
+                        }
                     }
-                    StorbEvent::Identify(event) => {
-                        trace!("Identify event: {:?}", event);
-                    }
-                    StorbEvent::Ping(event) => {
-                        trace!("Ping event: {:?}", event);
-                    }
-                },
-                SwarmEvent::ConnectionEstablished {
-                    peer_id,
-                    connection_id,
-                    endpoint,
-                    num_established,
-                    concurrent_dial_errors,
-                    established_in,
-                } => {
-                    trace!(
-                        "Connection established: {:?} to {:?}",
-                        connection_id,
-                        peer_id
-                    );
-                    trace!("Endpoint: {:?}", endpoint);
-                    trace!("Num established: {:?}", num_established);
-                    trace!("Concurrent dial errors: {:?}", concurrent_dial_errors);
-                    trace!("Established in: {:?}", established_in);
                 }
-                SwarmEvent::ConnectionClosed {
-                    peer_id,
-                    connection_id,
-                    endpoint,
-                    num_established,
-                    cause,
-                } => {
-                    trace!("Connection closed: {:?} to {:?}", connection_id, peer_id);
-                    trace!("Endpoint: {:?}", endpoint);
-                    trace!("Num established: {:?}", num_established);
-                    trace!("Cause: {:?}", cause);
-                }
-                SwarmEvent::IncomingConnection {
-                    connection_id,
-                    local_addr,
-                    send_back_addr,
-                } => {
-                    trace!(
-                        "Incoming connection: {:?} from {:?}",
-                        connection_id,
-                        local_addr
-                    );
-                    trace!("Send back address: {:?}", send_back_addr);
-                }
-                SwarmEvent::IncomingConnectionError {
-                    connection_id,
-                    local_addr,
-                    send_back_addr,
-                    error,
-                } => {
-                    trace!(
-                        "Incoming connection error: {:?} from {:?}",
-                        connection_id,
-                        local_addr
-                    );
-                    trace!("Send back address: {:?}", send_back_addr);
-                    trace!("Error: {:?}", error);
-                }
-                SwarmEvent::OutgoingConnectionError {
-                    connection_id,
-                    peer_id,
-                    error,
-                } => {
-                    trace!(
-                        "Outgoing connection error: {:?} to {:?}",
-                        connection_id,
-                        peer_id
-                    );
-                    trace!("Error: {:?}", error);
-                }
-                SwarmEvent::ExpiredListenAddr {
-                    listener_id,
-                    address,
-                } => {
-                    trace!(
-                        "Expired listen address: {:?} from {:?}",
-                        listener_id,
-                        address
-                    );
-                }
-                SwarmEvent::ListenerClosed {
-                    listener_id,
-                    addresses,
-                    reason,
-                } => {
-                    trace!("Listener closed: {:?} from {:?}", listener_id, addresses);
-                    trace!("Reason: {:?}", reason);
-                }
-                SwarmEvent::ListenerError { listener_id, error } => {
-                    trace!("Listener error: {:?} from {:?}", listener_id, error);
-                }
-                SwarmEvent::Dialing {
-                    peer_id,
-                    connection_id,
-                } => {
-                    trace!("Dialing: {:?} to {:?}", connection_id, peer_id);
-                }
-                SwarmEvent::NewExternalAddrCandidate { address } => {
-                    trace!("New external address candidate: {:?}", address);
-                }
-                SwarmEvent::ExternalAddrConfirmed { address } => {
-                    trace!("External address confirmed: {:?}", address);
-                }
-                SwarmEvent::ExternalAddrExpired { address } => {
-                    trace!("External address expired: {:?}", address);
-                }
-                SwarmEvent::NewExternalAddrOfPeer { peer_id, address } => {
-                    trace!(
-                        "New external address of peer: {:?} at {:?}",
-                        peer_id,
-                        address
-                    );
-                }
-                _ => {}
             }
-            drop(queries);
         }
+    }
+
+    async fn handle_put(
+        &mut self,
+        key: RecordKey,
+        value: Vec<u8>,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wait_for_bootstrap().await?;
+
+        let record = Record {
+            key: key.clone(),
+            value,
+            publisher: Some(*self.swarm.local_peer_id()),
+            expires: None,
+        };
+
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::One) // TODO: Change to Quorum::Majority
+            .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id, QueryChannel::PutRecord(response_tx));
+        drop(queries);
+
+        Ok(())
+    }
+
+    async fn handle_get(
+        &mut self,
+        key: RecordKey,
+        response_tx: oneshot::Sender<
+            Result<Vec<PeerRecord>, Box<dyn std::error::Error + Send + Sync>>,
+        >,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wait_for_bootstrap().await?;
+
+        let id = self.swarm.behaviour_mut().kademlia.get_record(key);
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id, QueryChannel::GetRecord(1, vec![], response_tx));
+        drop(queries);
+
+        Ok(())
+    }
+
+    async fn handle_start_providing(
+        &mut self,
+        key: RecordKey,
+        response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wait_for_bootstrap().await?;
+
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .start_providing(key)
+            .map_err(|e| format!("Failed to register as a piece provider: {:?}", e))?;
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id, QueryChannel::StartProviding(response_tx));
+        drop(queries);
+
+        Ok(())
+    }
+
+    async fn handle_get_providers(
+        &mut self,
+        key: RecordKey,
+        response_tx: oneshot::Sender<
+            Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>>,
+        >,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.wait_for_bootstrap().await?;
+
+        let id = self.swarm.behaviour_mut().kademlia.get_providers(key);
+
+        let mut queries = self.queries.lock().await;
+        queries.insert(id, QueryChannel::GetProviders(HashSet::new(), response_tx));
+        drop(queries);
+
+        Ok(())
     }
 
     /// Inserts or updates a tracker entry in the DHT.
@@ -506,42 +604,30 @@ impl StorbDHT {
     /// and issues a Kademlia put_record query. It waits for the query response
     /// within a specified timeout.
     pub async fn put_tracker_entry(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         infohash: RecordKey,
         value: models::TrackerDHTValue,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
+        let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Tracker(value))?;
-        let record = Record {
-            key: infohash.clone(),
-            value: serialized_value,
-            publisher: Some(*self.swarm.local_peer_id()),
-            expires: None,
-        };
 
-        // Create a oneshot channel for the put operation.
-        let (tx, rx) = oneshot::channel();
-        // Issue the put and obtain a query ID.
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(record, Quorum::Majority)
-            .map_err(|e| format!("Failed to store tracker entry: {:?}", e))?;
+        match command_sender
+            .send(DhtCommand::Put {
+                key: infohash.clone(),
+                serialized_value,
+                response_tx,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::PutRecord(tx));
-        drop(queries);
-
-        // Wait for the tx response with a timeout of 10 seconds.
-        match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err("Failed to store tracker entry".into()),
-                Err(_) => Err("Timed out waiting for put_tracker_entry response.".into()),
-            },
-            Err(_) => Err("Timed out waiting for put_tracker_entry response.".into()),
+        match response_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
         }
     }
 
@@ -550,35 +636,40 @@ impl StorbDHT {
     /// This function issues a get_record query and waits for the response.
     /// If a tracker record is found and successfully deserialized, it is returned.
     pub async fn get_tracker_entry(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         infohash: RecordKey,
     ) -> Result<Option<models::TrackerDHTValue>, Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
+        let (response_tx, response_rx) = oneshot::channel();
+        match command_sender
+            .send(DhtCommand::Get {
+                key: infohash.clone(),
+                response_tx,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        // Create a oneshot channel for the get operation.
-        let (tx, rx) = oneshot::channel();
-        let quorum = 1;
-        let id = self.swarm.behaviour_mut().kademlia.get_record(infohash);
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
-        drop(queries);
-        let records = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(records)) => records,
-                Ok(Err(_)) => return Err("Failed to get tracker entry".into()),
-                Err(_) => return Err("Timed out waiting for get_tracker_entry response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for get_tracker_entry response.".into()),
-        };
-        if let Some(record) = records.first() {
-            let dht_value = models::deserialize_dht_value(&record.record.value)?;
-            if let models::DHTValue::Tracker(tracker) = dht_value {
-                Ok(Some(tracker))
-            } else {
-                Err("Record retrieved is not a tracker entry".into())
+        match response_rx.await {
+            Ok(Ok(records)) => {
+                if records.is_empty() {
+                    return Ok(None);
+                }
+
+                let record = match records.first() {
+                    None => return Ok(None),
+                    Some(r) => r,
+                };
+
+                let dht_value = models::deserialize_dht_value(&record.record.value)?;
+                match dht_value {
+                    models::DHTValue::Tracker(tracker) => Ok(Some(tracker)),
+                    _ => Err("Record retrieved is not a tracker entry".into()),
+                }
             }
-        } else {
-            Ok(None)
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
         }
     }
 
@@ -588,41 +679,31 @@ impl StorbDHT {
     /// and issues a Kademlia put_record query. It waits for the query response
     /// within a specified timeout.
     pub async fn put_chunk_entry(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         chunk_key: RecordKey,
         value: models::ChunkDHTValue,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
+        // TODO: wait for bootstrap???
+        let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Chunk(value))?;
-        let record = Record {
-            key: chunk_key.clone(),
-            value: serialized_value,
-            publisher: Some(*self.swarm.local_peer_id()),
-            expires: None,
-        };
+        match command_sender
+            .send(DhtCommand::Put {
+                key: chunk_key,
+                serialized_value,
+                response_tx,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        let (tx, rx) = oneshot::channel();
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(record, Quorum::Majority)
-            .map_err(|e| format!("Failed to store chunk entry: {:?}", e))?;
-
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::PutRecord(tx));
-        drop(queries);
-
-        match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err("Failed to store chunk entry".into()),
-                Err(_) => return Err("Timed out waiting for put_chunk_entry response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for put_chunk_entry response.".into()),
-        };
-        Ok(())
+        match response_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     /// Retrieves a chunk entry from the DHT using its chunk key.
@@ -630,79 +711,74 @@ impl StorbDHT {
     /// This function issues a get_record query and waits for the response.
     /// If a chunk record is found and successfully deserialized, it is returned.
     pub async fn get_chunk_entry(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         chunk_key: RecordKey,
     ) -> Result<Option<models::ChunkDHTValue>, Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
-
-        let (tx, rx) = oneshot::channel();
-        let quorum = 1;
-        let id = self.swarm.behaviour_mut().kademlia.get_record(chunk_key);
-
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
-        drop(queries);
-
-        let timeout = Duration::from_secs(DHT_QUERY_TIMEOUT);
-        let records = tokio::time::timeout(timeout, rx)
+        let (response_tx, response_rx) = oneshot::channel();
+        match command_sender
+            .send(DhtCommand::Get {
+                key: chunk_key.clone(),
+                response_tx,
+            })
             .await
-            .map_err(|_| "Timed out waiting for get_chunk_entry response.")?
-            .map_err(|_| "Failed to receive response")?
-            .map_err(|_| "Failed to get chunk entry")?;
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        let record = match records.first() {
-            None => return Ok(None),
-            Some(r) => r,
-        };
+        match response_rx.await {
+            Ok(Ok(records)) => {
+                if records.is_empty() {
+                    error!("No records found for chunk key: {:?}", chunk_key);
+                    return Ok(None);
+                }
 
-        let dht_value = models::deserialize_dht_value(&record.record.value)?;
-        match dht_value {
-            models::DHTValue::Chunk(chunk) => Ok(Some(chunk)),
-            _ => Err("Record retrieved is not a chunk entry".into()),
+                let record = match records.first() {
+                    None => return Ok(None),
+                    Some(r) => r,
+                };
+
+                let dht_value = models::deserialize_dht_value(&record.record.value)?;
+                match dht_value {
+                    models::DHTValue::Chunk(chunk) => Ok(Some(chunk)),
+                    _ => {
+                        error!("Record retrieved is not a chunk entry");
+                        Err("Record retrieved is not a chunk entry".into())
+                    }
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
         }
     }
 
-    /// Inserts or updates a piece entry in the DHT.
-    ///
-    /// This function serializes the provided piece value, constructs a record,
-    /// and issues a Kademlia put_record query. It waits for the query response
-    /// within a specified timeout.
     pub async fn put_piece_entry(
-        &mut self,
-        piece_key: RecordKey,
+        command_sender: mpsc::Sender<DhtCommand>,
+        key: RecordKey,
         value: models::PieceDHTValue,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
+        // TODO: wait for bootstrap???
+        let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Piece(value))?;
-        let record = Record {
-            key: piece_key.clone(),
-            value: serialized_value,
-            publisher: Some(*self.swarm.local_peer_id()),
-            expires: None,
-        };
 
-        let (tx, rx) = oneshot::channel();
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(record, Quorum::Majority)
-            .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
+        match command_sender
+            .send(DhtCommand::Put {
+                key,
+                serialized_value,
+                response_tx,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::PutRecord(tx));
-        drop(queries);
-
-        match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err("Failed to store piece entry".into()),
-                Err(_) => return Err("Timed out waiting for put_piece_entry response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for put_piece_entry response.".into()),
-        };
-        Ok(())
+        match response_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     /// Retrieves a piece entry from the DHT using its piece key.
@@ -710,37 +786,41 @@ impl StorbDHT {
     /// This function issues a get_record query and waits for the response.
     /// If a piece record is found and successfully deserialized, it is returned.
     pub async fn get_piece_entry(
-        &mut self,
+        command_sender: &mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
-    ) -> Result<Option<models::PieceDHTValue>, Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
-
-        let (tx, rx) = oneshot::channel();
-        let quorum = 1;
-        let id = self.swarm.behaviour_mut().kademlia.get_record(piece_key);
-
-        // Insert query channel
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::GetRecord(quorum, vec![], tx));
-        drop(queries);
-
-        // Wait for response with timeout
-        let timeout = Duration::from_secs(DHT_QUERY_TIMEOUT);
-        let records = tokio::time::timeout(timeout, rx)
+    ) -> Result<Option<models::PieceDHTValue>, Box<dyn std::error::Error + Send + Sync + 'static>>
+    {
+        let (response_tx, response_rx) = oneshot::channel();
+        match command_sender
+            .send(DhtCommand::Get {
+                key: piece_key.clone(),
+                response_tx,
+            })
             .await
-            .map_err(|_| "Timed out waiting for get_piece_entry response.")?
-            .map_err(|_| "Failed to receive response")?
-            .map_err(|_| "Failed to get piece entry")?;
+        {
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
 
-        let record = match records.first() {
-            None => return Ok(None),
-            Some(r) => r,
-        };
+        match response_rx.await {
+            Ok(Ok(records)) => {
+                if records.is_empty() {
+                    return Ok(None);
+                }
 
-        let dht_value = models::deserialize_dht_value(&record.record.value)?;
-        match dht_value {
-            models::DHTValue::Piece(piece) => Ok(Some(piece)),
-            _ => Err("Record retrieved is not a piece entry".into()),
+                let record = match records.first() {
+                    None => return Ok(None),
+                    Some(r) => r,
+                };
+
+                let dht_value = models::deserialize_dht_value(&record.record.value)?;
+                match dht_value {
+                    models::DHTValue::Piece(piece) => Ok(Some(piece)),
+                    _ => Err("Record retrieved is not a piece entry".into()),
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
         }
     }
 
@@ -749,62 +829,56 @@ impl StorbDHT {
     /// This function issues a start_providing query to announce the availability
     /// of the specified piece.
     pub async fn start_providing_piece(
-        &mut self,
+        command_sender: mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
+        let (response_tx, response_rx) = oneshot::channel();
+        info!("Starting to provide piece {:?}", &piece_key);
+        match command_sender
+            .send(DhtCommand::StartProviding {
+                key: piece_key.clone(),
+                response_tx,
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to start providing piece: {}", e);
+                return Err(Box::new(e));
+            }
+        }
 
-        let (tx, rx) = oneshot::channel();
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .start_providing(piece_key)
-            .map_err(|e| format!("Failed to start providing piece: {:?}", e))?;
-
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::StartProviding(tx));
-        drop(queries);
-
-        match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await {
-            Ok(result) => match result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err("Failed to start providing piece".into()),
-                Err(_) => {
-                    return Err("Timed out waiting for start_providing_piece response.".into())
-                }
-            },
-            Err(_) => return Err("Timed out waiting for start_providing_piece response.".into()),
-        };
-        Ok(())
+        match response_rx.await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     /// Retrieves the set of peer IDs providing the specified piece.
     ///
     /// This function issues a get_providers query and waits for the response.
     pub async fn get_piece_providers(
-        &mut self,
+        command_sender: &mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
-    ) -> Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>> {
-        self.wait_for_bootstrap().await?;
-
-        let (tx, rx) = oneshot::channel();
-        let id = self.swarm.behaviour_mut().kademlia.get_providers(piece_key);
-
-        let mut queries = self.queries.lock().await;
-        queries.insert(id, QueryChannel::GetProviders(HashSet::new(), tx));
-        drop(queries);
-
-        let providers = match tokio::time::timeout(Duration::from_secs(DHT_QUERY_TIMEOUT), rx).await
+    ) -> Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync + 'static>> {
+        let (response_tx, response_rx) = oneshot::channel();
+        match command_sender
+            .send(DhtCommand::GetProviders {
+                key: piece_key.clone(),
+                response_tx,
+            })
+            .await
         {
-            Ok(result) => match result {
-                Ok(Ok(providers)) => providers,
-                Ok(Err(_)) => return Err("Failed to get piece providers".into()),
-                Err(_) => return Err("Timed out waiting for get_piece_providers response.".into()),
-            },
-            Err(_) => return Err("Timed out waiting for get_piece_providers response.".into()),
-        };
-        Ok(providers)
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        match response_rx.await {
+            Ok(Ok(providers)) => Ok(providers),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(Box::new(e)),
+        }
     }
 
     /// Removes a record from the DHT using its key.

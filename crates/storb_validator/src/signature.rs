@@ -1,7 +1,7 @@
 use rustls::client::danger::ServerCertVerifier;
-use rustls::{self};
 
-/// Insecure certificate verifier that accepts all certificates
+/// Insecure certificate verifier that accepts all certificates.
+/// This should only be used for testing purposes.
 #[derive(Debug)]
 pub struct InsecureCertVerifier;
 

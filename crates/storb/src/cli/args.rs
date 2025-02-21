@@ -2,6 +2,7 @@
 //! `miner` and `validator`.
 
 use crate::{config::Settings, get_config_value};
+use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 
@@ -25,6 +26,13 @@ pub fn common_args() -> Vec<Arg> {
             .value_name("port")
             .value_parser(value_parser!(u16))
             .help("API port for the node")
+            .action(ArgAction::Set)
+            .global(true),
+        Arg::new("quic_port")
+            .long("quic-port")
+            .value_name("port")
+            .value_parser(value_parser!(u16))
+            .help("QUIC port for the node")
             .action(ArgAction::Set)
             .global(true),
         Arg::new("post_ip")
@@ -79,6 +87,12 @@ pub fn common_args() -> Vec<Arg> {
             .help("Path to the database")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("dht_dir")
+            .long("dht-dir")
+            .value_name("path")
+            .help("Path to the dht rocksdb folder")
+            .action(ArgAction::Set)
+            .global(true),
         Arg::new("pem_file")
             .long("pem-file")
             .value_name("path")
@@ -119,12 +133,6 @@ pub fn common_args() -> Vec<Arg> {
             .help("DHT port")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("dht.file")
-            .long("dht.file")
-            .value_name("path")
-            .help("Path to file for the DHT to save state")
-            .action(ArgAction::Set)
-            .global(true),
         Arg::new("dht.bootstrap_ip")
             .long("dht.bootstrap-ip")
             .value_name("ip")
@@ -143,6 +151,7 @@ pub fn common_args() -> Vec<Arg> {
 
 pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronConfig {
     let api_port = *get_config_value!(args, "api_port", u16, settings.api_port);
+    let quic_port = *get_config_value!(args, "quic_port", u16, settings.quic_port);
 
     let subtensor_config = SubtensorConfig {
         network: get_config_value!(
@@ -178,7 +187,6 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
 
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
-        file: get_config_value!(args, "dht.file", String, &settings.dht.file).clone(),
         bootstrap_ip: get_config_value!(
             args,
             "dht.bootstrap_ip",
@@ -195,6 +203,12 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
     };
 
     BaseNeuronConfig {
+        version: Version {
+            // TODO: should this be defined elsewhere?
+            major: 0,
+            minor: 2,
+            patch: 2,
+        },
         netuid: *get_config_value!(args, "netuid", u16, settings.netuid),
         wallet_path: get_config_value!(args, "wallet_path", String, &settings.wallet_path)
             .to_string(),
@@ -204,6 +218,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             .to_string(),
         external_ip: get_config_value!(args, "external_ip", String, &settings.external_ip).clone(),
         api_port,
+        quic_port: Some(quic_port), // TODO: surely there's a better way to do this
         post_ip: *get_config_value!(args, "post_ip", bool, &settings.post_ip),
         mock: *get_config_value!(args, "mock", bool, &settings.mock),
         load_old_nodes: *get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),
@@ -214,6 +229,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             &settings.min_stake_threshold
         ),
         db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).into(),
+        dht_dir: get_config_value!(args, "dht_dir", String, &settings.dht_dir).into(),
         pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
         subtensor: subtensor_config,
         neuron: neuron_config,

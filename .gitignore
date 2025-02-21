@@ -1,11 +1,7 @@
-# certs
-*.der
-
-# vscode
-.vscode
 
 .DS_Store
 .direnv
+.vscode
 result/
 target/
 
@@ -14,8 +10,11 @@ target/
 
 # Storb
 logs/
+object_store/
 settings.toml
 !settings.toml.example
+storb-ignore
+*.storb-local
 
 # Testing
 test_dir_*

@@ -1,30 +1,41 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
-use axum::{extract::DefaultBodyLimit, routing::post, Router};
-use routes::upload_file;
-use rustls::{self};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{get, post},
+    Router,
+};
+use tokio::{sync::RwLock, time};
 use tracing::info;
+
+use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
-const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GiB
-
+mod constants;
+mod download;
 mod quic;
 mod routes;
 mod signature;
+mod upload;
 pub mod validator;
+
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
+
 /// State maintained by the validator service
 ///
 /// We derive Clone here to allow this state to be shared between request handlers,
 /// as Axum requires state types to be cloneable to share them across requests.
 #[derive(Clone)]
 struct ValidatorState {
-    validator: Arc<Mutex<Validator>>,
+    pub validator: Arc<RwLock<Validator>>,
 }
 
-/// QUIC validator server that accepts file uploads, sends files to miner via QUIC, and returns hashes.
-/// This server serves as an intermediary between HTTP clients and the backing storage+processing miner.
-/// Below is an overview of how it works:
+/// QUIC validator server that accepts file uploads, sends files to miner via QUIC,
+/// and returns hashes. This server serves as an intermediary between HTTP clients
+/// and the backing storage+processing miner. Below is an overview of how it works:
 ///
 /// 1. Producer produces bytes
 ///    - a. Read collection of bytes from multipart form
@@ -37,15 +48,15 @@ struct ValidatorState {
 ///        - verify pieces are being stored
 ///        - update miner statistics
 ///
-/// On success returns Ok(()).
-/// On failure returns error with details of the failure.
+/// On success, returns Ok(()).
+/// On failure, returns error with details of the failure.
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Load or generate server certificate
     // let server_cert = ensure_certificate_exists().await?;
 
     // Clone config before first use to avoid move
     let config_clone = config.clone();
-    let validator = Arc::new(Mutex::new(Validator::new(config_clone).await?));
+    let validator = Arc::new(RwLock::new(Validator::new(config_clone).await?));
 
     // Create weak reference for sync task
     let sync_validator = Arc::downgrade(&validator);
@@ -58,8 +69,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         loop {
             interval.tick().await;
             if let Some(validator) = sync_validator.upgrade() {
-                let mut guard = validator.lock().await;
-                guard.sync().await;
+                let mut guard = validator.write().await;
+                let _ = guard.sync().await; // TODO: handle error properly
             }
         }
     });
@@ -67,11 +78,13 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let state = ValidatorState { validator };
 
     let app = Router::new()
-        .route("/upload", post(upload_file))
+        .route("/file", post(upload_file))
+        .route("/file", get(download_file))
+        .route("/info", get(node_info))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.neuron_config.api_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(
@@ -91,7 +104,9 @@ async fn main(config: ValidatorConfig) {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
-    run_validator(config).await.unwrap()
+    run_validator(config)
+        .await
+        .expect("Failed to run the validator")
 }
 
 /// Runs the main async runtime

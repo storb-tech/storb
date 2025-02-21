@@ -1,23 +1,29 @@
-use bytes::Bytes;
+use std::error::Error;
+use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use axum::routing::get;
+use base::piece_hash::PieceHash;
+use base::swarm;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig};
 use rcgen::generate_simple_self_signed;
-use std::error::Error;
-use std::net::UdpSocket;
-use std::sync::Arc;
-use std::time::Duration;
+use store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time;
 use tracing::{error, info};
 
 pub mod miner;
+mod routes;
 pub mod store;
 
-/// Processes a piece of bytes by computing its BLAKE3 hash
-/// and returning it as a hexadecimal string
-async fn process_piece(piece: Bytes) -> String {
-    blake3::hash(&piece).to_hex().to_string()
+#[derive(Clone)]
+pub struct MinerState {
+    pub miner: Arc<Mutex<Miner>>,
+    pub object_store: Arc<Mutex<ObjectStore>>,
 }
 
 /// Configures the QUIC server with a self-signed certificate for localhost
@@ -35,7 +41,7 @@ fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'sta
     Ok(server_config?)
 }
 
-async fn main(config: MinerConfig) {
+async fn main(config: MinerConfig) -> Result<()> {
     info!("Configuring miner server...");
     let server_config = configure_server().unwrap();
 
@@ -43,6 +49,10 @@ async fn main(config: MinerConfig) {
 
     // Create weak reference for sync task
     let sync_miner = Arc::downgrade(&miner);
+
+    let object_store = Arc::new(Mutex::new(
+        ObjectStore::new(&config.store_dir).expect("Failed to initialize object store"),
+    ));
 
     // Spawn background sync task
     tokio::spawn(async move {
@@ -53,12 +63,22 @@ async fn main(config: MinerConfig) {
             interval.tick().await;
             if let Some(miner) = sync_miner.upgrade() {
                 let mut guard = miner.lock().await;
-                guard.sync().await;
+                let _ = guard.sync().await; // TODO: handle error properly
             }
         }
     });
 
-    let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.neuron_config.api_port))
+    let state = Arc::new(Mutex::new(MinerState {
+        miner,
+        object_store,
+    }));
+
+    let assigned_quic_port = config
+        .neuron_config
+        .quic_port
+        .expect("Could not assign quic port");
+
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", assigned_quic_port))
         .expect("Failed to bind UDP socket");
 
     let endpoint = Endpoint::new(
@@ -71,79 +91,148 @@ async fn main(config: MinerConfig) {
 
     info!(
         "Miner listening for pieces on quic://0.0.0.0:{}",
-        config.neuron_config.api_port
+        config
+            .neuron_config
+            .quic_port
+            .expect("Could not get quic port")
     );
 
-    while let Some(incoming) = endpoint.accept().await {
-        tokio::spawn(async move {
-            match incoming.await {
-                Ok(conn) => {
-                    info!("New connection from {}", conn.remote_address());
+    let app = axum::Router::new()
+        .route("/info", get(routes::node_info))
+        .route("/piece", get(routes::get_piece))
+        .with_state(state.clone());
 
-                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                        info!("New bidirectional stream opened");
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
+    info!("Miner HTTP server listening on {}", addr);
 
-                        // Read the piece size
-                        let mut piece_size_buf = [0u8; 8];
-                        if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
-                            error!("Failed to read piece size: {}", e);
-                            continue;
-                        }
-                        let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                        info!("Received piece size: {} bytes", piece_size);
+    let http_server = tokio::spawn(async move {
+        axum::serve(
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .context("Failed to bind HTTP server")
+                .unwrap(),
+            app,
+        )
+        .await
+        .context("HTTP server failed")
+        .unwrap();
+    });
 
-                        // Process the piece
-                        let mut buffer = vec![0u8; piece_size];
-                        let mut bytes_read = 0;
-                        let mut piece = Vec::new();
+    let dht_sender = state
+        .lock()
+        .await
+        .miner
+        .lock()
+        .await
+        .neuron
+        .command_sender
+        .clone();
 
-                        while bytes_read < piece_size {
-                            match recv.read(&mut buffer[..piece_size - bytes_read]).await {
-                                Ok(Some(n)) if n > 0 => {
-                                    piece.extend_from_slice(&buffer[..n]);
-                                    bytes_read += n;
-                                }
-                                Ok(_) => break, // End of stream
-                                Err(e) => {
-                                    error!("Error reading piece: {}", e);
-                                    break;
+    let quic_server = tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let dht_sender_clone = dht_sender.clone();
+            let object_store_clone = state.lock().await.object_store.lock().await.clone();
+
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        info!("New connection from {}", conn.remote_address());
+
+                        while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                            info!("New bidirectional stream opened");
+
+                            // Read the piece size
+                            let mut piece_size_buf = [0u8; 8];
+                            if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
+                                error!("Failed to read piece size: {}", e);
+                                continue;
+                            }
+                            let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
+                            info!("Received piece size: {} bytes", piece_size);
+
+                            // Process the piece
+                            let mut buffer = vec![0u8; piece_size];
+                            let mut bytes_read = 0;
+                            let mut piece = Vec::new();
+
+                            while bytes_read < piece_size {
+                                match recv.read(&mut buffer[..piece_size - bytes_read]).await {
+                                    Ok(Some(n)) if n > 0 => {
+                                        piece.extend_from_slice(&buffer[..n]);
+                                        bytes_read += n;
+                                    }
+                                    Ok(_) => break, // End of stream
+                                    Err(e) => {
+                                        error!("Error reading piece: {}", e);
+                                        break;
+                                    }
                                 }
                             }
-                        }
 
-                        if bytes_read == 0 {
-                            continue; // No data received
-                        }
+                            if bytes_read == 0 {
+                                continue; // No data received
+                            }
 
-                        info!("Received piece of exactly {} bytes", bytes_read);
+                            info!("Received piece of exactly {} bytes", bytes_read);
 
-                        let hash = process_piece(piece.into()).await;
-                        if let Err(e) = send.write_all(hash.as_bytes()).await {
-                            error!("Failed to send hash: {}", e);
-                            continue;
-                        }
-                        // Send delimiter after hash
-                        if let Err(e) = send.write_all(b"\n").await {
-                            error!("Failed to send delimiter: {}", e);
-                            continue;
-                        }
+                            let hash_raw = blake3::hash(&piece);
+                            let hash = hash_raw.to_hex().to_string();
+                            let piece_key = libp2p::kad::RecordKey::new(&hash_raw.as_bytes());
 
-                        info!("Finished processing piece of size: {}", bytes_read);
+                            // Add miner as a provider for the piece
+
+                            match swarm::dht::StorbDHT::start_providing_piece(
+                                dht_sender_clone.clone(),
+                                piece_key.clone(),
+                            )
+                            .await
+                            {
+                                Ok(_) => info!(
+                                    "Added miner as provider for piece with key {:?}",
+                                    piece_key
+                                ),
+                                Err(e) => {
+                                    error!("Failed to add miner as provider for piece: {}", e)
+                                }
+                            }
+
+                            if let Err(e) = send.write_all(hash.as_bytes()).await {
+                                error!("Failed to send hash: {}", e);
+                                continue;
+                            }
+                            // Send delimiter after hash
+                            if let Err(e) = send.write_all(b"\n").await {
+                                error!("Failed to send delimiter: {}", e);
+                                continue;
+                            }
+
+                            let piece_hash =
+                                PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
+                            object_store_clone
+                                .write(&piece_hash, &piece)
+                                .await
+                                .expect("Failed to write piece to store");
+                            info!("Finished storing piece of size: {}", bytes_read);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Connection failed: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("Connection failed: {}", e);
-                }
-            }
-        });
-    }
+            });
+        }
+    });
+
+    let _ = tokio::try_join!(http_server, quic_server);
+
+    Ok(())
 }
 
 /// Run the miner
 pub fn run(config: MinerConfig) {
-    tokio::runtime::Builder::new_multi_thread()
+    let _ = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(main(config))
+        .block_on(main(config));
 }

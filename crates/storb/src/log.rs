@@ -41,10 +41,15 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
 
     let logger = Registry::default()
         .with(LevelFilter::from_level(level))
-        .with(fmt::Layer::default().with_writer(non_blocking_stdout))
+        .with(
+            fmt::Layer::default()
+                .with_writer(non_blocking_stdout)
+                .with_line_number(true),
+        )
         .with(
             fmt::Layer::default()
                 .with_writer(non_blocking_file)
+                .with_line_number(true)
                 .with_ansi(false),
         );
 
