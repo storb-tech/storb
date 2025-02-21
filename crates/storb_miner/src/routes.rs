@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum::extract::{self, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use base::piece_hash::PieceHash;
+use base::piece_hash::{piecehash_to_bytes_raw, PieceHash};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -64,6 +63,7 @@ pub async fn get_piece(
         )
     })?;
 
+    info!("Piece hash: {}", piece_hash_query);
     let object_store = state.lock().await.object_store.lock().await.clone();
     // If an error occurs during piece hash decode, it is bound to be a user error.
     let piece_hash = PieceHash::new(piece_hash_query.clone()).map_err(|_| {
@@ -78,14 +78,25 @@ pub async fn get_piece(
         error!("Failed to retrieve data for piecehash {piece_hash}: {err}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            bincode::serialize("Failed to retrieve piece data").unwrap_or_default(),
+            bincode::serialize("An internal server error occurred").unwrap_or_default(),
         )
     })?;
-    let serialised_data = bincode::serialize(&data).map_err(|err| {
+
+    let serialised_data = base::piece::serialise_piece_response(&base::piece::PieceResponse {
+        piece_hash: piecehash_to_bytes_raw(&piece_hash).map_err(|err| {
+            error!("Failed to convert piece hash to raw bytes: {err}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                bincode::serialize("An internal server error occurred").unwrap_or_default(),
+            )
+        })?,
+        piece_data: data,
+    })
+    .map_err(|err| {
         error!("Failed to serialise piece data (piecehash={piece_hash}): {err}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            bincode::serialize("Failed to serialise piece data").unwrap_or_default(),
+            bincode::serialize("An internal server error occurred").unwrap_or_default(),
         )
     })?;
 

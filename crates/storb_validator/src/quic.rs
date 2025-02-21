@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use libp2p::multiaddr::Protocol;
+use base::utils::multiaddr_to_socketaddr;
 use libp2p::Multiaddr;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{ClientConfig, Connection, Endpoint};
@@ -17,29 +17,6 @@ pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
 // TODO: turn this into a setting?
 const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
 const MAX_ATTEMPTS: i32 = 5;
-
-/// Convert Multiaddr to SocketAddr.
-/// The multiaddr format might be something like: `/ip4/127.0.0.1/udp/9000`.
-fn multiaddr_to_socketaddr(addr: &Multiaddr) -> Option<SocketAddr> {
-    let mut iter = addr.iter();
-
-    // Look for IP protocol component
-    let ip = match iter.next()? {
-        Protocol::Ip4(ip) => IpAddr::V4(ip),
-        Protocol::Ip6(ip) => IpAddr::V6(ip),
-        _ => return None,
-    };
-
-    // Look for TCP protocol component with port
-    let port = match iter.next()? {
-        Protocol::Tcp(port) => port,
-        Protocol::Udp(port) => port,
-        _ => return None,
-    };
-
-    // Construct and return the SocketAddr
-    Some(SocketAddr::new(ip, port))
-}
 
 /// Establishes QUIC connections to miners from a list of QUIC addresses.
 pub async fn establish_miner_connections(

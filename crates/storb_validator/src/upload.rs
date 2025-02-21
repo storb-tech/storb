@@ -271,88 +271,86 @@ async fn consume_bytes(
         // Encode the chunk using FEC
         let encoded = encode_chunk(&chunk, chunk_idx);
         let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
-
+        let mut chunk_hash_raw = blake3::Hasher::new();
         // Distribute pieces to miners
-        if let Some(pieces) = encoded.pieces {
-            for piece in pieces {
-                let piece_idx = piece.piece_idx;
-                // Round-robin distribution to miners
-                let (addr, conn) =
-                    &miner_connections[(piece_idx as usize) % miner_connections.len()];
+        for piece in encoded.pieces {
+            let piece_idx = piece.piece_idx;
+            // Round-robin distribution to miners
+            let (addr, conn) = &miner_connections[(piece_idx as usize) % miner_connections.len()];
 
-                // get blake3 hash of piece
-                let piece_hash_raw = blake3::hash(&piece.data);
-                let piece_hash = piece_hash_raw.as_bytes();
+            // get blake3 hash of piece
+            let piece_hash_raw = blake3::hash(&piece.data);
+            let piece_hash = piece_hash_raw.as_bytes();
 
-                info!("Sending piece {piece_idx} to miner {addr}");
+            info!("Sending piece {piece_idx} to miner {addr}");
 
-                // Send piece to miner via QUIC connection
-                let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
+            // Send piece to miner via QUIC connection
+            let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
 
-                send_stream
-                    .write_all(&(piece.data.len() as u64).to_be_bytes())
-                    .await?;
-                send_stream.write_all(&piece.data).await?;
-                send_stream.finish()?;
+            send_stream
+                .write_all(&(piece.data.len() as u64).to_be_bytes())
+                .await?;
+            send_stream.write_all(&piece.data).await?;
+            send_stream.finish()?;
 
-                // Read hash response
-                let mut _hash = Vec::new();
-                let mut buf = [0u8; 1];
-                while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
-                    if n == 0 || buf[0] == b'\n' {
-                        break;
-                    }
-                    _hash.push(buf[0]);
+            // Read hash response
+            let mut _hash = Vec::new();
+            let mut buf = [0u8; 1];
+            while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
+                if n == 0 || buf[0] == b'\n' {
+                    break;
                 }
-
-                // TODO: verification + scoring
-
-                // TODO: maybe do this in a background thread instead of doing it here?
-                // Add piece metadata to DHT
-                // TODO: some of this stuff can be moved into its own helper function
-                let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
-                info!("UPLOAD PIECE KEY: {:?}", &piece_key);
-
-                let msg = (
-                    piece_key.clone(),
-                    validator_id,
-                    chunk_idx,
-                    piece_idx,
-                    piece.piece_type.clone(),
-                );
-                let msg_bytes = match bincode::serialize(&msg) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        error!("Failed to serialize msg: {:?}", err);
-                        continue; // Skip to the next iteration on error
-                    }
-                };
-                let signature = sign_message(&signer, msg_bytes);
-                // Get netuid from validator state
-                let value = models::PieceDHTValue {
-                    piece_hash: piece_key.clone(),
-                    validator_id,
-                    chunk_idx,
-                    piece_idx,
-                    piece_type: piece.piece_type,
-                    signature,
-                };
-
-                swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
-                    .await
-                    .expect("Failed to put piece entry in DHT"); // TODO: handle error
-
-                info!("Received hash for piece {piece_idx} from miner {addr}");
-                chunk_piece_hashes.push(*piece_hash);
-                piece_hashes.extend(chunk_piece_hashes.iter().cloned());
+                _hash.push(buf[0]);
             }
+
+            // TODO: verification + scoring
+
+            // TODO: maybe do this in a background thread instead of doing it here?
+            // Add piece metadata to DHT
+            // TODO: some of this stuff can be moved into its own helper function
+            let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
+            info!("UPLOAD PIECE KEY: {:?}", &piece_key);
+
+            let msg = (
+                piece_key.clone(),
+                validator_id,
+                chunk_idx,
+                piece_idx,
+                piece.piece_type.clone(),
+            );
+            let msg_bytes = match bincode::serialize(&msg) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    error!("Failed to serialize msg: {:?}", err);
+                    continue; // Skip to the next iteration on error
+                }
+            };
+            let signature = sign_message(&signer, msg_bytes);
+            // Get netuid from validator state
+            let value = models::PieceDHTValue {
+                piece_hash: piece_key.clone(),
+                validator_id,
+                chunk_idx,
+                piece_idx,
+                piece_type: piece.piece_type,
+                signature,
+            };
+
+            swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
+                .await
+                .expect("Failed to put piece entry in DHT"); // TODO: handle error
+
+            info!("Received hash for piece {piece_idx} from miner {addr}");
+            chunk_hash_raw.update(piece_hash);
+            chunk_piece_hashes.push(*piece_hash);
+            piece_hashes.extend(chunk_piece_hashes.iter().cloned());
         }
 
         // TODO: some of this stuff can be moved into its own helper function
         let chunk_size = encoded.chunk_size;
-        let chunk_hash_raw = blake3::hash(&chunk);
-        let chunk_hash = chunk_hash_raw.as_bytes();
-        let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash);
+        let chunk_hash = chunk_hash_raw.finalize();
+
+        let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash.as_bytes());
         info!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
 
         let chunk_msg = (
@@ -399,7 +397,7 @@ async fn consume_bytes(
         .expect("Failed to put chunk entry into DHT"); // TODO: handle error
         debug!("Distributed pieces for chunk with hash {:?}", chunk_key);
 
-        chunk_hashes.push(*chunk_hash);
+        chunk_hashes.push(*chunk_hash.as_bytes());
 
         chunk_idx += 1;
     }

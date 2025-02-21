@@ -23,6 +23,7 @@ pub mod piece;
 pub mod piece_hash;
 pub mod swarm;
 pub mod sync;
+pub mod utils;
 pub mod version;
 
 #[derive(Debug)]
@@ -92,7 +93,7 @@ pub struct BaseNeuronConfig {
     pub dht: DhtConfig,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub neuron_info: NeuronInfoLite<AccountId>,
     pub peer_id: Option<PeerId>,
