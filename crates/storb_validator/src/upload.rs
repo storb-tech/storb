@@ -14,9 +14,10 @@ use subxt::ext::codec::Compact;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::{quic::establish_miner_connections, ValidatorState};
+use crate::constants::MIN_REQUIRED_MINERS;
+use crate::quic::establish_miner_connections;
+use crate::ValidatorState;
 
-const MIN_REQUIRED_MINERS: usize = 1;
 const LOGGING_INTERVAL_MB: u64 = 100;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 

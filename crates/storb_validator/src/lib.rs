@@ -14,6 +14,7 @@ use tracing::info;
 use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
+mod constants;
 mod download;
 mod quic;
 mod routes;
