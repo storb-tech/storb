@@ -53,7 +53,6 @@ impl Display for PieceHash {
 }
 
 pub fn piecehash_to_bytes_raw(piecehash: &PieceHash) -> Result<[u8; 32], String> {
-    // let final_piece_hash = piecehash.as_bytes();
     let final_piece_hash = hex::decode(piecehash.as_str())
         .map_err(|err| format!("Failed to decode piecehash into hex: {err}"))?;
     let mut piece_hash_bytes = [0u8; 32];

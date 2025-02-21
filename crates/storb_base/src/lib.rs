@@ -26,6 +26,8 @@ pub mod sync;
 pub mod utils;
 pub mod version;
 
+pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
+
 #[derive(Debug)]
 pub enum NeuronError {
     SubtensorError(String),
@@ -119,7 +121,7 @@ pub struct LocalNodeInfo {
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
-    pub address_book: Arc<RwLock<HashMap<PeerId, NodeInfo>>>,
+    pub address_book: AddressBook,
     pub peer_node_uid: bimap::BiMap<PeerId, u16>,
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,

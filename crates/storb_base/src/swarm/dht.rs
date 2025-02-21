@@ -786,9 +786,10 @@ impl StorbDHT {
     /// This function issues a get_record query and waits for the response.
     /// If a piece record is found and successfully deserialized, it is returned.
     pub async fn get_piece_entry(
-        command_sender: mpsc::Sender<DhtCommand>,
+        command_sender: &mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
-    ) -> Result<Option<models::PieceDHTValue>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<models::PieceDHTValue>, Box<dyn std::error::Error + Send + Sync + 'static>>
+    {
         let (response_tx, response_rx) = oneshot::channel();
         match command_sender
             .send(DhtCommand::Get {
@@ -858,9 +859,9 @@ impl StorbDHT {
     ///
     /// This function issues a get_providers query and waits for the response.
     pub async fn get_piece_providers(
-        command_sender: mpsc::Sender<DhtCommand>,
+        command_sender: &mpsc::Sender<DhtCommand>,
         piece_key: RecordKey,
-    ) -> Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<HashSet<PeerId>, Box<dyn std::error::Error + Send + Sync + 'static>> {
         let (response_tx, response_rx) = oneshot::channel();
         match command_sender
             .send(DhtCommand::GetProviders {

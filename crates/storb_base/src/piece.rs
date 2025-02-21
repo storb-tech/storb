@@ -511,7 +511,7 @@ mod tests {
         let too_few_pieces = encoded_chunk.pieces[0..((encoded_chunk.k - 1) as usize)].to_vec();
         encoded_chunk.pieces = too_few_pieces;
         assert!(
-            !reconstruct_chunk(&encoded_chunk).is_ok(),
+            reconstruct_chunk(&encoded_chunk).is_err(),
             "Should return Err when there are too few pieces"
         );
     }
