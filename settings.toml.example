@@ -16,9 +16,9 @@ mock = false
 load_old_nodes = true
 min_stake_threshold = 1000
 
-db_dir = "database.db"
-dht_dir = "dht-db.storb-local"
-pem_file = "storb.pem"
+db_file = "storb_data/database.db"
+dht_dir = "storb_data/dht-db.storb-local"
+pem_file = "storb_data/storb.pem"
 
 [subtensor]
 network = "finney"
@@ -35,6 +35,9 @@ bootstrap_port = 6942
 
 [miner]
 store_dir = "object_store"
+
+[validator]
+scores_state_file = "storb_data/scores.storb-state"
 
 [validator.neuron]
 num_concurrent_forwards = 1

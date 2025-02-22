@@ -81,16 +81,16 @@ pub fn common_args() -> Vec<Arg> {
             .help("Set the log level")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("db_dir")
-            .long("db_dir")
+        Arg::new("db_file")
+            .long("db-file")
             .value_name("path")
-            .help("Path to the database")
+            .help("Path to the database file")
             .action(ArgAction::Set)
             .global(true),
         Arg::new("dht_dir")
             .long("dht-dir")
             .value_name("path")
-            .help("Path to the dht rocksdb folder")
+            .help("Path to the DHT RocksDB folder")
             .action(ArgAction::Set)
             .global(true),
         Arg::new("pem_file")
@@ -228,7 +228,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             u64,
             &settings.min_stake_threshold
         ),
-        db_dir: get_config_value!(args, "db_dir", String, &settings.db_dir).into(),
+        db_file: get_config_value!(args, "db_file", String, &settings.db_file).into(),
         dht_dir: get_config_value!(args, "dht_dir", String, &settings.dht_dir).into(),
         pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
         subtensor: subtensor_config,

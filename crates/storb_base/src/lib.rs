@@ -84,7 +84,7 @@ pub struct BaseNeuronConfig {
     pub load_old_nodes: bool,
     pub min_stake_threshold: u64,
 
-    pub db_dir: PathBuf,
+    pub db_file: PathBuf,
     pub dht_dir: PathBuf,
     pub pem_file: String,
 
@@ -121,6 +121,7 @@ pub struct LocalNodeInfo {
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
+    pub neurons: Vec<NeuronInfoLite<AccountId>>,
     pub address_book: AddressBook,
     pub peer_node_uid: bimap::BiMap<PeerId, u16>,
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
@@ -218,6 +219,7 @@ impl BaseNeuron {
         let mut neuron = BaseNeuron {
             config: config.clone(),
             command_sender,
+            neurons: Vec::new(),
             address_book: Arc::new(RwLock::new(HashMap::new())),
             peer_node_uid: bimap::BiMap::new(),
             subtensor,
@@ -327,7 +329,7 @@ mod tests {
             mock: false,
             load_old_nodes: false,
             min_stake_threshold: 0,
-            db_dir: "./test.db".into(),
+            db_file: "./test.db".into(),
             dht_dir: "./test_dht".into(),
             pem_file: "cert.pem".to_string(),
             subtensor: SubtensorConfig {

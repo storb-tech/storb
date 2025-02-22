@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use base::BaseNeuronConfig;
@@ -5,6 +7,7 @@ use storb_validator;
 use storb_validator::validator::ValidatorConfig;
 
 use crate::config::Settings;
+use crate::get_config_value;
 
 use super::args::get_neuron_config;
 
@@ -12,6 +15,11 @@ pub fn cli() -> Command {
     Command::new("validator")
         .about("Run a Storb validator")
         .args([
+            Arg::new("scores_state_file")
+                .long("scores-state-file")
+                .value_name("path")
+                .help("The path to the scores state file")
+                .action(ArgAction::Set),
             // Neuron settings
             Arg::new("neuron.num_concurrent_forwards")
                 .long("neuron.num-concurrent-forwards")
@@ -52,9 +60,20 @@ pub fn cli() -> Command {
 }
 
 pub fn exec(args: &ArgMatches, settings: &Settings) {
+    let scores_state_file = get_config_value!(
+        args,
+        "scores_state_file",
+        String,
+        settings.validator.scores_state_file
+    )
+    .to_string();
+
     // Get validator config with CLI overrides
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
-    let validator_config = ValidatorConfig { neuron_config };
+    let validator_config = ValidatorConfig {
+        scores_state_file: PathBuf::new().join(scores_state_file),
+        neuron_config,
+    };
 
     storb_validator::run(validator_config);
 }

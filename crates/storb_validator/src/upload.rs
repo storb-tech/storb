@@ -128,6 +128,7 @@ impl<'a> UploadProcessor<'a> {
         let dht_sender_clone = dht_sender.clone();
 
         let signer = self.state.validator.read().await.neuron.signer.clone();
+        // let db_conn = self.state.db_conn.clone();
         let signer_clone = signer.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(

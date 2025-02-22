@@ -3,11 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::{
-    extract::DefaultBodyLimit,
-    routing::{get, post},
-    Router,
-};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post};
+use axum::Router;
 use tokio::{sync::RwLock, time};
 use tracing::info;
 
@@ -18,6 +16,7 @@ mod constants;
 mod download;
 mod quic;
 mod routes;
+mod scoring;
 mod signature;
 mod upload;
 pub mod validator;
