@@ -14,6 +14,7 @@ in
     buildInputs = [
       pkgs.llvmPackages_18.clang
       pkgs.openssl
+      pkgs.rocksdb
       pkgs.rustToolchain
     ];
 
@@ -21,8 +22,10 @@ in
     LIBCLANG_PATH = "${pkgs.llvmPackages_18.libclang.lib}/lib";
 
     OPENSSL_DIR = "${pkgs.openssl.dev}";
-    OPENSSL_NO_VENDOR=1;
-    OPENSSL_LIB_DIR="${pkgs.lib.getLib pkgs.openssl}/lib";
+    OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
+    OPENSSL_NO_VENDOR = 1;
 
     PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
+
+    ROCKSDB_LIB_DIR = "${pkgs.rocksdb}/lib";
   }
