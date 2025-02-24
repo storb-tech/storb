@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use axum::body::Bytes;
@@ -11,11 +12,12 @@ use futures::{Stream, TryStreamExt};
 use libp2p::Multiaddr;
 use quinn::Connection;
 use subxt::ext::codec::Compact;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::quic::establish_miner_connections;
+use crate::scoring::ScoringSystem;
 use crate::ValidatorState;
 
 const LOGGING_INTERVAL_MB: u64 = 100;
@@ -115,7 +117,7 @@ impl<'a> UploadProcessor<'a> {
         };
 
         // Spawn consumer task
-        let miner_conns = self.miner_connections.clone();
+        let miner_connections = self.miner_connections.clone();
         // TODO: all these clones are not the most ideal, perhaps fix?
         let dht_sender = self
             .state
@@ -127,13 +129,17 @@ impl<'a> UploadProcessor<'a> {
             .clone();
         let dht_sender_clone = dht_sender.clone();
 
+        // get memorydb from state
+        // let scoring_system = self.state.validator.read().await.scoring_system.clone();
+
         let signer = self.state.validator.read().await.neuron.signer.clone();
         // let db_conn = self.state.db_conn.clone();
         let signer_clone = signer.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(
+                // scoring_system,
                 rx,
-                miner_conns,
+                miner_connections,
                 validator_id,
                 dht_sender_clone,
                 signer_clone,
@@ -151,7 +157,7 @@ impl<'a> UploadProcessor<'a> {
         let (piece_hashes, chunk_hashes) = consumer_result??;
 
         // log the chunk hashes as strings
-        info!("Lubed up Chunk hashes: {:?}", chunk_hashes);
+        info!("Raw Chunk hashes: {:?}", chunk_hashes);
         let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
         info!("Chunk hashes: {:?}", chunk_hashes_str);
 
@@ -259,6 +265,7 @@ where
 }
 
 async fn consume_bytes(
+    // scoring_system: Arc<RwLock<ScoringSystem>>,
     mut rx: mpsc::Receiver<Vec<u8>>,
     miner_connections: Vec<(SocketAddr, Connection)>,
     validator_id: Compact<u16>,
@@ -306,6 +313,9 @@ async fn consume_bytes(
             }
 
             // TODO: verification + scoring
+            // let db = scoring_system.write().await.db.clone();
+
+            // Update miner 
 
             // TODO: maybe do this in a background thread instead of doing it here?
             // Add piece metadata to DHT

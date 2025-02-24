@@ -11,7 +11,6 @@ use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
-use sync::Synchronizable;
 use tokio::sync::{mpsc, Mutex};
 use tracing::info;
 
@@ -216,27 +215,21 @@ impl BaseNeuron {
             version: config.version.clone(),
         };
 
-        let mut neuron = BaseNeuron {
+        let neuron = BaseNeuron {
             config: config.clone(),
             command_sender,
             neurons: Vec::new(),
             address_book: Arc::new(RwLock::new(HashMap::new())),
             peer_node_uid: bimap::BiMap::new(),
             subtensor,
-            signer: signer.clone(), // TODO: don't need to clone (after moving neuron id shit away)
+            signer,
             local_node_info,
         };
 
-        // sync metagraph
-        let _ = neuron.sync_metagraph().await; // TODO: proper error handling
-
-        let neuron_uid = neuron.local_node_info.uid;
-        info!("Neuron id: {:?}", neuron_uid);
-
-        // check registration status
+        // Check registration status
         neuron.check_registration().await?;
 
-        // post ip if specified
+        // Post IP if specified
         info!("Should post ip?: {}", config.post_ip);
         if config.post_ip {
             let address = format!("{}:{}", config.external_ip, config.api_port)
