@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ndarray::{array, s, Array, Array1};
 use serde::{Deserialize, Serialize};
+use storb_miner::store;
 use tracing::{info, warn};
 
 use crate::db::MemoryDb;
@@ -130,7 +131,7 @@ impl ScoringSystem {
     }
 
     /// Update scores for each of the miners.
-    pub fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
+    pub async fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
         // if # of neurons has changed we add new entries to scores
         // if a neuron has been replaced by another w zero out its scores
 
@@ -178,7 +179,62 @@ impl ScoringSystem {
             state.final_latency_scores = new_final_latency_scores;
         }
 
+        // connect to db and compute new scores
         let state = &self.state;
+
+        let mut response_rate_scores = Array1::<f64>::zeros(state.ema_scores.len());
+        for (miner_uid, _) in state.ema_scores.iter().enumerate() {
+            let db = self.db.clone();
+            let conn = db.conn.lock().await;
+            // TODO: error handling
+            let store_successes: f64 = conn
+                .query_row(
+                    "SELECT store_successes FROM miner_stats WHERE miner_uid = ?",
+                    [miner_uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let store_attempts: f64 = conn
+                .query_row(
+                    "SELECT store_attempts FROM miner_stats WHERE miner_uid = ?",
+                    [miner_uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let store_rate = store_successes / store_attempts;
+
+            let retrieval_successes: f64 = conn
+                .query_row(
+                    "SELECT retrieval_successes FROM miner_stats WHERE miner_uid = ?",
+                    [miner_uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let retrieval_attempts: f64 = conn
+                .query_row(
+                    "SELECT retrieval_attempts FROM miner_stats WHERE miner_uid = ?",
+                    [miner_uid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let retrieval_rate = retrieval_successes as f64 / retrieval_attempts as f64;
+
+            response_rate_scores[miner_uid] = 0.5 * store_rate + 0.5 * retrieval_rate;
+        }
+
+        // zero out nans in response rate scores
+        let nan_indices: Vec<_> = response_rate_scores
+            .iter()
+            .enumerate()
+            .filter(|(_, &score)| score.is_nan())
+            .map(|(i, _)| i)
+            .collect();
+
+        for i in nan_indices {
+            response_rate_scores[i] = 0.0;
+        }
+
+        info!("response rate scores: {}", response_rate_scores);
         info!("new scores: {}", state.ema_scores);
         info!("new retrieve latencies: {}", state.retrieve_latencies);
         info!("new store_latencies: {}", state.store_latencies);

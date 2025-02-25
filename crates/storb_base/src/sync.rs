@@ -160,7 +160,7 @@ impl Synchronizable for BaseNeuron {
                 };
 
                 let node_info = NodeInfo {
-                    neuron_info,
+                    neuron_info: neuron_info.clone(),
                     peer_id: remote_node_info.peer_id,
                     http_address: remote_node_info.http_address,
                     quic_address: remote_node_info.quic_address,
@@ -172,6 +172,10 @@ impl Synchronizable for BaseNeuron {
                         .ok_or("Peer ID did not exist so insertion into address book failed")?,
                     node_info,
                 );
+                // update peer id to neuron uid mapping
+                self.peer_node_uid
+                    .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
+                // TODO: error handle?
             }
         }
 

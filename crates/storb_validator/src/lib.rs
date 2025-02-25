@@ -75,6 +75,20 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
+    // Spawn background backup task
+    let validator_clone = validator.clone();
+    tokio::spawn(async move {
+        validator_clone
+            .write()
+            .await
+            .scoring_system
+            .write()
+            .await
+            .db
+            .start_periodic_backup(config.neuron_config.neuron.sync_frequency)
+            .await; // TODO: constant
+    });
+
     let state = ValidatorState { validator };
 
     let app = Router::new()

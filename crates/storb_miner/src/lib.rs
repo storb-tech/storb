@@ -176,7 +176,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                             info!("Received piece of exactly {} bytes", bytes_read);
 
                             let hash_raw = blake3::hash(&piece);
-                            let hash = hash_raw.to_hex().to_string();
+                            let hash: String = hash_raw.to_hex().to_string();
                             let piece_key = libp2p::kad::RecordKey::new(&hash_raw.as_bytes());
 
                             // Add miner as a provider for the piece
@@ -196,7 +196,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 }
                             }
 
-                            if let Err(e) = send.write_all(hash.as_bytes()).await {
+                            if let Err(e) = send.write_all(hash_raw.as_bytes()).await {
                                 error!("Failed to send hash: {}", e);
                                 continue;
                             }

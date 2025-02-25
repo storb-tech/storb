@@ -9,11 +9,12 @@ use base::swarm::dht::DhtCommand;
 use base::{swarm, AddressBook};
 use futures::stream::FuturesUnordered;
 use libp2p::kad::RecordKey;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, trace};
 
-use crate::ValidatorState;
+use crate::scoring::{self, ScoringSystem};
+use crate::{db, ValidatorState};
 
 const MPSC_BUFFER_SIZE: usize = 10;
 // TODO: Put this in config or just base it on hardware threads
@@ -37,6 +38,7 @@ impl DownloadProcessor {
 
     /// Producer for pieces. Queries the miners to get piece data.
     async fn produce_piece(
+        scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         local_address_book: AddressBook,
         piece_hash: [u8; 32],
@@ -76,9 +78,14 @@ impl DownloadProcessor {
                 .ok_or_else(|| anyhow!("Provider {:?} not found in local address book", provider))?
                 .clone();
 
+            let scoring_system = scoring_system.clone();
+            let db = scoring_system.write().await.db.clone();
+
             // Each provider query is executed in its own async block.
             // The provider variable is moved into the block for logging purposes.
             let fut = async move {
+                let miner_uid = node_info.neuron_info.uid;
+                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", &[&miner_uid])?;
                 let req_client = reqwest::Client::builder()
                     .timeout(CLIENT_TIMEOUT)
                     .build()
@@ -120,6 +127,10 @@ impl DownloadProcessor {
                     bail!("Hash mismatch for provider {:?}", provider);
                 }
 
+                // Update the scoring system with the successful retrieval.
+                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", &[&miner_uid])?;
+                db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", &[&miner_uid])?;
+
                 Ok(piece_data)
             };
 
@@ -152,6 +163,7 @@ impl DownloadProcessor {
     /// Producer for chunks. It consumes the pieces produced to achieve this.
     /// The chunks are sent via the MSPC channel back to the HTTP stream processor.
     async fn produce_chunk(
+        scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         address_book: AddressBook,
         chunk_tx: mpsc::Sender<Vec<u8>>,
@@ -175,6 +187,7 @@ impl DownloadProcessor {
             let piece_result_tx = piece_result_tx.clone();
             let dht_sender_clone = dht_sender.clone();
             let address_book_clone = local_address_book.clone();
+            let scoring_system_clone = scoring_system.clone();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
@@ -190,6 +203,7 @@ impl DownloadProcessor {
                         match task {
                             Some(task) => {
                                 match Self::produce_piece(
+                                    scoring_system_clone.clone(),
                                     dht_sender_clone.clone(),
                                     address_book_clone.clone(),
                                     task,
@@ -275,6 +289,8 @@ impl DownloadProcessor {
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 
+        let scoring_system = self.state.validator.read().await.scoring_system.clone();
+
         tokio::spawn(async move {
             for chunk_hash in chunk_hashes.clone() {
                 // convert chunk_hash to a string
@@ -314,6 +330,7 @@ impl DownloadProcessor {
                 );
 
                 if let Err(e) = Self::produce_chunk(
+                    scoring_system.clone(),
                     dht_sender.clone(),
                     address_book.clone(),
                     chunk_tx.clone(),
