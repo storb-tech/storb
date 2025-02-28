@@ -12925,6 +12925,7 @@ dependencies = [
  "storb_base",
  "storb_miner",
  "storb_validator",
+ "sysinfo",
  "tokio",
  "tokio-serde",
  "tracing",

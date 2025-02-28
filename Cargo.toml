@@ -41,9 +41,9 @@ hex = "0.4.3"
 libp2p = { version = "0.55.0", features = ["full", "serde"] }
 lru = "0.13.0"
 ndarray = { version = "0.16.1", features = ["serde"] }
-opentelemetry = "0.28.0"
-opentelemetry-otlp = "0.28.0"
-opentelemetry_sdk = "0.28.0"
+opentelemetry = { version = "0.28.0", features = ["metrics"]}
+opentelemetry-otlp = { version = "0.28.0", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.28.0", features = ["metrics"] }
 opentelemetry-stdout = "0.28.0"
 quinn = "0.11.2"
 rand = "0.8.5"
@@ -54,6 +54,7 @@ rusqlite = { version = "0.33.0", features = ["bundled", "backup"] }
 rustls = { version = "0.23.22" }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = { version = "1.0.137" }
+sysinfo = "0.33.1"
 tempfile = "3.2.0"
 thiserror = "2.0.11"
 tokio = { version = "1.43.0", features = ["full"] }

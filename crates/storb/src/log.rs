@@ -11,6 +11,8 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+
+use crate::constants::OTEL_EXPORTER_OTLP_ENDPOINT;
 /// Print to stderr and exit with a non-zero exit code
 #[macro_export]
 macro_rules! fatal {
@@ -23,6 +25,7 @@ macro_rules! fatal {
 fn init_logs() -> SdkLoggerProvider {
     let exporter = LogExporter::builder()
         .with_http()
+        .with_endpoint(OTEL_EXPORTER_OTLP_ENDPOINT)
         .with_protocol(Protocol::HttpBinary)
         .build()
         .expect("Failed to create log exporter");
