@@ -3,11 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::{
-    extract::DefaultBodyLimit,
-    routing::{get, post},
-    Router,
-};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post};
+use axum::Router;
 use tokio::{sync::RwLock, time};
 use tracing::info;
 
@@ -15,9 +13,11 @@ use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
 mod constants;
+mod db;
 mod download;
 mod quic;
 mod routes;
+mod scoring;
 mod signature;
 mod upload;
 pub mod validator;
@@ -73,6 +73,20 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                 let _ = guard.sync().await; // TODO: handle error properly
             }
         }
+    });
+
+    // Spawn background backup task
+    let validator_clone = validator.clone();
+    tokio::spawn(async move {
+        validator_clone
+            .write()
+            .await
+            .scoring_system
+            .write()
+            .await
+            .db
+            .start_periodic_backup(config.neuron_config.neuron.sync_frequency)
+            .await; // TODO: constant
     });
 
     let state = ValidatorState { validator };

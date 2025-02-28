@@ -51,6 +51,7 @@ pub struct ValidatorQuery {
 #[allow(unused)]
 #[derive(Debug, Deserialize)]
 pub struct Validator {
+    pub scores_state_file: String,
     pub neuron: ValidatorNeuron,
     pub query: ValidatorQuery,
 }
@@ -59,6 +60,7 @@ pub struct Validator {
 #[derive(Debug, Deserialize)]
 pub struct Settings {
     pub version: String,
+    pub log_level: String, // TODO: Add function to convert str -> enum
 
     pub netuid: u16,
     pub external_ip: String,
@@ -75,8 +77,7 @@ pub struct Settings {
     pub load_old_nodes: bool,
     pub min_stake_threshold: u64,
 
-    pub log_level: String, // TODO: Add function to convert str -> enum
-    pub db_dir: String,
+    pub db_file: String,
     pub dht_dir: String,
     pub pem_file: String,
 

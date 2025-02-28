@@ -1,4 +1,3 @@
-
 .DS_Store
 .direnv
 .vscode
@@ -9,15 +8,18 @@ target/
 *_capnp.rs
 
 # Storb
+*.db
+*.storb-local
+*.storb-state
 logs/
 object_store/
 settings.toml
 !settings.toml.example
-storb-ignore
-*.storb-local
+storb_data/
 
 # Testing
 test_dir_*
 
 # Certificates
 *.der
+*.pem

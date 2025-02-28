@@ -22,6 +22,7 @@ pub fn cli() -> Command {
 pub fn exec(args: &ArgMatches, settings: &Settings) {
     let store_dir =
         get_config_value!(args, "store_dir", String, settings.miner.store_dir).to_string();
+
     // Get validator config with CLI overrides
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
     let miner_config = MinerConfig {

@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use axum::body::Bytes;
@@ -11,11 +12,13 @@ use futures::{Stream, TryStreamExt};
 use libp2p::Multiaddr;
 use quinn::Connection;
 use subxt::ext::codec::Compact;
-use tokio::sync::mpsc;
+use subxt::ext::sp_core::hexdisplay::AsBytesRef;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::quic::establish_miner_connections;
+use crate::scoring::ScoringSystem;
 use crate::ValidatorState;
 
 const LOGGING_INTERVAL_MB: u64 = 100;
@@ -23,6 +26,7 @@ const BYTES_PER_MB: u64 = 1024 * 1024;
 
 /// Processes upload streams and distributes file pieces to available miners.
 pub(crate) struct UploadProcessor<'a> {
+    pub miner_uids: Vec<u16>,
     pub miner_connections: Vec<(SocketAddr, Connection)>,
     pub validator_id: Compact<u16>,
     pub state: &'a ValidatorState,
@@ -31,7 +35,7 @@ pub(crate) struct UploadProcessor<'a> {
 impl<'a> UploadProcessor<'a> {
     /// Create a new instance of the UploadProcessor.
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
-        let (validator_id, quic_addresses) = {
+        let (validator_id, quic_addresses, miner_uids) = {
             let address_book_arc = state.validator.read().await.neuron.address_book.clone();
             let validator_id = Compact(
                 state
@@ -44,13 +48,35 @@ impl<'a> UploadProcessor<'a> {
                     .expect("Could not read node UID"),
             );
             let address_book = address_book_arc.read().await;
-            let quic_addresses: Vec<Multiaddr> = address_book
+
+            // Filter addresses and get associated UIDs
+            let mut quic_addresses_with_uids = Vec::new();
+            for (peer_id, node_info) in address_book.iter() {
+                if let Some(quic_addr) = node_info.quic_address.clone() {
+                    let peer_id_to_uid = state.validator.read().await.neuron.peer_node_uid.clone();
+                    if let Some(uid) = peer_id_to_uid.get_by_left(peer_id) {
+                        quic_addresses_with_uids.push((quic_addr, *uid));
+                    }
+                }
+            }
+            let quic_addresses: Vec<Multiaddr> = quic_addresses_with_uids
                 .iter()
-                .filter_map(|(_, node_info)| node_info.quic_address.clone())
+                .map(|(addr, _)| addr.clone())
+                .collect();
+            let miner_uids: Vec<u16> = quic_addresses_with_uids
+                .iter()
+                .map(|(_, uid)| *uid)
                 .collect();
 
-            (validator_id, quic_addresses)
+            (validator_id, quic_addresses, miner_uids)
         };
+
+        info!(
+            "Attempting to establish connections with {} miners",
+            quic_addresses.len()
+        );
+        info!("Miner UIDs: {:?}", miner_uids);
+        info!("Quic addresses: {:?}", quic_addresses);
 
         // Establish QUIC connections with miners
         let miner_connections = match establish_miner_connections(quic_addresses).await {
@@ -76,6 +102,7 @@ impl<'a> UploadProcessor<'a> {
             miner_connections.len()
         );
         Ok(Self {
+            miner_uids,
             miner_connections,
             validator_id,
             state,
@@ -115,7 +142,8 @@ impl<'a> UploadProcessor<'a> {
         };
 
         // Spawn consumer task
-        let miner_conns = self.miner_connections.clone();
+        let miner_uids = self.miner_uids.clone();
+        let miner_connections = self.miner_connections.clone();
         // TODO: all these clones are not the most ideal, perhaps fix?
         let dht_sender = self
             .state
@@ -127,12 +155,18 @@ impl<'a> UploadProcessor<'a> {
             .clone();
         let dht_sender_clone = dht_sender.clone();
 
+        // get memorydb from state
+        let scoring_system = self.state.validator.read().await.scoring_system.clone();
+
         let signer = self.state.validator.read().await.neuron.signer.clone();
+        // let db_conn = self.state.db_conn.clone();
         let signer_clone = signer.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(
+                scoring_system,
                 rx,
-                miner_conns,
+                miner_uids,
+                miner_connections,
                 validator_id,
                 dht_sender_clone,
                 signer_clone,
@@ -150,7 +184,7 @@ impl<'a> UploadProcessor<'a> {
         let (piece_hashes, chunk_hashes) = consumer_result??;
 
         // log the chunk hashes as strings
-        info!("Lubed up Chunk hashes: {:?}", chunk_hashes);
+        info!("Raw Chunk hashes: {:?}", chunk_hashes);
         let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
         info!("Chunk hashes: {:?}", chunk_hashes_str);
 
@@ -258,7 +292,9 @@ where
 }
 
 async fn consume_bytes(
+    scoring_system: Arc<RwLock<ScoringSystem>>,
     mut rx: mpsc::Receiver<Vec<u8>>,
+    miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
     validator_id: Compact<u16>,
     dht_sender: mpsc::Sender<DhtCommand>,
@@ -273,15 +309,27 @@ async fn consume_bytes(
         let encoded = encode_chunk(&chunk, chunk_idx);
         let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
         let mut chunk_hash_raw = blake3::Hasher::new();
+
         // Distribute pieces to miners
         for piece in encoded.pieces {
             let piece_idx = piece.piece_idx;
-            // Round-robin distribution to miners
-            let (addr, conn) = &miner_connections[(piece_idx as usize) % miner_connections.len()];
 
-            // get blake3 hash of piece
+            // Round-robin distribution to miners
+            let idx = (piece_idx as usize) % miner_connections.len();
+            let (addr, conn) = &miner_connections[idx];
+            let miner_uid = miner_uids[idx];
+
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
+
+            let db = scoring_system.write().await.db.clone();
+
+            // Refer to migrations/20250222003351_stats.up.sql for the schema of the db
+            // increase store attempts, etc for the miner uid in the db:
+            db.conn.lock().await.execute(
+                "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
+                [miner_uid],
+            )?;
 
             info!("Sending piece {piece_idx} to miner {addr}");
 
@@ -295,16 +343,38 @@ async fn consume_bytes(
             send_stream.finish()?;
 
             // Read hash response
-            let mut _hash = Vec::new();
+            let mut hash = Vec::new();
             let mut buf = [0u8; 1];
+            let mut count = 0;
             while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
-                if n == 0 || buf[0] == b'\n' {
+                if n == 0 || count > 31 {
                     break;
                 }
-                _hash.push(buf[0]);
+                hash.push(buf[0]);
+                count += 1;
             }
 
-            // TODO: verification + scoring
+            // Verification: Check if the hash received from the miner is the same
+            // as the hash of the piece and update the stats of the miner in the database accordingly
+
+            info!("Received hash: {:?}", hash.as_bytes_ref());
+            info!("Expected hash: {:?}", piece_hash);
+
+            if hash.as_bytes_ref() != piece_hash {
+                error!("Hash mismatch for piece {piece_idx} from miner {addr}");
+            } else {
+                info!("Received hash for piece {piece_idx} from miner {addr}");
+                // Increase store successes
+                db.conn.lock().await.execute(
+                    "UPDATE miner_stats SET store_successes = store_successes + 1 WHERE miner_uid = ?",
+                    [miner_uid],
+                )?;
+                // Increase total successes
+                db.conn.lock().await.execute(
+                    "UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = ?",
+                    [miner_uid],
+                )?;
+            }
 
             // TODO: maybe do this in a background thread instead of doing it here?
             // Add piece metadata to DHT
