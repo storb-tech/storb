@@ -2,10 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use rusqlite::{Connection, DatabaseName, OpenFlags};
+use rusqlite::{Connection, DatabaseName};
 use tokio::{sync::Mutex, time::interval};
 use tracing::info;
-use utoipa::openapi::info;
 
 pub struct MemoryDb {
     pub conn: Arc<Mutex<Connection>>,
@@ -112,7 +111,7 @@ mod tests {
 
         // Modify data in memory
         {
-            let mut conn = memory_db.conn.lock().await;
+            let conn = memory_db.conn.lock().await;
             conn.execute("UPDATE test SET value = ?1 WHERE id = 1", ["updated_value"])?;
         }
 

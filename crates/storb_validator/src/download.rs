@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, info, trace};
 
-use crate::scoring::{self, ScoringSystem};
-use crate::{db, ValidatorState};
+use crate::scoring::ScoringSystem;
+use crate::ValidatorState;
 
 const MPSC_BUFFER_SIZE: usize = 10;
 // TODO: Put this in config or just base it on hardware threads
@@ -85,7 +85,7 @@ impl DownloadProcessor {
             // The provider variable is moved into the block for logging purposes.
             let fut = async move {
                 let miner_uid = node_info.neuron_info.uid;
-                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", &[&miner_uid])?;
+                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 let req_client = reqwest::Client::builder()
                     .timeout(CLIENT_TIMEOUT)
                     .build()
@@ -128,8 +128,8 @@ impl DownloadProcessor {
                 }
 
                 // Update the scoring system with the successful retrieval.
-                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", &[&miner_uid])?;
-                db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", &[&miner_uid])?;
+                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
+                db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
 
                 Ok(piece_data)
             };
@@ -161,7 +161,7 @@ impl DownloadProcessor {
     }
 
     /// Producer for chunks. It consumes the pieces produced to achieve this.
-    /// The chunks are sent via the MSPC channel back to the HTTP stream processor.
+    /// The chunks are sent via the MPSC channel back to the HTTP stream processor.
     async fn produce_chunk(
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,

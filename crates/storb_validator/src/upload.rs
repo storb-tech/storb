@@ -15,7 +15,6 @@ use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
-use utoipa::openapi::info;
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::quic::establish_miner_connections;
@@ -310,19 +309,19 @@ async fn consume_bytes(
         let encoded = encode_chunk(&chunk, chunk_idx);
         let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
         let mut chunk_hash_raw = blake3::Hasher::new();
+
         // Distribute pieces to miners
         for piece in encoded.pieces {
             let piece_idx = piece.piece_idx;
+
             // Round-robin distribution to miners
             let idx = (piece_idx as usize) % miner_connections.len();
             let (addr, conn) = &miner_connections[idx];
             let miner_uid = miner_uids[idx];
 
-            // get blake3 hash of piece
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
 
-            // TODO: verification + scoring
             let db = scoring_system.write().await.db.clone();
 
             // Refer to migrations/20250222003351_stats.up.sql for the schema of the db
@@ -355,13 +354,12 @@ async fn consume_bytes(
                 count += 1;
             }
 
-            // Verification
-            // check if the hash received from the miner is the same as the hash of the piece
-            // and update the stats of the miner in the database accordingly
+            // Verification: Check if the hash received from the miner is the same
+            // as the hash of the piece and update the stats of the miner in the database accordingly
 
-            // log the hashes
             info!("Received hash: {:?}", hash.as_bytes_ref());
             info!("Expected hash: {:?}", piece_hash);
+
             if hash.as_bytes_ref() != piece_hash {
                 error!("Hash mismatch for piece {piece_idx} from miner {addr}");
             } else {

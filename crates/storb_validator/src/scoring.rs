@@ -5,8 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ndarray::{array, s, Array, Array1};
 use serde::{Deserialize, Serialize};
-use storb_miner::store;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::db::MemoryDb;
 
@@ -22,10 +21,6 @@ use crate::db::MemoryDb;
 pub struct ScoreState {
     /// The current exponential moving average (EMA) score of the miners.
     pub ema_scores: Array1<f64>,
-    /// The average time (in ms) it takes to retrieve files.
-    pub retrieve_latencies: Array1<f64>,
-    /// The average time (in ms) it takes to store files.
-    pub store_latencies: Array1<f64>,
     /// The EMA score of retrieve latencies.
     pub retrieve_latency_scores: Array1<f64>,
     /// The EMA score of store latencies.
@@ -48,6 +43,18 @@ pub struct ScoringSystem {
 //     arr.mapv(|x| x.abs().powf(p)).sum().powf(1.0 / p)
 // }
 
+// #[inline]
+// pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
+//     let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
+//     let max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+//     if (max - min).abs() < 1e-9 {
+//         return arr.mapv(|_| 0.0); // Avoid division by zero
+//     }
+
+//     arr.mapv(|x| (x - min) / (max - min))
+// }
+
 impl ScoringSystem {
     pub async fn new(db_file: &PathBuf, scoring_state_file: &Path) -> Result<Self> {
         let db_path = PathBuf::new().join(db_file);
@@ -62,12 +69,12 @@ impl ScoringSystem {
             .to_str()
             .context("Could not convert path to string")?;
 
-        if !fs::exists(&scoring_state_file)? {
+        if !fs::exists(scoring_state_file)? {
             warn!(
                 "Score state file did not exist at location {:?}. Created a new file as a result",
                 &scoring_state_file
             );
-            File::create(&scoring_state_file)?;
+            File::create(scoring_state_file)?;
         }
 
         // create new MemoryDb
@@ -75,18 +82,25 @@ impl ScoringSystem {
 
         let state = ScoreState {
             ema_scores: array![],
-            retrieve_latencies: array![],
-            store_latencies: array![],
             retrieve_latency_scores: array![],
             store_latency_scores: array![],
             final_latency_scores: array![],
         };
 
-        Ok(Self {
+        let mut scoring_system = Self {
             db,
             state,
             state_file: scoring_state_file.to_path_buf(),
-        })
+        };
+
+        match scoring_system.load_state() {
+            Ok(_) => debug!("Loaded state successfully"),
+            Err(e) => {
+                error!("Could not load the state: {}", e);
+            }
+        }
+
+        Ok(scoring_system)
     }
 
     /// Load scores state from teh state file.
@@ -102,32 +116,6 @@ impl ScoringSystem {
         let buf = bincode::serialize(&self.state)?;
         fs::write(&self.state_file, buf)?;
         Ok(())
-    }
-
-    /// Load miner stats from the database.
-    fn load_stats() {}
-
-    /// Save miner stats into the database.
-    fn save_stats() {}
-
-    /// Submit latency data for the scoring system to use. The latency data
-    /// will be incorporated accordingly.
-    pub fn submit_latency_data(
-        &mut self,
-        retrieve_latencies: Option<Vec<f64>>,
-        store_latencies: Option<Vec<f64>>,
-    ) {
-        //
-    }
-
-    /// Submit response rate data for the scoring system to use. The latency data
-    /// will be incorporated accordingly.
-    pub fn submit_response_rate_data(
-        &mut self,
-        retrieve_response_rates: Option<Vec<f64>>,
-        store_response_rates: Option<Vec<f64>>,
-    ) {
-        //
     }
 
     /// Update scores for each of the miners.
@@ -150,8 +138,6 @@ impl ScoringSystem {
             // TODO: if the array size remains the same then don't extend?
 
             let mut new_ema_scores = extend_array(&state.ema_scores, neuron_count);
-            let mut new_retrieve_latencies = extend_array(&state.retrieve_latencies, neuron_count);
-            let mut new_store_latencies = extend_array(&state.store_latencies, neuron_count);
             let mut new_retrieve_latency_scores =
                 extend_array(&state.retrieve_latency_scores, neuron_count);
             let mut new_store_latency_scores =
@@ -164,16 +150,12 @@ impl ScoringSystem {
                 let uid = uid as usize;
 
                 new_ema_scores[uid] = 0.0;
-                new_retrieve_latencies[uid] = 0.0;
-                new_store_latencies[uid] = 0.0;
                 new_retrieve_latency_scores[uid] = 0.0;
                 new_store_latency_scores[uid] = 0.0;
                 new_final_latency_scores[uid] = 0.0;
             }
 
             state.ema_scores = new_ema_scores;
-            state.retrieve_latencies = new_retrieve_latencies;
-            state.store_latencies = new_store_latencies;
             state.retrieve_latency_scores = new_retrieve_latency_scores;
             state.store_latency_scores = new_store_latency_scores;
             state.final_latency_scores = new_final_latency_scores;
@@ -217,7 +199,7 @@ impl ScoringSystem {
                     |row| row.get(0),
                 )
                 .unwrap();
-            let retrieval_rate = retrieval_successes as f64 / retrieval_attempts as f64;
+            let retrieval_rate = retrieval_successes / retrieval_attempts;
 
             response_rate_scores[miner_uid] = 0.5 * store_rate + 0.5 * retrieval_rate;
         }
@@ -236,8 +218,6 @@ impl ScoringSystem {
 
         info!("response rate scores: {}", response_rate_scores);
         info!("new scores: {}", state.ema_scores);
-        info!("new retrieve latencies: {}", state.retrieve_latencies);
-        info!("new store_latencies: {}", state.store_latencies);
         info!(
             "new retrieve_latency_scores: {}",
             state.retrieve_latency_scores
@@ -245,13 +225,13 @@ impl ScoringSystem {
         info!("new store_latency_scores: {}", state.store_latency_scores);
         info!("new final_latency_scores: {}", state.final_latency_scores);
 
-        // score miners
-        // Resp Rate
-        // Latency
-        // Request Challenge (part 2)
-        // PDP Challenge (part 2)
-
-        // etc.
+        match self.save_state() {
+            Ok(_) => info!("Saved state successfully"),
+            Err(e) => {
+                error!("Could not save the state: {}", e);
+                // TODO: submit to telemetry
+            }
+        }
     }
 
     /// Set weights for each miner to publish to the chain.
