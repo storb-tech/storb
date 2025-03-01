@@ -11,9 +11,10 @@ use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
 use libp2p::Multiaddr;
 use quinn::Connection;
+use rusqlite::Connection as SqliteConnection;
 use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
@@ -30,6 +31,35 @@ pub(crate) struct UploadProcessor<'a> {
     pub miner_connections: Vec<(SocketAddr, Connection)>,
     pub validator_id: Compact<u16>,
     pub state: &'a ValidatorState,
+}
+
+// Inserts chunk DHT value into the SQLite DB
+async fn insert_chunk_dht_value(
+    chunk_dht_value: models::ChunkDHTValue,
+    db_conn: Arc<Mutex<SqliteConnection>>,
+) -> Result<()> {
+    let conn = db_conn.lock().await;
+    // serialize the chunk_dht_value,  and insert into db
+    let chunk_hash = bincode::serialize(&chunk_dht_value.chunk_hash)?; // TODO: error handle
+    let vali_id = chunk_dht_value.validator_id.0 as i64;
+    let serialized_piece_hashes = bincode::serialize(&chunk_dht_value.piece_hashes)?;
+    let mut stmt = conn.prepare(
+        "INSERT INTO chunks (chunk_hash, validator_id, piece_hashes, chunk_idx, k, m, chunk_size, padlen, original_chunk_size, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )?;
+    stmt.execute((
+        chunk_hash,
+        vali_id,
+        serialized_piece_hashes,
+        chunk_dht_value.chunk_idx as i64,
+        chunk_dht_value.k as i64,
+        chunk_dht_value.m as i64,
+        chunk_dht_value.chunk_size as i64,
+        chunk_dht_value.padlen as i64,
+        chunk_dht_value.original_chunk_size as i64,
+        chunk_dht_value.signature.as_bytes_ref(),
+    ))?;
+    // .expect("Failed to insert chunk DHT value into db");
+    Ok(())
 }
 
 impl<'a> UploadProcessor<'a> {
@@ -458,6 +488,13 @@ async fn consume_bytes(
             original_chunk_size: encoded.original_chunk_size,
             signature: chunk_sig,
         };
+
+        // insert chunk value into sqlite db
+        insert_chunk_dht_value(
+            chunk_dht_value.clone(),
+            scoring_system.write().await.db.clone().conn.clone(),
+        )
+        .await?;
 
         swarm::dht::StorbDHT::put_chunk_entry(
             dht_sender.clone(),

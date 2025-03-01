@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS chunks;
+DROP TABLE IF EXISTS miner_stats;
