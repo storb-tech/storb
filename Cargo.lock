@@ -12769,6 +12769,7 @@ dependencies = [
  "storb_miner",
  "subxt",
  "tempfile",
+ "thiserror 2.0.11",
  "tokio",
  "tokio-serde",
  "tokio-stream",
