@@ -8,9 +8,9 @@ use ndarray::{array, s, Array, Array1};
 use rand::Rng;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-use thiserror::Error;
 
 use crate::db::MemoryDb;
 
@@ -71,6 +71,7 @@ pub struct ScoringSystem {
 //     arr.mapv(|x| (x - min) / (max - min))
 // }
 
+#[allow(dead_code)]
 async fn select_random_chunk_from_db(
     db_conn: Arc<Mutex<Connection>>,
 ) -> Result<RecordKey, ChunkError> {
@@ -86,8 +87,8 @@ async fn select_random_chunk_from_db(
         return Err(ChunkError::EmptyTable);
     }
 
-    let mut rng = rand::thread_rng();
-    let target_row: u64 = rng.gen_range(1..=row_count);
+    let mut rng = rand::rng();
+    let target_row: u64 = rng.random_range(1..=row_count);
 
     let chosen_chunk_vec: Vec<u8> = db_conn
         .lock()

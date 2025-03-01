@@ -39,7 +39,6 @@ async fn insert_chunk_dht_value(
     db_conn: Arc<Mutex<SqliteConnection>>,
 ) -> Result<()> {
     let conn = db_conn.lock().await;
-    // serialize the chunk_dht_value,  and insert into db
     let chunk_hash = bincode::serialize(&chunk_dht_value.chunk_hash)?; // TODO: error handle
     let vali_id = chunk_dht_value.validator_id.0 as i64;
     let serialized_piece_hashes = bincode::serialize(&chunk_dht_value.piece_hashes)?;
@@ -58,7 +57,6 @@ async fn insert_chunk_dht_value(
         chunk_dht_value.original_chunk_size as i64,
         chunk_dht_value.signature.as_bytes_ref(),
     ))?;
-    // .expect("Failed to insert chunk DHT value into db");
     Ok(())
 }
 
