@@ -32,7 +32,6 @@ impl MemoryDb {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs));
             loop {
-                interval.tick().await;
                 info!("Backing up database");
                 // Preview memory database
                 {
@@ -40,6 +39,7 @@ impl MemoryDb {
                     conn.backup(DatabaseName::Main, &db_path, None).unwrap();
                 }
                 info!("Database backup complete");
+                interval.tick().await;
             }
         });
     }

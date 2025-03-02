@@ -80,16 +80,16 @@ mod tests {
 
     fn generate_rand_string(len: usize) -> String {
         let charset = b"0123456789abcdef";
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         let random_string: String = (0..len)
-            .map(|_| charset[rng.random_range(0..charset.len())] as char)
+            .map(|_| charset[rng.gen_range(0..charset.len())] as char)
             .collect();
         random_string
     }
 
     fn generate_rand_bytes(len: usize) -> Vec<u8> {
-        let mut rng = rand::rng();
-        let random_bytes: Vec<u8> = (0..len).map(|_| rng.random()).collect();
+        let mut rng = rand::thread_rng();
+        let random_bytes: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
         random_bytes
     }
 

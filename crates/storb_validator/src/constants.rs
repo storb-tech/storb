@@ -1,1 +1,2 @@
 pub const MIN_REQUIRED_MINERS: usize = 1;
+pub const SYNTHETIC_CHALLENGE_FREQUENCY: u64 = 60;

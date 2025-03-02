@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
+use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use tokio::{sync::RwLock, time};
-use tracing::info;
+use tracing::{debug, error, info};
 
 use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
@@ -20,6 +21,7 @@ mod routes;
 mod scoring;
 mod signature;
 mod upload;
+mod utils;
 pub mod validator;
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
@@ -70,8 +72,28 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             interval.tick().await;
             if let Some(validator) = sync_validator.upgrade() {
                 let mut guard = validator.write().await;
-                let _ = guard.sync().await; // TODO: handle error properly
+                match guard.sync().await {
+                    Ok(_) => debug!("Sync ran successfully"),
+                    Err(err) => error!("Failed to run sync: {err}"),
+                }
             }
+        }
+    });
+
+    // Spawn background synthetic challenge tasks
+    let validator_clone = validator.clone();
+    tokio::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(SYNTHETIC_CHALLENGE_FREQUENCY));
+        loop {
+            // Interval tick MUST be called before the validator write, or else it will block
+            // for in the initial loop-through
+            interval.tick().await;
+            let guard = validator_clone.write().await;
+            info!("Running synthetic challenges");
+            match guard.run_synthetic_challenges().await {
+                Ok(_) => debug!("Synthetic challenges ran successfully"),
+                Err(err) => error!("Synthetic challenges failed to run: {err}"),
+            };
         }
     });
 

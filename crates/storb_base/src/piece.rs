@@ -382,7 +382,7 @@ mod tests {
         setup_logging();
         const TEST_FILE_SIZE: u64 = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
-        rand::rng().fill_bytes(&mut test_data);
+        rand::thread_rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let num_chunks = ((TEST_FILE_SIZE as f64) / (chunk_size as f64)).ceil() as usize;
@@ -426,7 +426,7 @@ mod tests {
         setup_logging();
         const TEST_FILE_SIZE: u64 = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
-        rand::rng().fill_bytes(&mut test_data);
+        rand::thread_rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let mut chunks: Vec<EncodedChunk> = Vec::new();
@@ -450,7 +450,7 @@ mod tests {
         setup_logging();
         const TEST_FILE_SIZE: u64 = 1024 * 1024;
         let mut test_data = vec![0u8; TEST_FILE_SIZE.try_into().unwrap()];
-        rand::rng().fill_bytes(&mut test_data);
+        rand::thread_rng().fill_bytes(&mut test_data);
 
         let chunk_size = piece_length(TEST_FILE_SIZE, None, None);
         let mut chunks: Vec<EncodedChunk> = Vec::new();
