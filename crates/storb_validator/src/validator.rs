@@ -23,10 +23,9 @@ use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 use rand::seq::IteratorRandom;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-const MAX_CHALLENGE_PIECE_NUM: i32 = 5;
-const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this
-const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synthetic data in bytes
-const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
+use crate::constants::{
+    MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
+};
 
 #[derive(Clone)]
 pub struct ValidatorConfig {
@@ -174,13 +173,15 @@ impl Validator {
                 swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_key.clone()).await?;
 
             if piece_providers.is_empty() {
-                error!("No providers found for piece {:?}", piece_key); // TODO: what else should we do here?
+                return Err(anyhow!("No providers found for piece {:?}", piece_key).into());
             }
 
             let mut miner_uids: Vec<u16> = Vec::new();
             for peer_id in piece_providers.clone() {
                 let address_book = self.neuron.address_book.read().await;
-                let miner_info = address_book.get(&peer_id).unwrap(); // TODO: handle this
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
+                    anyhow!("Miner info not found in address book for peer {}", peer_id)
+                })?;
                 let miner_uid = miner_info.neuron_info.uid;
                 miner_uids.push(miner_uid);
             }
@@ -188,7 +189,9 @@ impl Validator {
             // go through bimap, get QUIC addresses of miners
             for peer_id in piece_providers {
                 let address_book = self.neuron.address_book.read().await;
-                let miner_info = address_book.get(&peer_id).unwrap(); // TODO: handle this
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
+                    anyhow!("Miner info not found in address book for peer {}", peer_id)
+                })?;
                 let miner_uid = miner_info.neuron_info.uid;
 
                 let db = self.scoring_system.write().await.db.clone();
@@ -251,6 +254,7 @@ impl Validator {
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
             }
 
+            // TODO: latency scoring?
             // for miner_uid in miner_uids {
             //     match new_ret_latency_map.get(&miner_uid) {
             //         Some(curr_latency) => {
