@@ -22,15 +22,24 @@ use crate::constants::STORB_KAD_PROTOCOL_NAME;
 ///
 /// This behaviour aggregates multiple protocols into a single behaviour that can be used
 /// by a libp2p swarm.
+///
+/// Clippy is disabled for this struct as it can't be boxed due to NetworkBehaviour not implemented for Box.
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "StorbEvent")]
 pub struct StorbBehaviour {
+    #[allow(clippy::all)]
     /// Kademlia protocol for distributed hash table operations.
     pub kademlia: kad::Behaviour<StorbStore>,
+
+    #[allow(clippy::all)]
     /// mDNS protocol for local peer discovery.
     pub mdns: mdns::tokio::Behaviour,
+
+    #[allow(clippy::all)]
     /// Identify protocol for peer metadata exchange.
     pub identify: identify::Behaviour,
+
+    #[allow(clippy::all)]
     /// Ping protocol for connectivity checks.
     pub ping: ping::Behaviour,
 }
