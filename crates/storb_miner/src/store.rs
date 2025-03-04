@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,7 +16,7 @@ pub struct ObjectStore {
 
 impl ObjectStore {
     /// Create a new object store
-    pub fn new(store_dir: &str) -> Result<Self, Error> {
+    pub fn new<P: AsRef<Path>>(store_dir: P) -> Result<Self, Error> {
         let mut path = PathBuf::new();
         path = path.join(store_dir);
 

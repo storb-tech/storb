@@ -1,3 +1,4 @@
+use anyhow::Result;
 use clap::Command;
 
 use constants::{ABOUT, BIN_NAME, NAME, VERSION};
@@ -8,7 +9,7 @@ mod config;
 mod constants;
 mod log;
 
-pub fn main() {
+pub fn main() -> Result<()> {
     // CLI values take precedence over settings.toml
     let settings = match config::Settings::new(None) {
         Ok(s) => s,
@@ -52,8 +53,10 @@ pub fn main() {
     info!("Initialised logger with log level {log_level}");
 
     match matches.subcommand() {
-        Some(("miner", cmd)) => cli::miner::exec(cmd, &settings),
-        Some(("validator", cmd)) => cli::validator::exec(cmd, &settings),
+        Some(("miner", cmd)) => cli::miner::exec(cmd, &settings)?,
+        Some(("validator", cmd)) => cli::validator::exec(cmd, &settings)?,
         _ => unreachable!(),
     }
+
+    Ok(())
 }

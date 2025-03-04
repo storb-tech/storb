@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use base::sync::Synchronizable;
 use base::{BaseNeuron, BaseNeuronConfig, NeuronError};
 use tracing::info;
@@ -5,7 +7,7 @@ use tracing::info;
 #[derive(Clone)]
 pub struct MinerConfig {
     pub neuron_config: BaseNeuronConfig,
-    pub store_dir: String,
+    pub store_dir: PathBuf,
 }
 
 /// The Storb miner.

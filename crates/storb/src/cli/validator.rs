@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-
+use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use base::BaseNeuronConfig;
+use expanduser::expanduser;
 use storb_validator;
 use storb_validator::validator::ValidatorConfig;
 
@@ -59,21 +59,21 @@ pub fn cli() -> Command {
         ])
 }
 
-pub fn exec(args: &ArgMatches, settings: &Settings) {
-    let scores_state_file = get_config_value!(
+pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
+    let scores_state_file = expanduser(get_config_value!(
         args,
         "scores_state_file",
         String,
         settings.validator.scores_state_file
-    )
-    .to_string();
+    ))?;
 
     // Get validator config with CLI overrides
-    let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
+    let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
     let validator_config = ValidatorConfig {
-        scores_state_file: PathBuf::new().join(scores_state_file),
+        scores_state_file,
         neuron_config,
     };
 
     storb_validator::run(validator_config);
+    Ok(())
 }
