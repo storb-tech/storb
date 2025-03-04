@@ -1,10 +1,14 @@
 //! Contains arguments that are used by multiple subcommands, e.g.
 //! `miner` and `validator`.
 
+use std::str::FromStr;
+
 use crate::{config::Settings, get_config_value};
+use anyhow::Result;
 use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
+use expanduser::expanduser;
 
 pub fn common_args() -> Vec<Arg> {
     vec![
@@ -149,7 +153,7 @@ pub fn common_args() -> Vec<Arg> {
     ]
 }
 
-pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronConfig {
+pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseNeuronConfig> {
     let api_port = *get_config_value!(args, "api_port", u16, settings.api_port);
     let quic_port = *get_config_value!(args, "quic_port", u16, settings.quic_port);
 
@@ -202,16 +206,15 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
         ),
     };
 
-    BaseNeuronConfig {
-        version: Version {
-            // TODO: should this be defined elsewhere?
-            major: 0,
-            minor: 2,
-            patch: 2,
-        },
+    Ok(BaseNeuronConfig {
+        version: Version::from_str(&settings.version)?,
         netuid: *get_config_value!(args, "netuid", u16, settings.netuid),
-        wallet_path: get_config_value!(args, "wallet_path", String, &settings.wallet_path)
-            .to_string(),
+        wallet_path: expanduser(get_config_value!(
+            args,
+            "wallet_path",
+            String,
+            &settings.wallet_path
+        ))?,
         wallet_name: get_config_value!(args, "wallet_name", String, &settings.wallet_name)
             .to_string(),
         hotkey_name: get_config_value!(args, "hotkey_name", String, &settings.hotkey_name)
@@ -228,11 +231,26 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> BaseNeuronCo
             u64,
             &settings.min_stake_threshold
         ),
-        db_file: get_config_value!(args, "db_file", String, &settings.db_file).into(),
-        dht_dir: get_config_value!(args, "dht_dir", String, &settings.dht_dir).into(),
-        pem_file: get_config_value!(args, "pem_file", String, &settings.pem_file).to_string(),
+        db_file: expanduser(get_config_value!(
+            args,
+            "db_file",
+            String,
+            &settings.db_file
+        ))?,
+        dht_dir: expanduser(get_config_value!(
+            args,
+            "dht_dir",
+            String,
+            &settings.dht_dir
+        ))?,
+        pem_file: expanduser(get_config_value!(
+            args,
+            "pem_file",
+            String,
+            &settings.pem_file
+        ))?,
         subtensor: subtensor_config,
         neuron: neuron_config,
         dht: dht_config,
-    }
+    })
 }

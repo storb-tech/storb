@@ -1,6 +1,8 @@
+use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use base::BaseNeuronConfig;
+use expanduser::expanduser;
 use storb_miner;
 use storb_miner::miner::MinerConfig;
 
@@ -19,16 +21,21 @@ pub fn cli() -> Command {
             .action(ArgAction::Set)])
 }
 
-pub fn exec(args: &ArgMatches, settings: &Settings) {
-    let store_dir =
-        get_config_value!(args, "store_dir", String, settings.miner.store_dir).to_string();
+pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
+    let store_dir = expanduser(get_config_value!(
+        args,
+        "store_dir",
+        String,
+        settings.miner.store_dir
+    ))?;
 
     // Get validator config with CLI overrides
-    let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings);
+    let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
     let miner_config = MinerConfig {
         neuron_config,
         store_dir,
     };
 
     storb_miner::run(miner_config);
+    Ok(())
 }

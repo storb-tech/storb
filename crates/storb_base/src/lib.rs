@@ -74,7 +74,7 @@ pub struct BaseNeuronConfig {
     pub quic_port: Option<u16>,
     pub post_ip: bool,
 
-    pub wallet_path: String,
+    pub wallet_path: PathBuf,
     pub wallet_name: String,
     pub hotkey_name: String,
 
@@ -85,7 +85,7 @@ pub struct BaseNeuronConfig {
 
     pub db_file: PathBuf,
     pub dht_dir: PathBuf,
-    pub pem_file: String,
+    pub pem_file: PathBuf,
 
     pub subtensor: SubtensorConfig,
 
@@ -151,7 +151,7 @@ impl BaseNeuron {
             Self::get_subtensor_connection(config.subtensor.insecure, &config.subtensor.address)
                 .await?;
 
-        let wallet_path: PathBuf = PathBuf::from(config.wallet_path.clone());
+        let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
             wallet_path,
@@ -316,7 +316,7 @@ mod tests {
             api_port: 8080,
             quic_port: Some(8081),
             post_ip: false,
-            wallet_path: wallet_path.to_str().unwrap().to_string(),
+            wallet_path,
             wallet_name,
             hotkey_name: "test_hotkey".to_string(),
             mock: false,
@@ -324,7 +324,7 @@ mod tests {
             min_stake_threshold: 0,
             db_file: "./test.db".into(),
             dht_dir: "./test_dht".into(),
-            pem_file: "cert.pem".to_string(),
+            pem_file: "cert.pem".into(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
                 address: "wss://test.finney.opentensor.ai:443".to_string(),
