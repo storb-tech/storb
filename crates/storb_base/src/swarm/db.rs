@@ -101,12 +101,11 @@ impl RocksDBStore {
                 if !existing.contains(&cf.to_string()) {
                     debug!("Column family '{}' missing, creating...", cf);
                     // Open the DB with default CF only.
-                    let mut db_temp = DB::open_default(&db_path)
-                        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+                    let mut db_temp = DB::open_default(&db_path).map_err(std::io::Error::other)?;
                     // Create the missing column family.
                     db_temp
                         .create_cf(cf, &Options::default())
-                        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+                        .map_err(std::io::Error::other)?;
                 }
             }
         }
@@ -120,7 +119,7 @@ impl RocksDBStore {
         // Open DB with all desired column families.
         let db = Arc::new(
             DB::open_cf_descriptors(&opts, &db_path, cf_descriptors)
-                .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?,
+                .map_err(std::io::Error::other)?,
         );
         debug!("Successfully opened DB with all column families.");
 
@@ -203,22 +202,17 @@ impl RocksDBStore {
         let key = key.to_vec();
         info!("get: cf={:?}, key={:?}", &cf, &key);
         tokio::task::spawn_blocking(move || {
-            let cf_handle = cf
-                .handle(&db)
-                .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
-            db.get_cf(cf_handle, &key)
-                .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))
+            let cf_handle = cf.handle(&db).map_err(std::io::Error::other)?;
+            db.get_cf(cf_handle, &key).map_err(std::io::Error::other)
         })
         .await
-        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
+        .map_err(std::io::Error::other)?
     }
 
     pub async fn iter(&self, cf: CfType) -> Result<Vec<(Box<[u8]>, Box<[u8]>)>, Error> {
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
-            let cf_handle = cf
-                .handle(&db)
-                .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?;
+            let cf_handle = cf.handle(&db).map_err(std::io::Error::other)?;
             let iter = db.iterator_cf(cf_handle, rocksdb::IteratorMode::Start);
             let mut results = Vec::new();
             for item in iter {
@@ -230,14 +224,14 @@ impl RocksDBStore {
                         ));
                     }
                     Err(e) => {
-                        return Err(Error::new(ErrorKind::Other, e.to_string()));
+                        return Err(Error::other(e.to_string()));
                     }
                 }
             }
             Ok(results)
         })
         .await
-        .map_err(|e| Error::new(ErrorKind::Other, e.to_string()))?
+        .map_err(std::io::Error::other)?
     }
 
     /// Background worker that processes queued database operations in batches.

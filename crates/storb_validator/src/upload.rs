@@ -9,7 +9,6 @@ use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
-use libp2p::Multiaddr;
 use quinn::Connection;
 use rusqlite::Connection as SqliteConnection;
 use subxt::ext::codec::Compact;
@@ -20,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::quic::establish_miner_connections;
 use crate::scoring::ScoringSystem;
+use crate::utils::get_id_quic_uids;
 use crate::ValidatorState;
 
 const LOGGING_INTERVAL_MB: u64 = 100;
@@ -39,11 +39,12 @@ async fn insert_chunk_dht_value(
     db_conn: Arc<Mutex<SqliteConnection>>,
 ) -> Result<()> {
     let conn = db_conn.lock().await;
-    let chunk_hash = bincode::serialize(&chunk_dht_value.chunk_hash)?; // TODO: error handle
+    let chunk_hash = chunk_dht_value.chunk_hash.as_ref(); // TODO: error handle
     let vali_id = chunk_dht_value.validator_id.0 as i64;
     let serialized_piece_hashes = bincode::serialize(&chunk_dht_value.piece_hashes)?;
+    // TODO: do we really want to replace?
     let mut stmt = conn.prepare(
-        "INSERT INTO chunks (chunk_hash, validator_id, piece_hashes, chunk_idx, k, m, chunk_size, padlen, original_chunk_size, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT OR REPLACE INTO chunks (chunk_hash, validator_id, piece_hashes, chunk_idx, k, m, chunk_size, padlen, original_chunk_size, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )?;
     stmt.execute((
         chunk_hash,
@@ -60,44 +61,36 @@ async fn insert_chunk_dht_value(
     Ok(())
 }
 
+pub async fn upload_piece_data(conn: &Connection, data: Vec<u8>) -> Result<Vec<u8>> {
+    // Send piece to miner via QUIC connection
+    let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
+
+    send_stream
+        .write_all(&(data.len() as u64).to_be_bytes())
+        .await?;
+    send_stream.write_all(&data).await?;
+    send_stream.finish()?;
+
+    // Read hash response
+    let mut hash = Vec::new();
+    let mut buf = [0u8; 1];
+    let mut count = 0;
+    while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
+        if n == 0 || count > 31 {
+            break;
+        }
+        hash.push(buf[0]);
+        count += 1;
+    }
+
+    Ok(hash)
+}
+
 impl<'a> UploadProcessor<'a> {
     /// Create a new instance of the UploadProcessor.
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
-        let (validator_id, quic_addresses, miner_uids) = {
-            let address_book_arc = state.validator.read().await.neuron.address_book.clone();
-            let validator_id = Compact(
-                state
-                    .validator
-                    .read()
-                    .await
-                    .neuron
-                    .local_node_info
-                    .uid
-                    .expect("Could not read node UID"),
-            );
-            let address_book = address_book_arc.read().await;
-
-            // Filter addresses and get associated UIDs
-            let mut quic_addresses_with_uids = Vec::new();
-            for (peer_id, node_info) in address_book.iter() {
-                if let Some(quic_addr) = node_info.quic_address.clone() {
-                    let peer_id_to_uid = state.validator.read().await.neuron.peer_node_uid.clone();
-                    if let Some(uid) = peer_id_to_uid.get_by_left(peer_id) {
-                        quic_addresses_with_uids.push((quic_addr, *uid));
-                    }
-                }
-            }
-            let quic_addresses: Vec<Multiaddr> = quic_addresses_with_uids
-                .iter()
-                .map(|(addr, _)| addr.clone())
-                .collect();
-            let miner_uids: Vec<u16> = quic_addresses_with_uids
-                .iter()
-                .map(|(_, uid)| *uid)
-                .collect();
-
-            (validator_id, quic_addresses, miner_uids)
-        };
+        let (validator_id, quic_addresses, miner_uids) =
+            get_id_quic_uids(state.validator.clone()).await;
 
         info!(
             "Attempting to establish connections with {} miners",
@@ -352,7 +345,6 @@ async fn consume_bytes(
 
             let db = scoring_system.write().await.db.clone();
 
-            // Refer to migrations/20250222003351_stats.up.sql for the schema of the db
             // increase store attempts, etc for the miner uid in the db:
             db.conn.lock().await.execute(
                 "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
@@ -361,27 +353,7 @@ async fn consume_bytes(
 
             info!("Sending piece {piece_idx} to miner {addr}");
 
-            // Send piece to miner via QUIC connection
-            let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
-
-            send_stream
-                .write_all(&(piece.data.len() as u64).to_be_bytes())
-                .await?;
-            send_stream.write_all(&piece.data).await?;
-            send_stream.finish()?;
-
-            // Read hash response
-            let mut hash = Vec::new();
-            let mut buf = [0u8; 1];
-            let mut count = 0;
-            while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
-                if n == 0 || count > 31 {
-                    break;
-                }
-                hash.push(buf[0]);
-                count += 1;
-            }
-
+            let hash = upload_piece_data(conn, piece.data).await?;
             // Verification: Check if the hash received from the miner is the same
             // as the hash of the piece and update the stats of the miner in the database accordingly
 

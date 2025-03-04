@@ -5,7 +5,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use libp2p::kad::RecordKey;
 use ndarray::{array, s, Array, Array1};
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -72,7 +73,7 @@ pub struct ScoringSystem {
 // }
 
 #[allow(dead_code)]
-async fn select_random_chunk_from_db(
+pub async fn select_random_chunk_from_db(
     db_conn: Arc<Mutex<Connection>>,
 ) -> Result<RecordKey, ChunkError> {
     // Get row count
@@ -82,23 +83,29 @@ async fn select_random_chunk_from_db(
         .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
         .map_err(ChunkError::Database)?;
 
+    debug!("Num. entries in sqlite db: {row_count}");
+
     // Check for empty table
     if row_count == 0 {
         return Err(ChunkError::EmptyTable);
     }
 
-    let mut rng = rand::rng();
-    let target_row: u64 = rng.random_range(1..=row_count);
+    let mut rng: StdRng = SeedableRng::from_entropy();
+    let target_row: u64 = rng.gen_range(1..=row_count);
+
+    debug!("Getting chunk at row {target_row} from sqlite db");
 
     let chosen_chunk_vec: Vec<u8> = db_conn
         .lock()
         .await
         .query_row(
-            "SELECT chunk FROM chunks WHERE rowid = ?",
+            "SELECT chunk_hash FROM chunks ORDER BY chunk_hash LIMIT 1 OFFSET ?",
             [target_row],
             |row| row.get(0),
         )
         .map_err(ChunkError::Database)?;
+
+    debug!("Chosen chunk: {:?}", chosen_chunk_vec);
 
     // Validate chunk size
     if chosen_chunk_vec.len() != 32 {
@@ -308,14 +315,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
 
         // Create test table and insert sample data
-        conn.execute("CREATE TABLE chunks (chunk BLOB NOT NULL)", [])
+        conn.execute("CREATE TABLE chunks (chunk_hash BLOB NOT NULL)", [])
             .unwrap();
 
         // Insert 3 sample chunks
         let test_chunks = vec![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]];
 
         for chunk in test_chunks {
-            conn.execute("INSERT INTO chunks (chunk) VALUES (?)", [chunk])
+            conn.execute("INSERT INTO chunks (chunk_hash) VALUES (?)", [chunk])
                 .unwrap();
         }
 
@@ -349,12 +356,12 @@ mod tests {
     #[tokio::test]
     async fn test_select_random_chunk_invalid_data() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE chunks (chunk BLOB NOT NULL)", [])
+        conn.execute("CREATE TABLE chunks (chunk_hash BLOB NOT NULL)", [])
             .unwrap();
 
-        // Insert invalid chunk (wrong size)
+        // Insert invalid chunk hash (wrong size)
         conn.execute(
-            "INSERT INTO chunks (chunk) VALUES (?)",
+            "INSERT INTO chunks (chunk_hash) VALUES (?)",
             [vec![1u8; 16]], // Only 16 bytes instead of 32
         )
         .unwrap();

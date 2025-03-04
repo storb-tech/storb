@@ -27,10 +27,13 @@ use crate::constants::STORB_KAD_PROTOCOL_NAME;
 pub struct StorbBehaviour {
     /// Kademlia protocol for distributed hash table operations.
     pub kademlia: kad::Behaviour<StorbStore>,
+
     /// mDNS protocol for local peer discovery.
     pub mdns: mdns::tokio::Behaviour,
+
     /// Identify protocol for peer metadata exchange.
     pub identify: identify::Behaviour,
+
     /// Ping protocol for connectivity checks.
     pub ping: ping::Behaviour,
 }
@@ -42,24 +45,24 @@ pub struct StorbBehaviour {
 #[derive(Debug)]
 pub enum StorbEvent {
     /// Event from the Kademlia protocol.
-    Kademlia(kad::Event),
+    Kademlia(Box<kad::Event>),
     /// Event from the mDNS protocol.
-    Mdns(mdns::Event),
+    Mdns(Box<mdns::Event>),
     /// Event from the Identify protocol.
     Identify(Box<identify::Event>),
     /// Event from the Ping protocol.
-    Ping(ping::Event),
+    Ping(Box<ping::Event>),
 }
 
 impl From<kad::Event> for StorbEvent {
     fn from(event: kad::Event) -> Self {
-        StorbEvent::Kademlia(event)
+        StorbEvent::Kademlia(Box::new(event))
     }
 }
 
 impl From<mdns::Event> for StorbEvent {
     fn from(event: mdns::Event) -> Self {
-        StorbEvent::Mdns(event)
+        StorbEvent::Mdns(Box::new(event))
     }
 }
 
@@ -71,7 +74,7 @@ impl From<identify::Event> for StorbEvent {
 
 impl From<ping::Event> for StorbEvent {
     fn from(event: ping::Event) -> Self {
-        StorbEvent::Ping(event)
+        StorbEvent::Ping(Box::new(event))
     }
 }
 
@@ -439,14 +442,14 @@ impl StorbDHT {
                         SwarmEvent::Behaviour(event) => {
                             match event {
                                 StorbEvent::Mdns(event) => {
-                                    self.inject_mdns_event(event);
+                                    self.inject_mdns_event(*event);
                                 }
                                 StorbEvent::Kademlia(event) => {
                                     let queries_clone = self.queries.clone();
                                     let mut queries = queries_clone.lock().await;
                                     trace!("Kademlia event received: {:?}", event);
-                                    self.inject_kad_event(event.clone(), &mut queries).await;
-                                    self.inject_kad_incoming_query(event);
+                                    self.inject_kad_event(*event.clone(), &mut queries).await;
+                                    self.inject_kad_incoming_query(*event);
                                 }
                                 StorbEvent::Identify(event) => {
                                     trace!("Identify event: {:?}", event);
