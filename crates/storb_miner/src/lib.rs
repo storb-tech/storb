@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::routing::get;
+use axum::routing::{get, post};
 use base::piece_hash::PieceHash;
 use base::swarm;
+use base::verification::HandshakePayload;
+use crabtensor::sign::verify_signature;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
-use quinn::{Endpoint, ServerConfig};
+use quinn::{Endpoint, ServerConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use store::ObjectStore;
 use tokio::sync::Mutex;
@@ -99,6 +101,7 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     let app = axum::Router::new()
         .route("/info", get(routes::node_info))
+        .route("/handshake", post(routes::handshake))
         .route("/piece", get(routes::get_piece))
         .with_state(state.clone());
 
@@ -141,14 +144,45 @@ async fn main(config: MinerConfig) -> Result<()> {
                         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                             info!("New bidirectional stream opened");
 
+                            // Read signature payload and verify
+                            let mut signature_buf = [0u8; size_of::<HandshakePayload>()];
+                            if let Err(e) = recv.read_exact(&mut signature_buf).await {
+                                error!("Failed to read signature: {e}");
+                                continue;
+                            }
+                            let signature_payload =
+                                match bincode::deserialize::<HandshakePayload>(&signature_buf) {
+                                    Ok(data) => data,
+                                    Err(err) => {
+                                        error!("Failed to deserialize payload from bytes: {err}");
+                                        continue;
+                                    }
+                                };
+                            let verified = verify_signature(
+                                &signature_payload.message.validator.account_id,
+                                &signature_payload.signature,
+                                &signature_payload.message,
+                            );
+                            if !verified {
+                                error!(
+                                    "Failed to verify signature from validator with uid {}",
+                                    signature_payload.message.validator.uid
+                                );
+                                conn.close(
+                                    VarInt::from_u32(401),
+                                    "Signature verification failed".as_bytes(),
+                                );
+                                return;
+                            }
+
                             // Read the piece size
                             let mut piece_size_buf = [0u8; 8];
                             if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
-                                error!("Failed to read piece size: {}", e);
+                                error!("Failed to read piece size: {e}");
                                 continue;
                             }
                             let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                            info!("Received piece size: {} bytes", piece_size);
+                            info!("Received piece size: {piece_size} bytes");
 
                             // Process the piece
                             let mut buffer = vec![0u8; piece_size];
@@ -163,7 +197,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                                     }
                                     Ok(_) => break, // End of stream
                                     Err(e) => {
-                                        error!("Error reading piece: {}", e);
+                                        error!("Error reading piece: {e}");
                                         break;
                                     }
                                 }

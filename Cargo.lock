@@ -12807,6 +12807,7 @@ dependencies = [
  "bincode",
  "blake3",
  "bytes",
+ "crabtensor",
  "futures",
  "hex",
  "libp2p",

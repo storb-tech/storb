@@ -23,6 +23,7 @@ pub mod piece_hash;
 pub mod swarm;
 pub mod sync;
 pub mod utils;
+pub mod verification;
 pub mod version;
 
 pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
