@@ -17,7 +17,7 @@ use reqwest::StatusCode;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace};
 
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{select_random_chunk_from_db, ScoringSystem};
@@ -324,80 +324,6 @@ impl Validator {
         Ok(())
     }
 
-    /// Perform handshake verification with miners
-    pub async fn perform_handshakes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (_, _, miner_uids) = get_id_quic_uids(Arc::new(RwLock::new(self.clone()))).await;
-
-        for miner_uid in miner_uids {
-            let peer_id = self
-                .neuron
-                .peer_node_uid
-                .get_by_right(&miner_uid)
-                .ok_or("No peer ID found for the miner UID")?;
-            let miner_info = self
-                .neuron
-                .address_book
-                .clone()
-                .read()
-                .await
-                .get(peer_id)
-                .ok_or("No NodeInfo found for the given miner")?
-                .clone();
-
-            let message = VerificationMessage {
-                netuid: self.config.neuron_config.netuid,
-                miner: KeyRegistrationInfo {
-                    uid: miner_uid,
-                    account_id: miner_info.neuron_info.hotkey.clone(),
-                },
-                validator: KeyRegistrationInfo {
-                    uid: self
-                        .neuron
-                        .local_node_info
-                        .uid
-                        .ok_or("Failed to get UID for validator")?,
-                    account_id: self.neuron.signer.account_id().clone(),
-                },
-            };
-            let signature = sign_message(&self.neuron.signer, &message);
-
-            let req_client = reqwest::Client::builder()
-                .timeout(CLIENT_TIMEOUT)
-                .build()
-                .map_err(|_| "Failed to build reqwest client")?;
-
-            let url = miner_info
-                .http_address
-                .as_ref()
-                .and_then(base::utils::multiaddr_to_socketaddr)
-                .map(|socket_addr| {
-                    format!(
-                        "http://{}:{}/handshake",
-                        socket_addr.ip(),
-                        socket_addr.port(),
-                    )
-                })
-                .ok_or("Invalid HTTP address in node_info")?;
-
-            let payload = HandshakePayload { signature, message };
-
-            let response = req_client
-                .post(&url)
-                .body(bincode::serialize(&payload)?)
-                .send()
-                .await
-                .map_err(|_| "Failed to send handshake request to miner")?;
-
-            if response.status() != StatusCode::OK {
-                warn!(
-                    "Miner responded with non-200 status code: {}",
-                    response.status()
-                );
-            }
-        }
-        Ok(())
-    }
-
     /// Sync the validator with the metagraph.
     pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Syncing validator");
@@ -410,8 +336,6 @@ impl Validator {
             .update_scores(neuron_count, uids_to_update)
             .await;
         self.scoring_system.write().await.set_weights();
-
-        // self.perform_handshakes().await?;
 
         info!("Done syncing validator");
 
