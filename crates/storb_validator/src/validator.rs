@@ -7,10 +7,13 @@ use base::constants::CLIENT_TIMEOUT;
 use base::piece::encode_chunk;
 use base::sync::Synchronizable;
 use base::utils::multiaddr_to_socketaddr;
+use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
+use crabtensor::sign::sign_message;
 use libp2p::kad::RecordKey;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use reqwest::StatusCode;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
@@ -95,6 +98,21 @@ impl Validator {
                 let quic_miner_uid = quic_miner_uids[idx];
                 let db = self.scoring_system.write().await.db.clone();
 
+                let peer_id = self
+                    .neuron
+                    .peer_node_uid
+                    .get_by_right(&quic_miner_uid)
+                    .ok_or("No peer ID found for the miner UID")?;
+                let miner_info = self
+                    .neuron
+                    .address_book
+                    .clone()
+                    .read()
+                    .await
+                    .get(peer_id)
+                    .ok_or("No NodeInfo found for the given miner")?
+                    .clone();
+
                 info!("Challenging miner {quic_miner_uid} with store request");
                 db.conn.lock().await.execute(
                     "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
@@ -115,7 +133,13 @@ impl Validator {
                     }
                 };
 
-                let hash_vec = upload_piece_data(&quic_conn, piece.data.clone()).await?; // TODO: error handle
+                let hash_vec = upload_piece_data(
+                    self.neuron.clone(),
+                    miner_info,
+                    &quic_conn,
+                    piece.data.clone(),
+                )
+                .await?;
                 let hash = hash_vec.as_bytes_ref();
 
                 info!("Received hash: {:?}", hash);
@@ -199,6 +223,25 @@ impl Validator {
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 debug!("Updated");
 
+                let message = VerificationMessage {
+                    netuid: self.config.neuron_config.netuid,
+                    miner: KeyRegistrationInfo {
+                        uid: miner_uid,
+                        account_id: miner_info.neuron_info.hotkey.clone(),
+                    },
+                    validator: KeyRegistrationInfo {
+                        uid: self
+                            .neuron
+                            .local_node_info
+                            .uid
+                            .ok_or("Failed to get UID for validator")?,
+                        account_id: self.neuron.signer.account_id().clone(),
+                    },
+                };
+                let signature = sign_message(&self.neuron.signer, &message);
+                let payload = HandshakePayload { signature, message };
+                let payload_bytes = bincode::serialize(&payload)?;
+
                 let req_client = reqwest::Client::builder()
                     .timeout(CLIENT_TIMEOUT)
                     .build()
@@ -210,10 +253,11 @@ impl Validator {
                     .and_then(base::utils::multiaddr_to_socketaddr)
                     .map(|socket_addr| {
                         format!(
-                            "http://{}:{}/piece?piecehash={}",
+                            "http://{}:{}/piece?piecehash={}&handshake={}",
                             socket_addr.ip(),
                             socket_addr.port(),
-                            hex::encode(piece_hash)
+                            hex::encode(piece_hash),
+                            hex::encode(payload_bytes)
                         )
                     })
                     .ok_or_else(|| anyhow!("Invalid HTTP address in node_info"))?;
@@ -229,13 +273,23 @@ impl Validator {
 
                 trace!("Node response from {:?}: {:?}", peer_id, node_response);
 
+                let response_status = node_response.status();
                 let body_bytes = node_response
                     .bytes()
                     .await
                     .context("Failed to read response body")?;
-
                 let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
                     .context("Failed to deserialise piece response")?;
+
+                // Check status of response
+                if response_status != StatusCode::OK {
+                    let err_msg = bincode::deserialize::<String>(&piece_data[..])?;
+                    error!(
+                        "Response returned with status code {}: {}",
+                        response_status, err_msg
+                    );
+                    continue;
+                }
 
                 // Verify the integrity of the piece_data using Blake3.
                 let computed_hash = blake3::hash(&piece_data);

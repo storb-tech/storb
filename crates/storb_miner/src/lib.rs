@@ -4,17 +4,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::routing::get;
+use axum::routing::{get, post};
 use base::piece_hash::PieceHash;
 use base::swarm;
+use base::verification::HandshakePayload;
+use crabtensor::sign::verify_signature;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
-use quinn::{Endpoint, ServerConfig};
+use quinn::{Endpoint, ServerConfig, VarInt};
 use rcgen::generate_simple_self_signed;
 use store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub mod miner;
 mod routes;
@@ -99,6 +101,7 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     let app = axum::Router::new()
         .route("/info", get(routes::node_info))
+        .route("/handshake", post(routes::handshake))
         .route("/piece", get(routes::get_piece))
         .with_state(state.clone());
 
@@ -132,6 +135,7 @@ async fn main(config: MinerConfig) -> Result<()> {
         while let Some(incoming) = endpoint.accept().await {
             let dht_sender_clone = dht_sender.clone();
             let object_store_clone = state.lock().await.object_store.lock().await.clone();
+            let state_clone = state.clone();
 
             tokio::spawn(async move {
                 match incoming.await {
@@ -141,14 +145,98 @@ async fn main(config: MinerConfig) -> Result<()> {
                         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                             info!("New bidirectional stream opened");
 
+                            // Read the payload size
+                            let mut payload_size_buf = [0u8; 8];
+                            if let Err(e) = recv.read_exact(&mut payload_size_buf).await {
+                                error!("Failed to read piece size: {e}");
+                                continue;
+                            }
+                            let payload_size = u64::from_be_bytes(payload_size_buf) as usize;
+
+                            // Read signature payload and verify
+                            // let mut signature_buf = [0u8; size_of::<HandshakePayload>()];
+                            let mut signature_buf = vec![0u8; payload_size];
+                            if let Err(e) = recv.read_exact(&mut signature_buf).await {
+                                error!("Failed to read signature: {e}");
+                                continue;
+                            }
+                            debug!("signature_buf: {:?}", signature_buf);
+                            debug!("payload size: {:?}", payload_size);
+                            let signature_payload =
+                                match bincode::deserialize::<HandshakePayload>(&signature_buf) {
+                                    Ok(data) => data,
+                                    Err(err) => {
+                                        error!(
+                                            "Failed to deserialize payload from bytes: {:?}",
+                                            err
+                                        );
+                                        continue;
+                                    }
+                                };
+                            let verified = verify_signature(
+                                &signature_payload.message.validator.account_id,
+                                &signature_payload.signature,
+                                &signature_payload.message,
+                            );
+
+                            let miner_base_neuron = state_clone
+                                .clone()
+                                .lock()
+                                .await
+                                .miner
+                                .clone()
+                                .lock()
+                                .await
+                                .neuron
+                                .clone();
+                            let validator_peer_id = if let Some(peer_id) = miner_base_neuron
+                                .peer_node_uid
+                                .get_by_right(&signature_payload.message.validator.uid)
+                            {
+                                peer_id
+                            } else {
+                                error!("Could not get validator peer ID");
+                                continue;
+                            };
+                            let validator_info = if let Some(vali_info) = miner_base_neuron
+                                .address_book
+                                .clone()
+                                .read()
+                                .await
+                                .get(validator_peer_id)
+                            {
+                                vali_info.clone()
+                            } else {
+                                error!("Error while getting validator info");
+                                continue;
+                            };
+                            let validator_hotkey = validator_info.neuron_info.hotkey.clone();
+
+                            if !verified
+                                || validator_hotkey
+                                    != signature_payload.message.validator.account_id
+                            {
+                                error!(
+                                    "Failed to verify signature from validator with uid {}",
+                                    signature_payload.message.validator.uid
+                                );
+                                conn.close(
+                                    VarInt::from_u32(401),
+                                    "Signature verification failed".as_bytes(),
+                                );
+                                return;
+                            }
+                            debug!("Signature verification successful:");
+                            debug!("{:?}", signature_payload);
+
                             // Read the piece size
                             let mut piece_size_buf = [0u8; 8];
                             if let Err(e) = recv.read_exact(&mut piece_size_buf).await {
-                                error!("Failed to read piece size: {}", e);
+                                error!("Failed to read piece size: {e}");
                                 continue;
                             }
                             let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                            info!("Received piece size: {} bytes", piece_size);
+                            info!("Received piece size: {piece_size} bytes");
 
                             // Process the piece
                             let mut buffer = vec![0u8; piece_size];
@@ -163,7 +251,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                                     }
                                     Ok(_) => break, // End of stream
                                     Err(e) => {
-                                        error!("Error reading piece: {}", e);
+                                        error!("Error reading piece: {e}");
                                         break;
                                     }
                                 }

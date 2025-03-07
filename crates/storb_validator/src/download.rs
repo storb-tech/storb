@@ -6,7 +6,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base::constants::CLIENT_TIMEOUT;
 use base::swarm::dht::DhtCommand;
-use base::{swarm, AddressBook};
+use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
+use base::{swarm, AddressBook, BaseNeuron};
+use crabtensor::sign::sign_message;
 use futures::stream::FuturesUnordered;
 use libp2p::kad::RecordKey;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -38,6 +40,7 @@ impl DownloadProcessor {
 
     /// Producer for pieces. Queries the miners to get piece data.
     async fn produce_piece(
+        validator_base_neuron: BaseNeuron,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         local_address_book: AddressBook,
@@ -80,6 +83,7 @@ impl DownloadProcessor {
 
             let scoring_system = scoring_system.clone();
             let db = scoring_system.write().await.db.clone();
+            let signer = Arc::new(validator_base_neuron.signer.clone());
 
             // Each provider query is executed in its own async block.
             // The provider variable is moved into the block for logging purposes.
@@ -91,16 +95,35 @@ impl DownloadProcessor {
                     .build()
                     .context("Failed to build reqwest client")?;
 
+                let message = VerificationMessage {
+                    netuid: node_info.neuron_info.netuid,
+                    miner: KeyRegistrationInfo {
+                        uid: miner_uid,
+                        account_id: node_info.neuron_info.hotkey.clone(),
+                    },
+                    validator: KeyRegistrationInfo {
+                        uid: validator_base_neuron
+                            .local_node_info
+                            .uid
+                            .context("Failed to get UID for validator")?,
+                        account_id: signer.clone().account_id().clone(),
+                    },
+                };
+                let signature = sign_message(&signer.clone(), &message);
+                let payload = HandshakePayload { signature, message };
+                let payload_bytes = bincode::serialize(&payload)?;
+
                 let url = node_info
                     .http_address
                     .as_ref()
                     .and_then(base::utils::multiaddr_to_socketaddr)
                     .map(|socket_addr| {
                         format!(
-                            "http://{}:{}/piece?piecehash={}",
+                            "http://{}:{}/piece?piecehash={}&handshake={}",
                             socket_addr.ip(),
                             socket_addr.port(),
-                            hex::encode(piece_hash)
+                            hex::encode(piece_hash),
+                            hex::encode(payload_bytes)
                         )
                     })
                     .ok_or_else(|| anyhow!("Invalid HTTP address in node_info"))?;
@@ -113,13 +136,23 @@ impl DownloadProcessor {
 
                 trace!("Node response from {:?}: {:?}", provider, node_response);
 
+                let response_status = node_response.status();
                 let body_bytes = node_response
                     .bytes()
                     .await
                     .context("Failed to read response body")?;
-
                 let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
                     .context("Failed to deserialise piece response")?;
+
+                // Check status of response
+                if response_status != StatusCode::OK {
+                    let err_msg = bincode::deserialize::<String>(&piece_data[..])?;
+                    bail!(
+                        "Response returned with status code {}: {}",
+                        response_status,
+                        err_msg
+                    );
+                }
 
                 // Verify the integrity of the piece_data using Blake3.
                 let computed_hash = blake3::hash(&piece_data);
@@ -163,6 +196,7 @@ impl DownloadProcessor {
     /// Producer for chunks. It consumes the pieces produced to achieve this.
     /// The chunks are sent via the MPSC channel back to the HTTP stream processor.
     async fn produce_chunk(
+        validator_base_neuron: BaseNeuron,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         address_book: AddressBook,
@@ -188,6 +222,7 @@ impl DownloadProcessor {
             let dht_sender_clone = dht_sender.clone();
             let address_book_clone = local_address_book.clone();
             let scoring_system_clone = scoring_system.clone();
+            let validator_base_clone = validator_base_neuron.clone();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
@@ -203,6 +238,7 @@ impl DownloadProcessor {
                         match task {
                             Some(task) => {
                                 match Self::produce_piece(
+                                    validator_base_clone.clone(),
                                     scoring_system_clone.clone(),
                                     dht_sender_clone.clone(),
                                     address_book_clone.clone(),
@@ -285,11 +321,12 @@ impl DownloadProcessor {
         let chunk_hashes = tracker.chunk_hashes;
 
         let state = self.state.validator.read().await.clone();
-        let address_book = state.neuron.address_book;
+        let address_book = state.neuron.address_book.clone();
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 
-        let scoring_system = self.state.validator.read().await.scoring_system.clone();
+        let scoring_system = state.scoring_system.clone();
+        let validator_base_neuron = state.neuron.clone();
 
         tokio::spawn(async move {
             for chunk_hash in chunk_hashes.clone() {
@@ -330,6 +367,7 @@ impl DownloadProcessor {
                 );
 
                 if let Err(e) = Self::produce_chunk(
+                    validator_base_neuron.clone(),
                     scoring_system.clone(),
                     dht_sender.clone(),
                     address_book.clone(),
