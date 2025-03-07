@@ -135,6 +135,7 @@ async fn main(config: MinerConfig) -> Result<()> {
         while let Some(incoming) = endpoint.accept().await {
             let dht_sender_clone = dht_sender.clone();
             let object_store_clone = state.lock().await.object_store.lock().await.clone();
+            let state_clone = state.clone();
 
             tokio::spawn(async move {
                 match incoming.await {
@@ -165,7 +166,10 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 match bincode::deserialize::<HandshakePayload>(&signature_buf) {
                                     Ok(data) => data,
                                     Err(err) => {
-                                        error!("Failed to deserialize payload from bytes: {:?}", err);
+                                        error!(
+                                            "Failed to deserialize payload from bytes: {:?}",
+                                            err
+                                        );
                                         continue;
                                     }
                                 };
@@ -174,7 +178,44 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 &signature_payload.signature,
                                 &signature_payload.message,
                             );
-                            if !verified {
+
+                            let miner_base_neuron = state_clone
+                                .clone()
+                                .lock()
+                                .await
+                                .miner
+                                .clone()
+                                .lock()
+                                .await
+                                .neuron
+                                .clone();
+                            let validator_peer_id = if let Some(peer_id) = miner_base_neuron
+                                .peer_node_uid
+                                .get_by_right(&signature_payload.message.validator.uid)
+                            {
+                                peer_id
+                            } else {
+                                error!("Could not get validator peer ID");
+                                continue;
+                            };
+                            let validator_info = if let Some(vali_info) = miner_base_neuron
+                                .address_book
+                                .clone()
+                                .read()
+                                .await
+                                .get(validator_peer_id)
+                            {
+                                vali_info.clone()
+                            } else {
+                                error!("Error while getting validator info");
+                                continue;
+                            };
+                            let validator_hotkey = validator_info.neuron_info.hotkey.clone();
+
+                            if !verified
+                                || validator_hotkey
+                                    != signature_payload.message.validator.account_id
+                            {
                                 error!(
                                     "Failed to verify signature from validator with uid {}",
                                     signature_payload.message.validator.uid

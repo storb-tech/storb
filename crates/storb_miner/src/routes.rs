@@ -51,7 +51,10 @@ pub async fn node_info(
     ),
     tag = "Handshake"
 )]
-pub async fn handshake(bytes: Bytes) -> Result<impl IntoResponse, StatusCode> {
+pub async fn handshake(
+    state: extract::State<Arc<Mutex<MinerState>>>,
+    bytes: Bytes,
+) -> Result<impl IntoResponse, StatusCode> {
     info!("Got handshake request");
 
     let payload = bincode::deserialize::<HandshakePayload>(&bytes).map_err(|err| {
@@ -63,7 +66,38 @@ pub async fn handshake(bytes: Bytes) -> Result<impl IntoResponse, StatusCode> {
         &payload.signature,
         &payload.message,
     );
-    if !verified {
+
+    let miner_base_neuron = state
+        .clone()
+        .lock()
+        .await
+        .miner
+        .clone()
+        .lock()
+        .await
+        .neuron
+        .clone();
+    let validator_peer_id = miner_base_neuron
+        .peer_node_uid
+        .get_by_right(&payload.message.validator.uid)
+        .ok_or_else(|| {
+            error!("Could not get validator peer ID");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let validator_info = miner_base_neuron
+        .address_book
+        .clone()
+        .read()
+        .await
+        .get(validator_peer_id)
+        .ok_or_else(|| {
+            error!("Error while getting validator info");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .clone();
+    let validator_hotkey = validator_info.neuron_info.hotkey.clone();
+
+    if !verified || validator_hotkey != payload.message.validator.account_id {
         return Ok(StatusCode::UNAUTHORIZED);
     }
 
@@ -118,7 +152,44 @@ pub async fn get_piece(
         &payload.signature,
         &payload.message,
     );
-    if !verified {
+
+    let miner_base_neuron = state
+        .clone()
+        .lock()
+        .await
+        .miner
+        .clone()
+        .lock()
+        .await
+        .neuron
+        .clone();
+    let validator_peer_id = miner_base_neuron
+        .peer_node_uid
+        .get_by_right(&payload.message.validator.uid)
+        .ok_or_else(|| {
+            error!("Could not get validator peer ID");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                bincode::serialize("An internal server error occurred").unwrap_or_default(),
+            )
+        })?;
+    let validator_info = miner_base_neuron
+        .address_book
+        .clone()
+        .read()
+        .await
+        .get(validator_peer_id)
+        .ok_or_else(|| {
+            error!("Error while getting validator info");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                bincode::serialize("An internal server error occurred").unwrap_or_default(),
+            )
+        })?
+        .clone();
+    let validator_hotkey = validator_info.neuron_info.hotkey.clone();
+
+    if !verified || validator_hotkey != payload.message.validator.account_id {
         return Ok((
             StatusCode::UNAUTHORIZED,
             bincode::serialize("Signature verification failed. Unauthorized access")
