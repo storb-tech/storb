@@ -9,7 +9,7 @@ use base::piece_hash::{piecehash_to_bytes_raw, PieceHash};
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::MinerState;
 
@@ -125,6 +125,9 @@ pub async fn get_piece(
                 .unwrap_or_default(),
         ));
     }
+
+    debug!("Signature verification successful:");
+    debug!("{:?}", payload);
 
     // Continue if the signature is valid:
 

@@ -92,7 +92,12 @@ pub async fn upload_piece_data(
     let signature = sign_message(&signer, &message);
     let payload = HandshakePayload { signature, message };
     let payload_bytes = bincode::serialize(&payload)?;
+    debug!("payload_bytes: {:?}", payload_bytes);
 
+    // Send payload length
+    send_stream
+        .write_all(&(payload_bytes.len() as u64).to_be_bytes())
+        .await?;
     // Send signature to the miner for it to verify. Note that the miner could
     // abort the stream if the verification fails.
     send_stream.write_all(&payload_bytes).await?;

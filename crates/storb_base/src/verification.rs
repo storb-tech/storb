@@ -3,14 +3,14 @@ use std::slice;
 use crabtensor::{sign::KeypairSignature, AccountId};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[repr(C)]
 pub struct KeyRegistrationInfo {
     pub uid: u16,
     pub account_id: AccountId,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[repr(C)]
 pub struct VerificationMessage {
     pub netuid: u16,
@@ -26,7 +26,7 @@ impl AsRef<[u8]> for VerificationMessage {
 }
 
 /// The payload containing the message and its signature that is sent to the miner
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[repr(C)]
 pub struct HandshakePayload {
     pub signature: KeypairSignature,

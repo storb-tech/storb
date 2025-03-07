@@ -16,7 +16,7 @@ use rcgen::generate_simple_self_signed;
 use store::ObjectStore;
 use tokio::sync::Mutex;
 use tokio::time;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub mod miner;
 mod routes;
@@ -144,17 +144,28 @@ async fn main(config: MinerConfig) -> Result<()> {
                         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
                             info!("New bidirectional stream opened");
 
+                            // Read the payload size
+                            let mut payload_size_buf = [0u8; 8];
+                            if let Err(e) = recv.read_exact(&mut payload_size_buf).await {
+                                error!("Failed to read piece size: {e}");
+                                continue;
+                            }
+                            let payload_size = u64::from_be_bytes(payload_size_buf) as usize;
+
                             // Read signature payload and verify
-                            let mut signature_buf = [0u8; size_of::<HandshakePayload>()];
+                            // let mut signature_buf = [0u8; size_of::<HandshakePayload>()];
+                            let mut signature_buf = vec![0u8; payload_size];
                             if let Err(e) = recv.read_exact(&mut signature_buf).await {
                                 error!("Failed to read signature: {e}");
                                 continue;
                             }
+                            debug!("signature_buf: {:?}", signature_buf);
+                            debug!("payload size: {:?}", payload_size);
                             let signature_payload =
                                 match bincode::deserialize::<HandshakePayload>(&signature_buf) {
                                     Ok(data) => data,
                                     Err(err) => {
-                                        error!("Failed to deserialize payload from bytes: {err}");
+                                        error!("Failed to deserialize payload from bytes: {:?}", err);
                                         continue;
                                     }
                                 };
@@ -174,6 +185,8 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 );
                                 return;
                             }
+                            debug!("Signature verification successful:");
+                            debug!("{:?}", signature_payload);
 
                             // Read the piece size
                             let mut piece_size_buf = [0u8; 8];
