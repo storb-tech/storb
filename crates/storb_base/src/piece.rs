@@ -4,7 +4,9 @@ use thiserror::Error;
 use tracing::{debug, error};
 use zfec_rs::Chunk as ZFecChunk;
 
-use crate::constants::{MAX_PIECE_SIZE, MIN_PIECE_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING};
+use crate::constants::{
+    MAX_PIECE_LEN_FUNC_SIZE, MIN_PIECE_LEN_FUNC_SIZE, PIECE_LENGTH_OFFSET, PIECE_LENGTH_SCALING,
+};
 
 #[derive(Debug, Clone)]
 pub struct Piece {
@@ -127,8 +129,8 @@ pub fn get_infohash(
 }
 
 pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {
-    let min_size = min_size.unwrap_or(MIN_PIECE_SIZE);
-    let max_size = max_size.unwrap_or(MAX_PIECE_SIZE);
+    let min_size = min_size.unwrap_or(MIN_PIECE_LEN_FUNC_SIZE);
+    let max_size = max_size.unwrap_or(MAX_PIECE_LEN_FUNC_SIZE);
 
     // Calculate ideal length based on content size using log scaling
     let exponent =
@@ -333,8 +335,8 @@ mod tests {
     #[test]
     fn test_piece_length() {
         setup_logging();
-        assert!(piece_length(1000, None, None) >= MIN_PIECE_SIZE);
-        assert!(piece_length(1000000, None, None) <= MAX_PIECE_SIZE);
+        assert!(piece_length(1000, None, None) >= MIN_PIECE_LEN_FUNC_SIZE);
+        assert!(piece_length(1000000, None, None) <= MAX_PIECE_LEN_FUNC_SIZE);
     }
 
     #[test]

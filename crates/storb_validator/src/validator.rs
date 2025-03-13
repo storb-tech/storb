@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use base::constants::CLIENT_TIMEOUT;
@@ -16,11 +18,11 @@ use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
-use tokio::time::Instant;
 use tracing::{debug, error, info, trace};
 
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{select_random_chunk_from_db, ScoringSystem};
+use crate::upload::insert_chunk_dht_value;
 use crate::upload::upload_piece_data;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 use rand::seq::IteratorRandom;
@@ -28,7 +30,51 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
+    SYNTH_WAIT_BEFORE_RET,
 };
+
+#[derive(Default)]
+struct LatencyStats {
+    weighted_latency: f64,
+    total_bytes: usize,
+}
+
+#[derive(Default)]
+struct MinerLatencyMap {
+    stats: HashMap<u16, LatencyStats>,
+}
+
+impl MinerLatencyMap {
+    fn record_latency(&mut self, miner_uid: u16, latency: f64, bytes: usize) {
+        let stats = self.stats.entry(miner_uid).or_default();
+        stats.weighted_latency += latency * bytes as f64;
+        stats.total_bytes += bytes;
+    }
+
+    fn get_average_latency(&self, miner_uid: u16) -> Option<f64> {
+        self.stats.get(&miner_uid).map(|stats| {
+            if stats.total_bytes > 0 {
+                stats.weighted_latency / stats.total_bytes as f64
+            } else {
+                0.0
+            }
+        })
+    }
+
+    fn get_all_latencies(&self) -> HashMap<u16, f64> {
+        self.stats
+            .iter()
+            .map(|(&uid, stats)| {
+                let avg = if stats.total_bytes > 0 {
+                    stats.weighted_latency / stats.total_bytes as f64
+                } else {
+                    0.0
+                };
+                (uid, avg)
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone)]
 pub struct ValidatorConfig {
@@ -67,6 +113,8 @@ impl Validator {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
         let mut rng: StdRng = SeedableRng::from_entropy();
+        let mut store_latencies = MinerLatencyMap::default();
+        let mut retrieval_latencies = MinerLatencyMap::default();
         // let num_neurons = self.neuron.neurons.len();
 
         // ----==== Synthetic store challenges ====----
@@ -80,7 +128,7 @@ impl Validator {
 
         let encoded = encode_chunk(&synthetic_chunk, 0);
 
-        for piece in encoded.pieces {
+        for piece in encoded.pieces.clone() {
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
 
@@ -133,6 +181,7 @@ impl Validator {
                     }
                 };
 
+                let start_time = Instant::now();
                 let hash_vec = upload_piece_data(
                     self.neuron.clone(),
                     miner_info,
@@ -140,6 +189,7 @@ impl Validator {
                     piece.data.clone(),
                 )
                 .await?;
+                let latency = start_time.elapsed().as_secs_f64();
                 let hash = hash_vec.as_bytes_ref();
 
                 info!("Received hash: {:?}", hash);
@@ -147,22 +197,97 @@ impl Validator {
 
                 if hash != piece_hash {
                     error!("Hash mismatch for piece from miner {quic_miner_uid}");
+                    store_latencies.record_latency(
+                        quic_miner_uid,
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        piece.data.len(),
+                    );
+                    continue;
                 } else {
                     info!("Received hash for piece from miner {quic_miner_uid}");
                     // Increase store successes
                     db.conn.lock().await.execute(
                     "UPDATE miner_stats SET store_successes = store_successes + 1 WHERE miner_uid = ?",
                     [quic_miner_uid],
-                )?;
+                    )?;
                     // Increase total successes
                     db.conn.lock().await.execute(
                     "UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = ?",
                     [quic_miner_uid],
-                )?;
+                    )?;
+                    store_latencies.record_latency(quic_miner_uid, latency, piece.data.len());
                 }
             }
         }
 
+        let mut chunk_hash_raw = blake3::Hasher::new();
+        let mut chunk_piece_hashes = Vec::new();
+
+        // Calculate chunk hash and collect piece hashes
+        for piece in &encoded.pieces {
+            let piece_hash = blake3::hash(&piece.data).as_bytes().to_owned();
+            chunk_hash_raw.update(&piece_hash);
+            chunk_piece_hashes.push(piece_hash);
+        }
+
+        let chunk_hash = chunk_hash_raw.finalize();
+        let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
+
+        // Create chunk DHT value
+        let validator_id = subxt::ext::codec::Compact(
+            self.neuron
+                .local_node_info
+                .uid
+                .ok_or("Failed to get validator UID")?,
+        );
+
+        let chunk_msg = (
+            chunk_key.clone(),
+            validator_id,
+            chunk_piece_hashes.clone(),
+            0, // chunk_idx for synthetic challenges is 0
+            encoded.k,
+            encoded.m,
+            encoded.chunk_size,
+            encoded.padlen,
+            encoded.original_chunk_size,
+        );
+
+        let chunk_msg_bytes = bincode::serialize(&chunk_msg)?;
+        let chunk_sig = sign_message(&self.neuron.signer, chunk_msg_bytes);
+
+        let chunk_dht_value = base::swarm::models::ChunkDHTValue {
+            chunk_hash: chunk_key.clone(),
+            validator_id,
+            piece_hashes: chunk_piece_hashes,
+            chunk_idx: 0,
+            k: encoded.k,
+            m: encoded.m,
+            chunk_size: encoded.chunk_size,
+            padlen: encoded.padlen,
+            original_chunk_size: encoded.original_chunk_size,
+            signature: chunk_sig,
+        };
+
+        // Insert into SQLite DB
+        insert_chunk_dht_value(
+            chunk_dht_value.clone(),
+            self.scoring_system.write().await.db.clone().conn.clone(),
+        )
+        .await?;
+
+        // Put chunk entry in DHT
+        swarm::dht::StorbDHT::put_chunk_entry(
+            self.neuron.command_sender.clone(),
+            chunk_key,
+            chunk_dht_value,
+        )
+        .await?;
+
+        // wait a few seconds before running retrieval challenges
+        tokio::time::sleep(Duration::from_secs_f64(SYNTH_WAIT_BEFORE_RET)).await;
+
+        info!("Inserted synthetic chunk into DHT");
         info!("Completed synthetic store challenges");
 
         // ----==== Synthetic retrieval challenges ====----
@@ -180,10 +305,6 @@ impl Validator {
                 .await?
                 .context("Chunk for the given record key was not found")?;
         let piece_hashes = chunk_entry.piece_hashes;
-
-        // TODO: latency scoring
-        let mut new_ret_latency_map = HashMap::<u16, f64>::new();
-        // let mut new_ret_score_map = HashMap::<u16, f64>::new();
 
         let mut pieces_checked = 0;
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
@@ -263,11 +384,12 @@ impl Validator {
                     .ok_or_else(|| anyhow!("Invalid HTTP address in node_info"))?;
 
                 let start_time = Instant::now();
-                let node_response = req_client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to query node")?;
+                let node_response = tokio::time::timeout(
+                    Duration::from_secs_f64(SYNTH_CHALLENGE_TIMEOUT),
+                    req_client.get(&url).send(),
+                )
+                .await?
+                .context("Failed to query node")?;
 
                 let latency = start_time.elapsed().as_secs_f64();
 
@@ -296,10 +418,14 @@ impl Validator {
                 let valid_hash = computed_hash.as_bytes() == &piece_hash;
 
                 if valid_hash {
-                    new_ret_latency_map.insert(miner_uid, latency);
+                    retrieval_latencies.record_latency(miner_uid, latency, piece_data.len());
                 } else {
                     error!("Hash mismatch for provider {:?}", peer_id);
-                    new_ret_latency_map.insert(miner_uid, SYNTH_CHALLENGE_TIMEOUT);
+                    retrieval_latencies.record_latency(
+                        miner_uid,
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        piece_data.len(),
+                    );
                     continue;
                 }
 
@@ -319,6 +445,16 @@ impl Validator {
 
             pieces_checked += 1;
         }
+
+        let store_avg_latencies = store_latencies.get_all_latencies();
+        let retrieval_avg_latencies = retrieval_latencies.get_all_latencies();
+
+        // Update scoring system with new latencies
+        self.scoring_system
+            .write()
+            .await
+            .state
+            .update_latency_scores(store_avg_latencies, retrieval_avg_latencies);
 
         // record latency and response rate scores
         Ok(())

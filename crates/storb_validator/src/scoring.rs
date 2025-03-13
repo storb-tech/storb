@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +47,66 @@ pub struct ScoreState {
     pub final_latency_scores: Array1<f64>,
 }
 
+impl ScoreState {
+    fn normalize_latencies(latencies: &HashMap<u16, f64>) -> HashMap<u16, f64> {
+        if latencies.is_empty() {
+            return HashMap::new();
+        }
+
+        // Find min and max latencies
+        let mut min_latency = f64::MAX;
+        let mut max_latency = f64::MIN;
+
+        for &latency in latencies.values() {
+            min_latency = min_latency.min(latency);
+            max_latency = max_latency.max(latency);
+        }
+
+        // Normalize and invert (so faster = higher score)
+        let range = max_latency - min_latency;
+        latencies
+            .iter()
+            .map(|(&uid, &latency)| {
+                let normalized = if range > 0.0 {
+                    1.0 - ((latency - min_latency) / range)
+                } else {
+                    1.0
+                };
+                (uid, normalized)
+            })
+            .collect()
+    }
+
+    pub fn update_latency_scores(
+        &mut self,
+        store_latencies: HashMap<u16, f64>,
+        retrieval_latencies: HashMap<u16, f64>,
+    ) {
+        // Get normalized scores
+        let normalized_store = Self::normalize_latencies(&store_latencies);
+        let normalized_retrieval = Self::normalize_latencies(&retrieval_latencies);
+
+        // Update arrays with new scores
+        for (uid, score) in normalized_store {
+            if uid < self.store_latency_scores.len() as u16 {
+                self.store_latency_scores[uid as usize] = score;
+            }
+        }
+
+        for (uid, score) in normalized_retrieval {
+            if uid < self.retrieve_latency_scores.len() as u16 {
+                self.retrieve_latency_scores[uid as usize] = score;
+            }
+        }
+
+        // Update final latency scores (50/50 weight between store and retrieve)
+        for i in 0..self.final_latency_scores.len() {
+            self.final_latency_scores[i] =
+                0.5 * self.store_latency_scores[i] + 0.5 * self.retrieve_latency_scores[i];
+        }
+    }
+}
+
 pub struct ScoringSystem {
     /// Database connection pool for the given DB driver.
     pub db: Arc<MemoryDb>,
@@ -91,7 +152,7 @@ pub async fn select_random_chunk_from_db(
     }
 
     let mut rng: StdRng = SeedableRng::from_entropy();
-    let target_row: u64 = rng.gen_range(1..=row_count);
+    let target_row: u64 = rng.gen_range(1..row_count);
 
     debug!("Getting chunk at row {target_row} from sqlite db");
 
