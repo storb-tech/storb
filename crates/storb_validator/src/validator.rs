@@ -12,6 +12,8 @@ use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
 use crabtensor::sign::sign_message;
+use crabtensor::weights::set_weights_payload;
+use crabtensor::weights::NormalizedWeight;
 use libp2p::kad::RecordKey;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -21,7 +23,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
 use crate::quic::{create_quic_client, make_client_endpoint};
-use crate::scoring::{select_random_chunk_from_db, ScoringSystem};
+use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
 use crate::upload::insert_chunk_dht_value;
 use crate::upload::upload_piece_data;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
@@ -51,15 +53,15 @@ impl MinerLatencyMap {
         stats.total_bytes += bytes;
     }
 
-    fn get_average_latency(&self, miner_uid: u16) -> Option<f64> {
-        self.stats.get(&miner_uid).map(|stats| {
-            if stats.total_bytes > 0 {
-                stats.weighted_latency / stats.total_bytes as f64
-            } else {
-                0.0
-            }
-        })
-    }
+    // fn get_average_latency(&self, miner_uid: u16) -> Option<f64> {
+    //     self.stats.get(&miner_uid).map(|stats| {
+    //         if stats.total_bytes > 0 {
+    //             stats.weighted_latency / stats.total_bytes as f64
+    //         } else {
+    //             0.0
+    //         }
+    //     })
+    // }
 
     fn get_all_latencies(&self) -> HashMap<u16, f64> {
         self.stats
@@ -481,9 +483,39 @@ impl Validator {
             .await
             .update_scores(neuron_count, uids_to_update)
             .await;
-        self.scoring_system.write().await.set_weights();
+
+        match self.set_weights().await {
+            Ok(_) => info!("Successfully set weights on chain"),
+            Err(e) => error!("Failed to set weights on chain: {}", e),
+        };
 
         info!("Done syncing validator");
+
+        Ok(())
+    }
+
+    /// Set weights for each miner to publish to the chain.
+    async fn set_weights(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let normed_scores = normalize_min_max(&self.scoring_system.read().await.state.ema_scores);
+        debug!("weights: {:?}", normed_scores);
+
+        // Convert normalized scores to Vec<NormalizedWeight>
+        let weights: Vec<NormalizedWeight> = normed_scores
+            .iter()
+            .enumerate()
+            .map(|(uid, &score)| NormalizedWeight {
+                uid: uid as u16,
+                weight: (score * u16::MAX as f64) as u16,
+            })
+            .collect();
+
+        let payload = set_weights_payload(self.config.neuron_config.netuid, weights, 1);
+
+        self.neuron
+            .subtensor
+            .tx()
+            .sign_and_submit_default(&payload, &self.neuron.signer)
+            .await?;
 
         Ok(())
     }

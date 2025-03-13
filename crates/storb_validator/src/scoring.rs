@@ -123,22 +123,17 @@ pub struct ScoringSystem {
     pub moving_average_alpha: f64,
 }
 
-// // General L_p norm
-// fn lp_norm(arr: &Array1<f64>, p: f64) -> f64 {
-//     arr.mapv(|x| x.abs().powf(p)).sum().powf(1.0 / p)
-// }
+#[inline]
+pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
+    let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-// #[inline]
-// pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
-//     let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
-//     let max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < 1e-9 {
+        return arr.mapv(|_| 0.0); // Avoid division by zero
+    }
 
-//     if (max - min).abs() < 1e-9 {
-//         return arr.mapv(|_| 0.0); // Avoid division by zero
-//     }
-
-//     arr.mapv(|x| (x - min) / (max - min))
-// }
+    arr.mapv(|x| (x - min) / (max - min))
+}
 
 #[allow(dead_code)]
 pub async fn select_random_chunk_from_db(
@@ -372,9 +367,6 @@ impl ScoringSystem {
             }
         }
     }
-
-    /// Set weights for each miner to publish to the chain.
-    pub fn set_weights(&mut self) {}
 }
 
 #[cfg(test)]
