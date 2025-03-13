@@ -71,6 +71,12 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
     let validator_config = ValidatorConfig {
         scores_state_file,
+        moving_average_alpha: *get_config_value!(
+            args,
+            "validator.neuron.moving_average_alpha",
+            f64,
+            &settings.validator.neuron.moving_average_alpha
+        ),
         neuron_config,
     };
 

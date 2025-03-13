@@ -79,6 +79,7 @@ impl MinerLatencyMap {
 #[derive(Clone)]
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
+    pub moving_average_alpha: f64,
     pub neuron_config: BaseNeuronConfig,
 }
 
@@ -96,9 +97,13 @@ impl Validator {
         let neuron = BaseNeuron::new(neuron_config).await?;
 
         let scoring_system = Arc::new(RwLock::new(
-            ScoringSystem::new(&config.neuron_config.db_file, &config.scores_state_file)
-                .await
-                .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
+            ScoringSystem::new(
+                &config.neuron_config.db_file,
+                &config.scores_state_file,
+                config.moving_average_alpha,
+            )
+            .await
+            .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
         ));
 
         let validator = Validator {
@@ -448,13 +453,18 @@ impl Validator {
 
         let store_avg_latencies = store_latencies.get_all_latencies();
         let retrieval_avg_latencies = retrieval_latencies.get_all_latencies();
+        let moving_average_alpha = self.scoring_system.read().await.moving_average_alpha;
 
-        // Update scoring system with new latencies
+        // Update scoring system with new latencies using EMA
         self.scoring_system
             .write()
             .await
             .state
-            .update_latency_scores(store_avg_latencies, retrieval_avg_latencies);
+            .update_latency_scores(
+                store_avg_latencies,
+                retrieval_avg_latencies,
+                moving_average_alpha,
+            );
 
         // record latency and response rate scores
         Ok(())
