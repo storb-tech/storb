@@ -154,16 +154,17 @@ pub async fn select_random_chunk_from_db(
     }
 
     let mut rng: StdRng = SeedableRng::from_entropy();
-    let target_row: u64 = rng.gen_range(1..row_count);
+    let offset_rows_by: u64 = rng.gen_range(0..row_count);
 
-    debug!("Getting chunk at row {target_row} from sqlite db");
+    let row_idx = offset_rows_by + 1;
+    debug!("Getting chunk at row {row_idx} from sqlite db");
 
     let chosen_chunk_vec: Vec<u8> = db_conn
         .lock()
         .await
         .query_row(
             "SELECT chunk_hash FROM chunks ORDER BY chunk_hash LIMIT 1 OFFSET ?",
-            [target_row],
+            [offset_rows_by],
             |row| row.get(0),
         )
         .map_err(ChunkError::Database)?;
@@ -347,6 +348,9 @@ impl ScoringSystem {
             response_rate_scores[i] = 0.0;
         }
 
+        // Calculate final EMA scores: 75% weight for response rates (store/retrieval success)
+        // and 25% weight for latency performance. Response rates prioritized as they indicate
+        // basic miner availability and reliability.
         state.ema_scores =
             0.75 * response_rate_scores.clone() + 0.25 * state.final_latency_scores.clone();
 

@@ -7,6 +7,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use base::constants::CLIENT_TIMEOUT;
 use base::piece::encode_chunk;
+use base::swarm::models::ChunkDHTValue;
 use base::sync::Synchronizable;
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
@@ -18,6 +19,7 @@ use libp2p::kad::RecordKey;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
+use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
@@ -32,7 +34,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
-    SYNTH_WAIT_BEFORE_RET,
+    SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 
 #[derive(Default)]
@@ -47,21 +49,11 @@ struct MinerLatencyMap {
 }
 
 impl MinerLatencyMap {
-    fn record_latency(&mut self, miner_uid: u16, latency: f64, bytes: usize) {
+    fn record_latency(&mut self, miner_uid: u16, latency: f64, bytes_len: usize) {
         let stats = self.stats.entry(miner_uid).or_default();
-        stats.weighted_latency += latency * bytes as f64;
-        stats.total_bytes += bytes;
+        stats.weighted_latency += latency * bytes_len as f64;
+        stats.total_bytes += bytes_len;
     }
-
-    // fn get_average_latency(&self, miner_uid: u16) -> Option<f64> {
-    //     self.stats.get(&miner_uid).map(|stats| {
-    //         if stats.total_bytes > 0 {
-    //             stats.weighted_latency / stats.total_bytes as f64
-    //         } else {
-    //             0.0
-    //         }
-    //     })
-    // }
 
     fn get_all_latencies(&self) -> HashMap<u16, f64> {
         self.stats
@@ -241,7 +233,7 @@ impl Validator {
         let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
         // Create chunk DHT value
-        let validator_id = subxt::ext::codec::Compact(
+        let validator_id = Compact(
             self.neuron
                 .local_node_info
                 .uid
@@ -263,7 +255,7 @@ impl Validator {
         let chunk_msg_bytes = bincode::serialize(&chunk_msg)?;
         let chunk_sig = sign_message(&self.neuron.signer, chunk_msg_bytes);
 
-        let chunk_dht_value = base::swarm::models::ChunkDHTValue {
+        let chunk_dht_value = ChunkDHTValue {
             chunk_hash: chunk_key.clone(),
             validator_id,
             piece_hashes: chunk_piece_hashes,
@@ -292,7 +284,10 @@ impl Validator {
         .await?;
 
         // wait a few seconds before running retrieval challenges
-        tokio::time::sleep(Duration::from_secs_f64(SYNTH_WAIT_BEFORE_RET)).await;
+        tokio::time::sleep(Duration::from_secs_f64(
+            SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
+        ))
+        .await;
 
         info!("Inserted synthetic chunk into DHT");
         info!("Completed synthetic store challenges");

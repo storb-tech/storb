@@ -3,6 +3,6 @@ pub const SYNTHETIC_CHALLENGE_FREQUENCY: u64 = 60;
 
 pub const MAX_CHALLENGE_PIECE_NUM: i32 = 5;
 pub const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this
-pub const SYNTH_WAIT_BEFORE_RET: f64 = 3.0;
+pub const SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE: f64 = 3.0;
 pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synthetic data in bytes
 pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
