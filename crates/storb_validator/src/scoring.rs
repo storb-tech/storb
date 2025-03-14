@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,7 +35,7 @@ pub enum ChunkError {
 /// The latency scores are stored in the score state file, although response rate
 /// and challenge statistics are stored in a separate SQLite database. Those stats
 /// are calculated then saved into the EMA score.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoreState {
     /// The current exponential moving average (EMA) score of the miners.
     pub ema_scores: Array1<f64>,
@@ -46,6 +47,71 @@ pub struct ScoreState {
     pub final_latency_scores: Array1<f64>,
 }
 
+impl ScoreState {
+    fn normalize_latencies(latencies: &HashMap<u16, f64>) -> HashMap<u16, f64> {
+        if latencies.is_empty() {
+            return HashMap::new();
+        }
+
+        // Find min and max latencies
+        let mut min_latency = f64::MAX;
+        let mut max_latency = f64::MIN;
+
+        for &latency in latencies.values() {
+            min_latency = min_latency.min(latency);
+            max_latency = max_latency.max(latency);
+        }
+
+        // Normalize and invert (so faster = higher score)
+        let range = max_latency - min_latency;
+        latencies
+            .iter()
+            .map(|(&uid, &latency)| {
+                let normalized = if range > 0.0 {
+                    1.0 - ((latency - min_latency) / range)
+                } else {
+                    1.0
+                };
+                (uid, normalized)
+            })
+            .collect()
+    }
+
+    pub fn update_latency_scores(
+        &mut self,
+        store_latencies: HashMap<u16, f64>,
+        retrieval_latencies: HashMap<u16, f64>,
+        alpha: f64,
+    ) {
+        // Get normalized scores
+        let normalized_store = Self::normalize_latencies(&store_latencies);
+        let normalized_retrieval = Self::normalize_latencies(&retrieval_latencies);
+
+        // Update arrays with new EMA scores
+        for (uid, score) in normalized_store {
+            if uid < self.store_latency_scores.len() as u16 {
+                // EMA = alpha * new_value + (1 - alpha) * previous_ema
+                let old_score = self.store_latency_scores[uid as usize];
+                self.store_latency_scores[uid as usize] = alpha * score + (1.0 - alpha) * old_score;
+            }
+        }
+
+        for (uid, score) in normalized_retrieval {
+            if uid < self.retrieve_latency_scores.len() as u16 {
+                let old_score = self.retrieve_latency_scores[uid as usize];
+                self.retrieve_latency_scores[uid as usize] =
+                    alpha * score + (1.0 - alpha) * old_score;
+            }
+        }
+
+        // Update final latency scores (50/50 weight between store and retrieve)
+        for i in 0..self.final_latency_scores.len() {
+            self.final_latency_scores[i] =
+                0.5 * self.store_latency_scores[i] + 0.5 * self.retrieve_latency_scores[i];
+        }
+    }
+}
+
 pub struct ScoringSystem {
     /// Database connection pool for the given DB driver.
     pub db: Arc<MemoryDb>,
@@ -53,24 +119,21 @@ pub struct ScoringSystem {
     pub state_file: PathBuf,
     /// Score state for miners.
     pub state: ScoreState,
+    /// Moving average alpha for scores
+    pub moving_average_alpha: f64,
 }
 
-// // General L_p norm
-// fn lp_norm(arr: &Array1<f64>, p: f64) -> f64 {
-//     arr.mapv(|x| x.abs().powf(p)).sum().powf(1.0 / p)
-// }
+#[inline]
+pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
+    let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-// #[inline]
-// pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
-//     let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
-//     let max = arr.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if (max - min).abs() < 1e-9 {
+        return arr.mapv(|_| 0.0); // Avoid division by zero
+    }
 
-//     if (max - min).abs() < 1e-9 {
-//         return arr.mapv(|_| 0.0); // Avoid division by zero
-//     }
-
-//     arr.mapv(|x| (x - min) / (max - min))
-// }
+    arr.mapv(|x| (x - min) / (max - min))
+}
 
 #[allow(dead_code)]
 pub async fn select_random_chunk_from_db(
@@ -91,16 +154,17 @@ pub async fn select_random_chunk_from_db(
     }
 
     let mut rng: StdRng = SeedableRng::from_entropy();
-    let target_row: u64 = rng.gen_range(1..=row_count);
+    let offset_rows_by: u64 = rng.gen_range(0..row_count);
 
-    debug!("Getting chunk at row {target_row} from sqlite db");
+    let row_idx = offset_rows_by + 1;
+    debug!("Getting chunk at row {row_idx} from sqlite db");
 
     let chosen_chunk_vec: Vec<u8> = db_conn
         .lock()
         .await
         .query_row(
             "SELECT chunk_hash FROM chunks ORDER BY chunk_hash LIMIT 1 OFFSET ?",
-            [target_row],
+            [offset_rows_by],
             |row| row.get(0),
         )
         .map_err(ChunkError::Database)?;
@@ -122,7 +186,11 @@ pub async fn select_random_chunk_from_db(
 }
 
 impl ScoringSystem {
-    pub async fn new(db_file: &PathBuf, scoring_state_file: &Path) -> Result<Self> {
+    pub async fn new(
+        db_file: &PathBuf,
+        scoring_state_file: &Path,
+        moving_average_alpha: f64,
+    ) -> Result<Self> {
         let db_path = PathBuf::new().join(db_file);
         if !fs::exists(&db_path)? {
             warn!(
@@ -157,6 +225,7 @@ impl ScoringSystem {
             db,
             state,
             state_file: scoring_state_file.to_path_buf(),
+            moving_average_alpha,
         };
 
         match scoring_system.load_state() {
@@ -186,10 +255,6 @@ impl ScoringSystem {
 
     /// Update scores for each of the miners.
     pub async fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
-        // if # of neurons has changed we add new entries to scores
-        // if a neuron has been replaced by another w zero out its scores
-
-        // Create a new, extended array and copy the old contents into the new one.
         let extend_array = |old: &Array1<f64>, new_size: usize| -> Array1<f64> {
             let mut new_array = Array::<f64, _>::zeros(new_size);
             new_array.slice_mut(s![0..old.len()]).assign(old);
@@ -197,11 +262,11 @@ impl ScoringSystem {
         };
 
         info!("uids to update: {:?}", uids_to_update);
-        // Update the scores state if we have to
-        if !uids_to_update.is_empty() {
-            let state = &mut self.state;
 
-            // TODO: if the array size remains the same then don't extend?
+        // Only extend/initialize if current arrays are empty or new size is larger
+        let current_size = self.state.ema_scores.len();
+        if current_size < neuron_count {
+            let state = &mut self.state;
 
             let mut new_ema_scores = extend_array(&state.ema_scores, neuron_count);
             let mut new_retrieve_latency_scores =
@@ -211,14 +276,15 @@ impl ScoringSystem {
             let mut new_final_latency_scores =
                 extend_array(&state.final_latency_scores, neuron_count);
 
-            // Reset or initialise UIDs
+            // Only initialize new UIDs that weren't in the original array
             for uid in uids_to_update {
                 let uid = uid as usize;
-
-                new_ema_scores[uid] = 0.0;
-                new_retrieve_latency_scores[uid] = 0.0;
-                new_store_latency_scores[uid] = 0.0;
-                new_final_latency_scores[uid] = 0.0;
+                if uid >= current_size {
+                    new_ema_scores[uid] = 0.0;
+                    new_retrieve_latency_scores[uid] = 0.0;
+                    new_store_latency_scores[uid] = 0.0;
+                    new_final_latency_scores[uid] = 0.0;
+                }
             }
 
             state.ema_scores = new_ema_scores;
@@ -228,7 +294,7 @@ impl ScoringSystem {
         }
 
         // connect to db and compute new scores
-        let state = &self.state;
+        let state = &mut self.state;
 
         let mut response_rate_scores = Array1::<f64>::zeros(state.ema_scores.len());
         for (miner_uid, _) in state.ema_scores.iter().enumerate() {
@@ -282,6 +348,12 @@ impl ScoringSystem {
             response_rate_scores[i] = 0.0;
         }
 
+        // Calculate final EMA scores: 75% weight for response rates (store/retrieval success)
+        // and 25% weight for latency performance. Response rates prioritized as they indicate
+        // basic miner availability and reliability.
+        state.ema_scores =
+            0.75 * response_rate_scores.clone() + 0.25 * state.final_latency_scores.clone();
+
         info!("response rate scores: {}", response_rate_scores);
         info!("new scores: {}", state.ema_scores);
         info!(
@@ -299,9 +371,6 @@ impl ScoringSystem {
             }
         }
     }
-
-    /// Set weights for each miner to publish to the chain.
-    pub fn set_weights(&mut self) {}
 }
 
 #[cfg(test)]

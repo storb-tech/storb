@@ -36,7 +36,7 @@ pub(crate) struct UploadProcessor<'a> {
 }
 
 // Inserts chunk DHT value into the SQLite DB
-async fn insert_chunk_dht_value(
+pub async fn insert_chunk_dht_value(
     chunk_dht_value: models::ChunkDHTValue,
     db_conn: Arc<Mutex<SqliteConnection>>,
 ) -> Result<()> {
