@@ -10,6 +10,7 @@ use libp2p::kad::{
     self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
     PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
+use libp2p::metrics::{Metrics, Recorder, Registry};
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
@@ -138,6 +139,8 @@ pub struct StorbDHT {
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
     bootstrap_nodes: Vec<Multiaddr>,
+    /// metrics
+    metrics: Metrics,
 }
 
 impl StorbDHT {
@@ -160,6 +163,8 @@ impl StorbDHT {
         let (command_sender, command_receiver) = mpsc::channel(32);
 
         assert!(port < 65535, "Invalid port number");
+
+        let mut metric_registry = Registry::default();
 
         // Generate a local keypair and derive our peer ID.
         let local_peer_id = libp2p::PeerId::from_public_key(&local_keypair.public());
@@ -206,9 +211,12 @@ impl StorbDHT {
         let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
             .with_tokio()
             .with_quic() // Using QUIC for transport.
+            .with_bandwidth_metrics(&mut metric_registry)
             .with_behaviour(|_| Ok(behaviour))?
             .with_swarm_config(|cfg| cfg)
             .build();
+
+        let metrics = Metrics::new(&mut metric_registry);
 
         // Set Kademlia to server mode.
         swarm
@@ -262,6 +270,7 @@ impl StorbDHT {
                 queries: Arc::new(Mutex::new(HashMap::new())),
                 command_receiver,
                 bootstrap_nodes,
+                metrics,
             },
             command_sender,
         ))
@@ -527,11 +536,13 @@ impl StorbDHT {
                                     let queries_clone = self.queries.clone();
                                     let mut queries = queries_clone.lock().await;
                                     trace!("Kademlia event received: {:?}", event);
+                                    self.metrics.record(&(*event.clone()));
                                     self.inject_kad_event(*event.clone(), &mut queries).await;
                                     self.inject_kad_incoming_query(*event);
                                 }
                                 StorbEvent::Identify(event) => {
                                     trace!("Identify event: {:?}", event);
+                                    self.metrics.record(&(*event));
                                     match *event {
                                         identify::Event::Received { connection_id: _, peer_id, info } => {
                                             info!(
@@ -555,6 +566,7 @@ impl StorbDHT {
                                 }
                                 StorbEvent::Ping(event) => {
                                     trace!("Ping event: {:?}", event);
+                                    self.metrics.record(&(*event));
                                 }
                             }
                         }

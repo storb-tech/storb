@@ -1,16 +1,18 @@
 use std::io::stderr;
 
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::SpanExporter;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_otlp::{LogExporter, Protocol};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::Resource;
 use tracing::level_filters::LevelFilter;
 use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::Registry;
 
 use crate::constants::OTEL_EXPORTER_OTLP_ENDPOINT;
 /// Print to stderr and exit with a non-zero exit code
@@ -20,6 +22,15 @@ macro_rules! fatal {
         eprintln!($($arg)*);
         std::process::exit(1);
     }};
+}
+
+fn init_tracers() -> SdkTracerProvider {
+    let exporter = SpanExporter::builder().with_http().build().unwrap(); // TODO: handle error
+    let resource = Resource::builder().with_service_name("libp2p").build();
+    SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build()
 }
 
 fn init_logs() -> SdkLoggerProvider {
@@ -56,10 +67,17 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
 
     let (non_blocking_file, file_guard) = tracing_appender::non_blocking(appender);
     let (non_blocking_stdout, stdout_guard) = tracing_appender::non_blocking(stderr());
-    let logger_provider = init_logs();
+
+    let logger_provider: SdkLoggerProvider = init_logs();
     let otel_layer = OpenTelemetryTracingBridge::new(&logger_provider);
 
-    let logger = Registry::default()
+    use opentelemetry::trace::TracerProvider;
+
+    let tracer_provider: SdkTracerProvider = init_tracers();
+    let trace_layer =
+        tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("libp2p-subscriber"));
+
+    let logger = tracing_subscriber::registry()
         .with(LevelFilter::from_level(level))
         .with(
             fmt::Layer::default()
@@ -67,6 +85,7 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
                 .with_line_number(true),
         )
         .with(otel_layer)
+        .with(trace_layer)
         .with(
             fmt::Layer::default()
                 .with_writer(non_blocking_file)
