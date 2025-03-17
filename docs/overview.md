@@ -18,8 +18,8 @@ Uploading files
 - The validator distributes the file metadata to other neurons through a DHT.
 - Returns an infohash which can be used by user to download the file from the network:
 
-    ```json
-    {"infohash":"4e44d931392d68ec0318f09d48267d05c4a8d9fe852832adeeaefc47a892d23c"}
+    ```
+    4e44d931392d68ec0318f09d48267d05c4a8d9fe852832adeeaefc47a892d23c
     ```
 
 Retrieving files
@@ -40,8 +40,8 @@ Retrieving files
 Scoring is made up of multiple components:
 
 - **Latency**: Miners are scored based on how quickly they respond to storage and retrieval requests.
-- **Response Rate**: Reliable miners are the name of the game. The less a miner responds to storage and retrieval requests, the lower it is scored.
-- **PDP Challenge**: The subnet uses an efficient proof of data possession (PDP) technique inspired by [Ateniese et al.](https://dl.acm.org/doi/10.1145/1315245.1315318) to ensure miners actually store the data they are asked to keep.
+- **Response Rate**: Reliable miners are the name of the game. The less a miner responds with valid data to storage and retrieval requests, the lower it is scored.
+- **Data validation**: There's no point in having a miner with low latency and high response rates if the data they return is invalid. To ensure that miners are consistently returning the correct data, the integrity of the data they return is also taken into account.
 
 ## Chunking and Piecing
 

@@ -26,7 +26,7 @@ address = "wss://entrypoint-finney.opentensor.ai:443"
 insecure = true
 
 [neuron]
-sync_frequency = 300
+sync_frequency = 120
 
 [dht]
 port = 6942
