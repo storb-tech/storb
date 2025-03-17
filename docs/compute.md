@@ -20,5 +20,5 @@ If you believe that the requirements or recommendations could be updated to bett
 | CPU       | 8 cores, 2.5 GHz    | 16 cores, 3.5 GHz |
 | RAM       | DDR4 64 GiB         | DDR5 128 GiB      |
 | Swap      | 64 GiB              | 128 GiB           |
-| Storage   | 2 TiB               | 8 TiB             |
+| Storage   | 2 TiB               | 4 TiB             |
 | Network   | 1 Gb/s              | 10+ Gb/s          |
