@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
+use crabtensor::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
 use crabtensor::axon::{serve_axon_payload, AxonProtocol};
-use crabtensor::rpc::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
 use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;

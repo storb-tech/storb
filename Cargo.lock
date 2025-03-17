@@ -2076,8 +2076,8 @@ dependencies = [
 
 [[package]]
 name = "crabtensor"
-version = "0.4.1"
-source = "git+https://github.com/fr34kcoders/crabtensor.git#f367e6103df83a592fc609e024c2e90048246bbf"
+version = "0.5.0"
+source = "git+https://github.com/storb-tech/crabtensor.git#96f2d5a06a67d9632af497324a0a1bbdf4681ee5"
 dependencies = [
  "dirs 5.0.1",
  "hex",
