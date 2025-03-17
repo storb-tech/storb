@@ -1,4 +1,4 @@
-# storb-rs
+# Storb
 
 Storb is a decentralized object storage subnet built on the Bittensor network. It aims to be a distributed, fault-tolerant, and efficient digital storage solution.
 
@@ -17,22 +17,43 @@ For an overview of how the subnet works, [see here](docs/overview.md).
 1. **Clone the Repository**:
 
    ```bash
-   git clone https://github.com/fr34kcoders/storb.git
+   git clone https://github.com/storb-tech/storb.git
    cd storb
    ```
 
-2. **Set Up Virtual Environment**:
+2. **Set up environment and dependencies**:
 
-   You will need to have Rust installed.
+   Install the Rust nightly toolchain.
+
+   We highly recommend installing `librocksdb` locally to speed up compile times. If you're on a Debian-based system:
 
    ```bash
-   cargo build --release
+   sudo apt install librocksdb-dev
    ```
 
-3. **Configure and run node**:
+   **OR**
 
-- [**Miner**](docs/miner.md)
-- [**Validator**](docs/validator.md)
+   If you use NixOS or the Nix package manager, you can use the provided flakes in this repository to get set up. It will install the necessary dependencies and Rust toolchains for you.
+
+3. **Compile**:
+
+   When compiling, we highly recommend setting `ROCKSDB_LIB_DIR` to avoid recompiling RocksDB every time. If you are using the Nix flake then this is done automatically.
+
+   ```bash
+   ROCKSDB_LIB_DIR=/usr/lib/x86_64-linux-gnu cargo build --release
+
+   # Your executable:
+   ./target/release/storb
+   ```
+
+4. **Configure and run node**:
+
+   Copy the `settings.toml.example` file and name it `settings.toml`, then update the configuration options as needed.
+
+   Specific instructions for the miner and validator:
+
+   - [**Miner**](docs/miner.md)
+   - [**Validator**](docs/validator.md)
 
 ## Contributing
 
@@ -44,4 +65,4 @@ This project is licensed under the MIT License. See the [LICENSE](./LICENSE) fil
 
 ## Contact
 
-For questions or support, please open an issue in this repository or contact the maintainers on the Bittensor discord server.
+For questions or support, please open an issue in this repository or contact the maintainers on the Storb or Bittensor Discord server.

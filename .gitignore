@@ -1,5 +1,6 @@
 .DS_Store
 .direnv
+.sqlx
 .vscode
 result/
 target/
