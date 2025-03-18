@@ -5,14 +5,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use libp2p::floodsub::protocol;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
     PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{identify, identity, mdns, multihash, ping, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace};
 
@@ -138,6 +137,7 @@ pub struct StorbDHT {
     queries: Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
+    bootstrap_nodes: Vec<Multiaddr>,
 }
 
 impl StorbDHT {
@@ -223,6 +223,10 @@ impl StorbDHT {
         let listeners: Vec<Multiaddr> = swarm.listeners().cloned().collect();
         info!("Listening on {:?}", listeners);
 
+        // Create the watch channel that indicates when bootstrap is done.
+        let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
+
+        let mut bootstrap_nodes = Vec::new();
         if let Some(peers) = bootstrap_peers {
             for addr in &peers {
                 if let Some(peer_id) = Self::extract_peer_info(addr) {
@@ -234,14 +238,12 @@ impl StorbDHT {
                     if let Err(err) = swarm.dial(addr.clone()) {
                         error!("Failed to dial bootstrap node {}: {:?}", addr, err);
                     }
+                    bootstrap_nodes.push(addr.clone());
                 } else {
                     error!("Failed to extract PeerId from bootstrap address: {}", addr);
                 }
             }
         }
-
-        // Create the watch channel that indicates when bootstrap is done.
-        let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
 
         Ok((
             Self {
@@ -250,6 +252,7 @@ impl StorbDHT {
                 bootstrap_done,
                 queries: Arc::new(Mutex::new(HashMap::new())),
                 command_receiver,
+                bootstrap_nodes,
             },
             command_sender,
         ))
@@ -446,8 +449,39 @@ impl StorbDHT {
     /// This asynchronous function continuously processes swarm events and DHT commands,
     /// handling peer discovery, connection management, and DHT operations.
     pub async fn process_events(&mut self) {
+        let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
+                _ = bootstrap_interval.tick() => {
+                    let connected_count = self.bootstrap_nodes.iter()
+                        .filter_map(Self::extract_peer_info)
+                        .filter(|peer_id| self.swarm.connected_peers().any(|p| p == peer_id))
+                        .count();
+
+                if connected_count < 1 {
+                        // Dial any bootstrap node that's not connected.
+                        for addr in self.bootstrap_nodes.clone() {
+                            if let Some(peer_id) = Self::extract_peer_info(&addr) {
+                                if !self.swarm.connected_peers().any(|p| p == &peer_id) {
+                                    debug!("Dialing bootstrap node: {} at {}", peer_id, addr);
+                                    if let Err(err) = self.swarm.dial(addr.clone()) {
+                                        error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                                    }
+                                } else {
+                                    debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
+                                }
+                            } else {
+                                error!("Failed to extract PeerId from bootstrap address: {}", addr);
+                            }
+                        }
+                    } else {
+                        debug!(
+                            "Desired number of bootstrap nodes connected ({}); stopping reconnection attempts.",
+                            connected_count
+                        );
+                    }
+                }
+
                 Some(event) = self.swarm.next() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
@@ -789,7 +823,6 @@ impl StorbDHT {
         key: RecordKey,
         value: models::PieceDHTValue,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // TODO: wait for bootstrap???
         let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Piece(value))?;
