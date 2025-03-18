@@ -12754,6 +12754,7 @@ dependencies = [
  "config",
  "crabtensor",
  "expanduser",
+ "libp2p",
  "rcgen 0.13.2",
  "serde",
  "storb_base",

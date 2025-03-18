@@ -62,8 +62,7 @@ pub struct NeuronConfig {
 #[derive(Clone)]
 pub struct DhtConfig {
     pub port: u16,
-    pub bootstrap_ip: String,
-    pub bootstrap_port: u16,
+    pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
 #[derive(Clone)]
@@ -177,9 +176,12 @@ impl BaseNeuron {
                 }
             };
 
+        let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+
         let (dht_og, command_sender) = StorbDHT::new(
             config.dht_dir.clone(),
             config.dht.port,
+            bootstrap_nodes,
             libp2p_keypair.into(),
         )
         .expect("Failed to create StorbDHT instance");
@@ -336,8 +338,7 @@ mod tests {
             },
             dht: DhtConfig {
                 port: 8081,
-                bootstrap_ip: "127.0.0.1".to_string(),
-                bootstrap_port: 8082,
+                bootstrap_nodes: None,
             },
         }
     }

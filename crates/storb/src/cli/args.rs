@@ -9,6 +9,7 @@ use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 use expanduser::expanduser;
+use libp2p::Multiaddr;
 
 pub fn common_args() -> Vec<Arg> {
     vec![
@@ -191,19 +192,13 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
 
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
-        bootstrap_ip: get_config_value!(
+        bootstrap_nodes: get_config_value!(
             args,
-            "dht.bootstrap_ip",
-            String,
-            &settings.dht.bootstrap_ip
+            "dht.bootstrap_nodes",
+            Option<Vec<Multiaddr>>,
+            &settings.dht.bootstrap_nodes
         )
         .clone(),
-        bootstrap_port: *get_config_value!(
-            args,
-            "dht.bootstrap_port",
-            u16,
-            &settings.dht.bootstrap_port
-        ),
     };
 
     Ok(BaseNeuronConfig {

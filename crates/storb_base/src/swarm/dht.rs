@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use libp2p::floodsub::protocol;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
     PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{identify, identity, mdns, multihash, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace};
 
@@ -153,6 +154,7 @@ impl StorbDHT {
     pub fn new(
         dht_dir: PathBuf,
         port: u16,
+        bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
@@ -218,6 +220,26 @@ impl StorbDHT {
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
         swarm.listen_on(listen_addr)?;
 
+        let listeners: Vec<Multiaddr> = swarm.listeners().cloned().collect();
+        info!("Listening on {:?}", listeners);
+
+        if let Some(peers) = bootstrap_peers {
+            for addr in &peers {
+                if let Some(peer_id) = Self::extract_peer_info(addr) {
+                    info!("Adding bootstrap node: {} at {}", peer_id, addr);
+                    swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    if let Err(err) = swarm.dial(addr.clone()) {
+                        error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                    }
+                } else {
+                    error!("Failed to extract PeerId from bootstrap address: {}", addr);
+                }
+            }
+        }
+
         // Create the watch channel that indicates when bootstrap is done.
         let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
 
@@ -231,6 +253,13 @@ impl StorbDHT {
             },
             command_sender,
         ))
+    }
+
+    fn extract_peer_info(addr: &Multiaddr) -> Option<PeerId> {
+        addr.iter().find_map(|p| match p {
+            libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        })
     }
 
     /// Processes a Kademlia event and routes query responses accordingly.
