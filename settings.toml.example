@@ -30,7 +30,7 @@ sync_frequency = 120
 
 [dht]
 port = 6942
-bootstrap_nodes = [] 
+bootstrap_nodes = ["/ip4/<ipv4-addr>/udp/<port>/quic-v1/p2p/<peer-id>"] 
 
 [miner]
 store_dir = "object_store"

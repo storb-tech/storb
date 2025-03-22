@@ -248,6 +248,13 @@ impl BaseNeuron {
                 .unwrap();
             info!("Successfully served axon!");
         }
+
+        info!(
+            "My peer address: /ip4/{:?}/udp/{:?}/quic-v1/p2p/{}",
+            external_ip,
+            config.quic_port.unwrap(),
+            peer_id.to_string()
+        );
         Ok(neuron.clone())
     }
 

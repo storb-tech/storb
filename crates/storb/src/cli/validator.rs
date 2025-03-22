@@ -73,7 +73,7 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
         scores_state_file,
         moving_average_alpha: *get_config_value!(
             args,
-            "validator.neuron.moving_average_alpha",
+            "neuron.moving_average_alpha",
             f64,
             &settings.validator.neuron.moving_average_alpha
         ),
