@@ -106,7 +106,7 @@ pub async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<C
     info!("Creating QUIC client connection to {}", addr);
 
     let connection = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, async {
-        let conn = client.connect(addr, "localhost")?;
+        let conn = client.connect(addr, "0.0.0.0")?;
         match conn.await {
             Ok(connection) => Ok(connection),
             Err(e) => {
