@@ -9,7 +9,6 @@ use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 use expanduser::expanduser;
-use libp2p::Multiaddr;
 
 pub fn common_args() -> Vec<Arg> {
     vec![

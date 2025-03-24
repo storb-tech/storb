@@ -33,8 +33,10 @@ pub struct MinerState {
 /// # Returns
 /// - A ServerConfig containing the server configuration with the self-signed cert
 /// - An error if server configuration fails
-fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
-    let cert = generate_simple_self_signed(vec!["localhost".into()])?;
+fn configure_server(
+    external_ip: String,
+) -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'static>> {
+    let cert = generate_simple_self_signed(vec!["localhost".into(), external_ip])?;
     let cert_der = cert.cert;
     let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
@@ -45,7 +47,7 @@ fn configure_server() -> Result<ServerConfig, Box<dyn Error + Send + Sync + 'sta
 
 async fn main(config: MinerConfig) -> Result<()> {
     info!("Configuring miner server...");
-    let server_config = configure_server().unwrap();
+    let server_config = configure_server(config.clone().neuron_config.external_ip).unwrap();
 
     let miner = Arc::new(Mutex::new(Miner::new(config.clone()).await.unwrap()));
 
