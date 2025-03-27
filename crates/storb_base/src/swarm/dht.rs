@@ -245,6 +245,15 @@ impl StorbDHT {
             }
         }
 
+        match swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => {
+                info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+            }
+            Err(e) => {
+                error!("Failed to initiate Kademlia bootstrap: {:?}", e);
+            }
+        }
+
         Ok((
             Self {
                 swarm,
@@ -473,14 +482,7 @@ impl StorbDHT {
                                         error!("Failed to dial bootstrap node {}: {:?}", addr, err);
                                     }
                                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                                    match self.swarm.behaviour_mut().kademlia.bootstrap() {
-                                         Ok(query_id) => {
-                                             info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
-                                         }
-                                         Err(e) => {
-                                             error!("Failed to initiate Kademlia bootstrap: {:?}", e);
-                                         }
-                                     }
+
                                 } else {
                                     debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
                                 }
