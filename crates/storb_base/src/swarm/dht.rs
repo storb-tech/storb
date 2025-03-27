@@ -530,6 +530,30 @@ impl StorbDHT {
                                 }
                                 StorbEvent::Identify(event) => {
                                     trace!("Identify event: {:?}", event);
+                                    match *event {
+                                        identify::Event::Received { connection_id: _, peer_id, info } => {
+                                            info!(
+                                                "Identify::Received from {}: ListenAddrs: {:?}, ObservedAddr: {:?}, Protocols: {:?}",
+                                                peer_id, info.listen_addrs, info.observed_addr, info.protocols
+                                            );
+                                            for addr in info.listen_addrs {
+                                                // Ensure the address is usable
+                                                if addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
+                                                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                                                    debug!("Added Kademlia address for {}: {}", peer_id, addr);
+                                                }
+                                            }
+                                        },
+                                        identify::Event::Sent { connection_id, peer_id } => {
+                                            debug!("Identify::Sent to {}: {:?}", peer_id, connection_id);
+                                        }
+                                        identify::Event::Pushed { connection_id: _, peer_id, info } => {
+                                            debug!("Identify::Pushed to {}: {:?}", peer_id, info);
+                                        }
+                                        identify::Event::Error { connection_id: _, peer_id, error } => {
+                                            error!("Identify::Error with {}: {:?}", peer_id, error);
+                                        }
+                                    }
                                 }
                                 StorbEvent::Ping(event) => {
                                     trace!("Ping event: {:?}", event);
