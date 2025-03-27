@@ -467,6 +467,7 @@ impl StorbDHT {
                                     if let Err(err) = self.swarm.dial(addr.clone()) {
                                         error!("Failed to dial bootstrap node {}: {:?}", addr, err);
                                     }
+                                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                                 } else {
                                     debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
                                 }
