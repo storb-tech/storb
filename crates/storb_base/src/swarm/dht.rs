@@ -538,13 +538,9 @@ impl StorbDHT {
                                                 "Identify::Received from {}: ListenAddrs: {:?}, ObservedAddr: {:?}, Protocols: {:?}",
                                                 peer_id, info.listen_addrs, info.observed_addr, info.protocols
                                             );
-                                            for addr in info.listen_addrs {
                                                 // Ensure the address is usable
-                                                if addr.iter().any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_))) {
-                                                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                                                    debug!("Added Kademlia address for {}: {}", peer_id, addr);
-                                                }
-                                            }
+                                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, info.observed_addr.clone());
+                                            debug!("Added Kademlia address for {}: {}", peer_id, info.observed_addr);
                                         },
                                         identify::Event::Sent { connection_id, peer_id } => {
                                             debug!("Identify::Sent to {}: {:?}", peer_id, connection_id);
