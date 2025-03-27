@@ -13,7 +13,7 @@ use libp2p::kad::{
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
@@ -304,10 +304,15 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::Bootstrap(Err(e)) => {
-                    debug!("Bootstrap failed: {:?}", e);
-                    if let Some(QueryChannel::Bootstrap(ch)) = queries.remove(&query_id) {
-                        let _ = ch.send(Err(e.into()));
-                    }
+                    error!("Bootstrap query failed: {:?}", e); // Logged as error now
+                                                               // *** Potential Fix: Signal done anyway to prevent deadlock ***
+                                                               // This allows operations to proceed, though DHT might be poorly bootstrapped.
+                                                               // Better long-term solutions might involve retries or checking table size.
+                    warn!("Signalling bootstrap as 'done' despite error to prevent deadlock.");
+                    self.bootstrap_done_sender.send(true).unwrap_or_else(|e| {
+                        debug!("Failed to signal bootstrap completion after error: {:?}", e)
+                    });
+                    // Remove query channel if you track the specific bootstrap query ID
                 }
                 QueryResult::GetRecord(Ok(res)) => {
                     trace!("Getting Record");
@@ -468,6 +473,14 @@ impl StorbDHT {
                                         error!("Failed to dial bootstrap node {}: {:?}", addr, err);
                                     }
                                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                                    match self.swarm.behaviour_mut().kademlia.bootstrap() {
+                                         Ok(query_id) => {
+                                             info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+                                         }
+                                         Err(e) => {
+                                             error!("Failed to initiate Kademlia bootstrap: {:?}", e);
+                                         }
+                                     }
                                 } else {
                                     debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
                                 }
