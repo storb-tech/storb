@@ -9,6 +9,8 @@ use tracing::{debug, error, info};
 
 use crate::constants::DB_MPSC_BUFFER_SIZE;
 
+use super::models;
+
 /// Configuration for the RocksDBStore.
 ///
 /// This configuration includes the path to the database,
@@ -314,6 +316,29 @@ impl RocksDBStore {
                         format!("Column family not found: {}", e),
                     )
                 })?;
+
+                match models::deserialize_dht_value(&val) {
+                    Ok(models::DHTValue::Chunk(chunk)) => {
+                        debug!(
+                            "Applying Put operation for Chunk [CF: {}, Key: '{}']:\n{:#?}",
+                            cf.name(),
+                            String::from_utf8_lossy(&key),
+                            chunk
+                        );
+                    }
+                    Ok(_) => {
+                        debug!(
+                            "Applying Put operation for DHTValue [CF: {}, Key: '{}']",
+                            cf.name(),
+                            String::from_utf8_lossy(&key)
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to deserialize DHT value: {}", e);
+                        return Err(Error::new(ErrorKind::InvalidData, e));
+                    }
+                }
+
                 batch.put_cf(cf_handle, &key, &val);
             }
             DbOp::Del { cf, key } => {
