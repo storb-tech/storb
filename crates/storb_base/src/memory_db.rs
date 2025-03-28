@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{Connection, DatabaseName};
+use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::{sync::Mutex, time::interval};
 use tracing::info;
+
+use crate::swarm::models;
 
 pub struct MemoryDb {
     pub conn: Arc<Mutex<Connection>>,
@@ -43,6 +46,34 @@ impl MemoryDb {
             }
         });
     }
+}
+
+// Inserts chunk DHT value into the SQLite DB
+pub async fn insert_chunk_dht_value(
+    chunk_dht_value: models::ChunkDHTValue,
+    db_conn: Arc<Mutex<Connection>>,
+) -> Result<()> {
+    let conn = db_conn.lock().await;
+    let chunk_hash = chunk_dht_value.chunk_hash.as_ref(); // TODO: error handle
+    let vali_id = chunk_dht_value.validator_id.0 as i64;
+    let serialized_piece_hashes = bincode::serialize(&chunk_dht_value.piece_hashes)?;
+    // TODO: do we really want to replace?
+    let mut stmt = conn.prepare(
+        "INSERT OR REPLACE INTO chunks (chunk_hash, validator_id, piece_hashes, chunk_idx, k, m, chunk_size, padlen, original_chunk_size, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )?;
+    stmt.execute((
+        chunk_hash,
+        vali_id,
+        serialized_piece_hashes,
+        chunk_dht_value.chunk_idx as i64,
+        chunk_dht_value.k as i64,
+        chunk_dht_value.m as i64,
+        chunk_dht_value.chunk_size as i64,
+        chunk_dht_value.padlen as i64,
+        chunk_dht_value.original_chunk_size as i64,
+        chunk_dht_value.signature.as_bytes_ref(),
+    ))?;
+    Ok(())
 }
 
 #[cfg(test)]

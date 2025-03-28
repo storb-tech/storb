@@ -9,6 +9,7 @@ path = "src/lib.rs"
 name = "base"
 
 [dependencies]
+anyhow.workspace = true
 axum.workspace = true
 bimap.workspace = true
 bincode.workspace = true
@@ -25,6 +26,7 @@ rand.workspace = true
 reqwest.workspace = true
 rocksdb.workspace = true
 rustls.workspace = true
+rusqlite.workspace = true
 subxt.workspace = true
 serde.workspace = true
 serde_json.workspace = true

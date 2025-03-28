@@ -12772,6 +12772,7 @@ dependencies = [
 name = "storb_base"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "bimap",
  "bincode",
@@ -12787,6 +12788,7 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rocksdb",
+ "rusqlite",
  "rustls",
  "serde",
  "serde_json",

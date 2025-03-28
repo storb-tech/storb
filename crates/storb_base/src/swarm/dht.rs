@@ -17,6 +17,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
+use crate::memory_db::MemoryDb;
 
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
 ///
@@ -153,6 +154,7 @@ impl StorbDHT {
     /// * `keys` - Local identity keypair.
     pub fn new(
         dht_dir: PathBuf,
+        mem_db: Option<Arc<MemoryDb>>,
         port: u16,
         bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
@@ -166,11 +168,14 @@ impl StorbDHT {
 
         // Create the RocksDB store and our custom StorbStore.
         // (Propagate errors instead of panicking.)
-        let db = db::RocksDBStore::new(db::RocksDBConfig {
-            path: dht_dir,
-            max_batch_delay: Duration::from_millis(10),
-            max_batch_size: 100,
-        })?;
+        let db = db::RocksDBStore::new(
+            db::RocksDBConfig {
+                path: dht_dir,
+                max_batch_delay: Duration::from_millis(10),
+                max_batch_size: 100,
+            },
+            mem_db,
+        )?;
 
         let store = StorbStore::new(
             std::sync::Arc::new(db),

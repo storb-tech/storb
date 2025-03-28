@@ -20,7 +20,7 @@ pub struct Miner {
 impl Miner {
     pub async fn new(config: MinerConfig) -> Result<Self, NeuronError> {
         let neuron_config = config.neuron_config.clone();
-        let neuron = BaseNeuron::new(neuron_config).await?;
+        let neuron = BaseNeuron::new(neuron_config, None).await?;
         let miner = Miner { config, neuron };
         Ok(miner)
     }
