@@ -2,14 +2,16 @@ use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use libp2p::kad::{PeerRecord, Record};
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::DB_MPSC_BUFFER_SIZE;
 
 use super::models;
+use super::record::StorbRecord;
 
 /// Configuration for the RocksDBStore.
 ///
@@ -317,25 +319,46 @@ impl RocksDBStore {
                     )
                 })?;
 
-                match models::deserialize_dht_value(&val) {
-                    Ok(models::DHTValue::Chunk(chunk)) => {
-                        debug!(
-                            "Applying Put operation for Chunk [CF: {}, Key: '{}']:\n{:#?}",
+                match bincode::deserialize::<StorbRecord>(&val) {
+                    Ok(storb_record) => {
+                        // Step 2: Try deserializing the inner Record's value into a DHTValue
+                        match models::deserialize_dht_value(&storb_record.value) {
+                            Ok(models::DHTValue::Chunk(chunk_data)) => {
+                                // Success! Log the human-readable Chunk.
+                                debug!(
+                                    "Applying Put for Chunk [CF: {}, Key: '{}']:\n{:#?}",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key),
+                                    chunk_data
+                                );
+                            }
+                            Ok(_) => {
+                                // Inner value deserialized, but wasn't a chunk.
+                                trace!(
+                                    "Applying Put for non-Chunk DHTValue [CF: {}, Key: '{}'] (contained in StorbRecord)",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key)
+                                );
+                            }
+                            Err(inner_err) => {
+                                // Failed to deserialize the inner Record's value.
+                                warn!(
+                                    "Failed to deserialize inner Record value [CF: {}, Key: '{}', InnerError: {}] (contained in StorbRecord). Storing raw StorbRecord.",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key),
+                                    inner_err
+                                );
+                            }
+                        }
+                    }
+                    Err(outer_err) => {
+                        // Failed to deserialize the outer StorbRecord wrapper.
+                        warn!(
+                            "Failed to deserialize StorbRecord wrapper during Put apply_op [CF: {}, Key: '{}', OuterError: {}]. Storing raw bytes.",
                             cf.name(),
                             String::from_utf8_lossy(&key),
-                            chunk
+                            outer_err
                         );
-                    }
-                    Ok(_) => {
-                        debug!(
-                            "Applying Put operation for DHTValue [CF: {}, Key: '{}']",
-                            cf.name(),
-                            String::from_utf8_lossy(&key)
-                        );
-                    }
-                    Err(e) => {
-                        error!("Failed to deserialize DHT value: {}", e);
-                        return Err(Error::new(ErrorKind::InvalidData, e));
                     }
                 }
 
