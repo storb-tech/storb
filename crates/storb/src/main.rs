@@ -55,6 +55,7 @@ pub fn main() -> Result<()> {
     match matches.subcommand() {
         Some(("miner", cmd)) => cli::miner::exec(cmd, &settings)?,
         Some(("validator", cmd)) => cli::validator::exec(cmd, &settings)?,
+        Some(("apikey", cmd)) => cli::apikey_manager::handle_command(cmd)?,
         _ => unreachable!(),
     }
 

@@ -19,6 +19,7 @@ storb_validator.workspace = true
 
 # Third party
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 config.workspace = true
 crabtensor.workspace = true
