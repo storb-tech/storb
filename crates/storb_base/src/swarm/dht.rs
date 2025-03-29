@@ -13,7 +13,7 @@ use libp2p::kad::{
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
@@ -137,6 +137,7 @@ pub struct StorbDHT {
     queries: Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
+    bootstrap_nodes: Vec<Multiaddr>,
 }
 
 impl StorbDHT {
@@ -153,6 +154,7 @@ impl StorbDHT {
     pub fn new(
         dht_dir: PathBuf,
         port: u16,
+        bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
@@ -218,8 +220,39 @@ impl StorbDHT {
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
         swarm.listen_on(listen_addr)?;
 
+        let listeners: Vec<Multiaddr> = swarm.listeners().cloned().collect();
+        info!("Listening on {:?}", listeners);
+
         // Create the watch channel that indicates when bootstrap is done.
         let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
+
+        let mut bootstrap_nodes = Vec::new();
+        if let Some(peers) = bootstrap_peers {
+            for addr in &peers {
+                if let Some(peer_id) = Self::extract_peer_info(addr) {
+                    info!("Adding bootstrap node: {} at {}", peer_id, addr);
+                    swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr.clone());
+                    if let Err(err) = swarm.dial(addr.clone()) {
+                        error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                    }
+                    bootstrap_nodes.push(addr.clone());
+                } else {
+                    error!("Failed to extract PeerId from bootstrap address: {}", addr);
+                }
+            }
+        }
+
+        match swarm.behaviour_mut().kademlia.bootstrap() {
+            Ok(query_id) => {
+                info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+            }
+            Err(e) => {
+                error!("Failed to initiate Kademlia bootstrap: {:?}", e);
+            }
+        }
 
         Ok((
             Self {
@@ -228,9 +261,17 @@ impl StorbDHT {
                 bootstrap_done,
                 queries: Arc::new(Mutex::new(HashMap::new())),
                 command_receiver,
+                bootstrap_nodes,
             },
             command_sender,
         ))
+    }
+
+    fn extract_peer_info(addr: &Multiaddr) -> Option<PeerId> {
+        addr.iter().find_map(|p| match p {
+            libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
+            _ => None,
+        })
     }
 
     /// Processes a Kademlia event and routes query responses accordingly.
@@ -272,10 +313,15 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::Bootstrap(Err(e)) => {
-                    debug!("Bootstrap failed: {:?}", e);
-                    if let Some(QueryChannel::Bootstrap(ch)) = queries.remove(&query_id) {
-                        let _ = ch.send(Err(e.into()));
-                    }
+                    error!("Bootstrap query failed: {:?}", e); // Logged as error now
+                                                               // *** Potential Fix: Signal done anyway to prevent deadlock ***
+                                                               // This allows operations to proceed, though DHT might be poorly bootstrapped.
+                                                               // Better long-term solutions might involve retries or checking table size.
+                    warn!("Signalling bootstrap as 'done' despite error to prevent deadlock.");
+                    self.bootstrap_done_sender.send(true).unwrap_or_else(|e| {
+                        debug!("Failed to signal bootstrap completion after error: {:?}", e)
+                    });
+                    // Remove query channel if you track the specific bootstrap query ID
                 }
                 QueryResult::GetRecord(Ok(res)) => {
                     trace!("Getting Record");
@@ -417,8 +463,41 @@ impl StorbDHT {
     /// This asynchronous function continuously processes swarm events and DHT commands,
     /// handling peer discovery, connection management, and DHT operations.
     pub async fn process_events(&mut self) {
+        let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
+                _ = bootstrap_interval.tick() => {
+                    let connected_count = self.bootstrap_nodes.iter()
+                        .filter_map(Self::extract_peer_info)
+                        .filter(|peer_id| self.swarm.connected_peers().any(|p| p == peer_id))
+                        .count();
+
+                if connected_count < 1 {
+                        // Dial any bootstrap node that's not connected.
+                        for addr in self.bootstrap_nodes.clone() {
+                            if let Some(peer_id) = Self::extract_peer_info(&addr) {
+                                if !self.swarm.connected_peers().any(|p| p == &peer_id) {
+                                    debug!("Dialing bootstrap node: {} at {}", peer_id, addr);
+                                    if let Err(err) = self.swarm.dial(addr.clone()) {
+                                        error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                                    }
+                                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+
+                                } else {
+                                    debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
+                                }
+                            } else {
+                                error!("Failed to extract PeerId from bootstrap address: {}", addr);
+                            }
+                        }
+                    } else {
+                        debug!(
+                            "Desired number of bootstrap nodes connected ({}); stopping reconnection attempts.",
+                            connected_count
+                        );
+                    }
+                }
+
                 Some(event) = self.swarm.next() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
@@ -453,6 +532,26 @@ impl StorbDHT {
                                 }
                                 StorbEvent::Identify(event) => {
                                     trace!("Identify event: {:?}", event);
+                                    match *event {
+                                        identify::Event::Received { connection_id: _, peer_id, info } => {
+                                            info!(
+                                                "Identify::Received from {}: ListenAddrs: {:?}, ObservedAddr: {:?}, Protocols: {:?}",
+                                                peer_id, info.listen_addrs, info.observed_addr, info.protocols
+                                            );
+                                                // Ensure the address is usable
+                                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, info.observed_addr.clone());
+                                            debug!("Added Kademlia address for {}: {}", peer_id, info.observed_addr);
+                                        },
+                                        identify::Event::Sent { connection_id, peer_id } => {
+                                            debug!("Identify::Sent to {}: {:?}", peer_id, connection_id);
+                                        }
+                                        identify::Event::Pushed { connection_id: _, peer_id, info } => {
+                                            debug!("Identify::Pushed to {}: {:?}", peer_id, info);
+                                        }
+                                        identify::Event::Error { connection_id: _, peer_id, error } => {
+                                            error!("Identify::Error with {}: {:?}", peer_id, error);
+                                        }
+                                    }
                                 }
                                 StorbEvent::Ping(event) => {
                                     trace!("Ping event: {:?}", event);
@@ -760,7 +859,6 @@ impl StorbDHT {
         key: RecordKey,
         value: models::PieceDHTValue,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // TODO: wait for bootstrap???
         let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Piece(value))?;

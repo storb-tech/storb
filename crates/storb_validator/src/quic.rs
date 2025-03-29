@@ -25,7 +25,7 @@ pub async fn establish_miner_connections(
     let mut connection_futures = Vec::new();
 
     for quic_addr in quic_addresses {
-        let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
             .map_err(|e| anyhow!(e.to_string()))?;
         let socket_addr = multiaddr_to_socketaddr(&quic_addr)
             .context("Could not get SocketAddr from Multiaddr. Ensure that the Multiaddr is not missing any components")?;
@@ -106,7 +106,7 @@ pub async fn create_quic_client(client: &Endpoint, addr: SocketAddr) -> Result<C
     info!("Creating QUIC client connection to {}", addr);
 
     let connection = tokio::time::timeout(QUIC_CONNECTION_TIMEOUT, async {
-        let conn = client.connect(addr, "localhost")?;
+        let conn = client.connect(addr, "0.0.0.0")?;
         match conn.await {
             Ok(connection) => Ok(connection),
             Err(e) => {

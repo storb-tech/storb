@@ -137,19 +137,7 @@ pub fn common_args() -> Vec<Arg> {
             .help("DHT port")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("dht.bootstrap_ip")
-            .long("dht.bootstrap-ip")
-            .value_name("ip")
-            .help("Bootstrap node IPv4 address for the DHT")
-            .action(ArgAction::Set)
-            .global(true),
-        Arg::new("dht.bootstrap_port")
-            .long("dht.bootstrap-port")
-            .value_name("port")
-            .value_parser(value_parser!(u16))
-            .help("Bootstrap node port for the DHT")
-            .action(ArgAction::Set)
-            .global(true),
+        // NOTE: dht.bootstrap_nodes can only be used in config file
     ]
 }
 
@@ -191,19 +179,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
 
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
-        bootstrap_ip: get_config_value!(
-            args,
-            "dht.bootstrap_ip",
-            String,
-            &settings.dht.bootstrap_ip
-        )
-        .clone(),
-        bootstrap_port: *get_config_value!(
-            args,
-            "dht.bootstrap_port",
-            u16,
-            &settings.dht.bootstrap_port
-        ),
+        bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
 
     Ok(BaseNeuronConfig {
