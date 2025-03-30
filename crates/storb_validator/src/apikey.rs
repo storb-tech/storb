@@ -29,6 +29,7 @@ pub struct ApiKeyConfig {
     pub download_limit: Option<u64>,
 }
 
+#[derive(Debug)]
 pub struct ApiKeyManager {
     conn: Arc<Mutex<Connection>>,
 }
@@ -185,5 +186,33 @@ impl ApiKeyManager {
         let conn = self.conn.lock().await;
         let rows = conn.execute("DELETE FROM api_keys WHERE key = ?", [key])?;
         Ok(rows > 0)
+    }
+
+    pub async fn check_quota(
+        &self,
+        key: &str,
+        upload_bytes: u64,
+        download_bytes: u64,
+    ) -> Result<bool> {
+        let api_key = match self.validate_key(key).await? {
+            Some(key) => key,
+            None => return Ok(false),
+        };
+
+        // Check upload quota
+        if let Some(upload_limit) = api_key.upload_limit {
+            if api_key.upload_used + upload_bytes > upload_limit {
+                return Ok(false);
+            }
+        }
+
+        // Check download quota
+        if let Some(download_limit) = api_key.download_limit {
+            if api_key.download_used + download_bytes > download_limit {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 }
