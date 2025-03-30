@@ -331,13 +331,6 @@ impl RocksDBStore {
                         // Step 2: Try deserializing the inner Record's value into a DHTValue
                         match models::deserialize_dht_value(&storb_record.value) {
                             Ok(models::DHTValue::Chunk(chunk_data)) => {
-                                // Success! Log the human-readable Chunk.
-                                debug!(
-                                    "Applying Put for Chunk [CF: {}, Key: '{}']:\n{:#?}",
-                                    cf.name(),
-                                    String::from_utf8_lossy(&key),
-                                    chunk_data
-                                );
                                 // insert the chunk into the memory db
                                 if let Some(mem_db) = mem_db {
                                     let mem_db = mem_db.clone();
@@ -351,14 +344,7 @@ impl RocksDBStore {
                                     });
                                 }
                             }
-                            Ok(_) => {
-                                // Inner value deserialized, but wasn't a chunk.
-                                trace!(
-                                    "Applying Put for non-Chunk DHTValue [CF: {}, Key: '{}'] (contained in StorbRecord)",
-                                    cf.name(),
-                                    String::from_utf8_lossy(&key)
-                                );
-                            }
+                            Ok(_) => {}
                             Err(inner_err) => {
                                 // Failed to deserialize the inner Record's value.
                                 warn!(

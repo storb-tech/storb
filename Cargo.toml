@@ -26,6 +26,7 @@ subxt = "=0.38.0"
 # Third party
 anyhow = "1.0.95"
 axum = { version = "0.8.1", features = ["multipart", "macros"] }
+async-trait = "0.1"
 bimap = "0.6.3"
 bincode = "1.3.3"
 blake3 = "1.5.5"

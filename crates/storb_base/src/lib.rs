@@ -122,7 +122,7 @@ pub struct LocalNodeInfo {
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
-    pub neurons: Vec<NeuronInfoLite<AccountId>>,
+    pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
     pub address_book: AddressBook,
     pub peer_node_uid: bimap::BiMap<PeerId, u16>,
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
@@ -156,6 +156,11 @@ impl BaseNeuron {
             Self::get_subtensor_connection(config.subtensor.insecure, &config.subtensor.address)
                 .await?;
 
+        let neurons_arc = Arc::new(RwLock::new(Vec::new()));
+        let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
+            neurons: neurons_arc.clone(), // Clone the Arc for the verifier
+        });
+
         let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
@@ -182,6 +187,10 @@ impl BaseNeuron {
             };
 
         let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+        let neurons_arc = Arc::new(RwLock::new(Vec::new()));
+        let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
+            neurons: neurons_arc.clone(),
+        });
 
         let (dht_og, command_sender) = StorbDHT::new(
             config.dht_dir.clone(),
@@ -189,6 +198,7 @@ impl BaseNeuron {
             config.dht.port,
             bootstrap_nodes,
             libp2p_keypair.into(),
+            peer_verifier,
         )
         .expect("Failed to create StorbDHT instance");
 
@@ -227,7 +237,7 @@ impl BaseNeuron {
         let neuron = BaseNeuron {
             config: config.clone(),
             command_sender,
-            neurons: Vec::new(),
+            neurons: neurons_arc,
             address_book: Arc::new(RwLock::new(HashMap::new())),
             peer_node_uid: bimap::BiMap::new(),
             subtensor,

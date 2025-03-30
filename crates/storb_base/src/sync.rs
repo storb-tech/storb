@@ -85,7 +85,7 @@ impl Synchronizable for BaseNeuron {
 
         // TODO: error out if cant access chain when calling above function
         let neurons: Vec<NeuronInfoLite<AccountId>> = runtime_api.call(neurons_payload).await?;
-        let original_neurons: Vec<NeuronInfoLite<AccountId>> = self.neurons.clone();
+        let original_neurons: Vec<NeuronInfoLite<AccountId>> = self.neurons.read().await.clone();
 
         info!("Got neurons from metagraph");
 
@@ -107,7 +107,8 @@ impl Synchronizable for BaseNeuron {
 
             changed_neurons.append(&mut new_neurons);
 
-            self.neurons = neurons.clone();
+            let mut neurons_gaurd = self.neurons.write().await;
+            *neurons_gaurd = neurons.clone();
         } else if !original_neurons.is_empty() {
             changed_neurons = neurons
                 .iter()
@@ -116,7 +117,8 @@ impl Synchronizable for BaseNeuron {
                 .map(|(curr, _)| curr.uid)
                 .collect();
 
-            self.neurons = neurons.clone();
+            let mut neurons_gaurd = self.neurons.write().await;
+            *neurons_gaurd = neurons.clone();
         }
 
         info!("Updated local neurons state");
