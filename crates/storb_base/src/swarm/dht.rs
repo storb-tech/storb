@@ -45,7 +45,7 @@ impl PeerVerifier for BittensorPeerVerifier {
         &self,
         public_key: libp2p::identity::PublicKey,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        let public_key_bytes = public_key.clone().try_into_ecdsa().unwrap().to_bytes();
+        let public_key_bytes = public_key.clone().try_into_ed25519()?.to_bytes();
         let peer_id = PeerId::from_public_key(&public_key);
         info!("Verifying peer {}", peer_id);
 
