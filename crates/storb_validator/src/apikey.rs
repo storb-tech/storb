@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -131,16 +131,10 @@ impl ApiKeyManager {
             Ok(ApiKey {
                 key: row.get(0)?,
                 name: row.get(1)?,
-                created_at: DateTime::from_naive_utc_and_offset(
-                    NaiveDateTime::from_timestamp_opt(row.get(2)?, 0).unwrap(),
-                    Utc,
-                ),
-                expires_at: row.get::<_, Option<i64>>(3)?.map(|ts| {
-                    DateTime::from_naive_utc_and_offset(
-                        NaiveDateTime::from_timestamp_opt(ts, 0).unwrap(),
-                        Utc,
-                    )
-                }),
+                created_at: DateTime::from_timestamp(row.get(2)?, 0).unwrap_or_default(),
+                expires_at: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|ts| DateTime::from_timestamp(ts, 0).unwrap_or_default()),
                 rate_limit: row.get(4)?,
                 upload_limit: row.get(5)?,
                 download_limit: row.get(6)?,
@@ -188,16 +182,10 @@ impl ApiKeyManager {
             Ok(ApiKey {
                 key: row.get(0)?,
                 name: row.get(1)?,
-                created_at: DateTime::from_naive_utc_and_offset(
-                    NaiveDateTime::from_timestamp_opt(row.get(2)?, 0).unwrap(),
-                    Utc,
-                ),
-                expires_at: row.get::<_, Option<i64>>(3)?.map(|ts| {
-                    DateTime::from_naive_utc_and_offset(
-                        NaiveDateTime::from_timestamp_opt(ts, 0).unwrap(),
-                        Utc,
-                    )
-                }),
+                created_at: DateTime::from_timestamp(row.get(2)?, 0).unwrap_or_default(),
+                expires_at: row
+                    .get::<_, Option<i64>>(3)?
+                    .map(|ts| DateTime::from_timestamp(ts, 0).unwrap_or_default()),
                 rate_limit: row.get(4)?,
                 upload_limit: row.get(5)?,
                 download_limit: row.get(6)?,
