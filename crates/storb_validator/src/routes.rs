@@ -1,3 +1,5 @@
+use base::swarm;
+use libp2p::kad::RecordKey;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock; // Changed from std::sync::RwLock
@@ -131,6 +133,20 @@ pub async fn upload_file(
     {
         Ok(infohash) => {
             // Update API key usage after successful upload
+            // Log API usage after successful upload
+            api_key_manager
+                .write()
+                .await
+                .log_api_usage(&api_key, "/file", content_length, 0)
+                .await
+                .map_err(|e| {
+                    error!("Failed to log API usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to log API usage".to_string(),
+                    )
+                })?;
+
             api_key_manager
                 .write()
                 .await // Changed from expect()
@@ -205,23 +221,71 @@ pub async fn download_file(
         ),
     ]);
 
+    // get tracker info
+    let key = RecordKey::new(&infohash.as_bytes().to_vec());
+    let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(processor.dht_sender.clone(), key)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error getting tracker entry: {}", e),
+            )
+        })?;
+    let tracker = tracker_res.ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Tracker entry not found".to_string(),
+    ))?;
+
+    // get file size
+    let content_length = tracker.length;
+
+    // Check quota before processing
+    let key_manager = api_key_manager.read().await;
+    let has_quota = key_manager
+        .check_quota(&api_key, 0, content_length)
+        .await
+        .map_err(|e| {
+            error!("Failed to check API key quota: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to check quota".to_string(),
+            )
+        })?;
+    if !has_quota {
+        return Err((StatusCode::FORBIDDEN, "Download quota exceeded".to_string()));
+    }
+    drop(key_manager);
+
+    // Process the download
     match processor.process_download(infohash.clone()).await {
         Ok(body) => {
-            // let content_length = body.size_hint().exact().unwrap_or(0) as u64;
+            // Update API key usage after successful download
+            api_key_manager
+                .write()
+                .await
+                .update_usage(&api_key, 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update API key usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to update API key usage".to_string(),
+                    )
+                })?;
 
-            //             // Update API key usage after successful download
-            //             api_key_manager
-            //                     .write()
-            //                     .await  // Changed from expect()
-            //                     .update_usage(&api_key, 0, content_length)
-            //                     .await
-            //                     .map_err(|e| {
-            //                             error!("Failed to update API key usage: {}", e);
-            //         (
-            //                                     StatusCode::INTERNAL_SERVER_ERROR,
-            //                                     "Failed to update API key usage".to_string(),
-            //         )
-            //                     })?;
+            // Log API usage after successful download start
+            api_key_manager
+                .write()
+                .await
+                .log_api_usage(&api_key, "/file", 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to log API usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to log API usage".to_string(),
+                    )
+                })?;
 
             Ok((headers, body))
         }

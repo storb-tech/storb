@@ -30,6 +30,15 @@ pub struct ApiKeyConfig {
 }
 
 #[derive(Debug)]
+pub struct ApiUsageLog {
+    pub key: String,
+    pub endpoint: String,
+    pub timestamp: DateTime<Utc>,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+}
+
+#[derive(Debug)]
 pub struct ApiKeyManager {
     conn: Arc<Mutex<Connection>>,
 }
@@ -38,6 +47,7 @@ impl ApiKeyManager {
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
+        // Create API keys table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS api_keys (
                 key TEXT PRIMARY KEY,
@@ -50,6 +60,27 @@ impl ApiKeyManager {
                 upload_used INTEGER NOT NULL DEFAULT 0,
                 download_used INTEGER NOT NULL DEFAULT 0
             )",
+            [],
+        )?;
+
+        // Create usage logs table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                upload_bytes INTEGER NOT NULL DEFAULT 0,
+                download_bytes INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(key) REFERENCES api_keys(key) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
+        // Create index for efficient rate limit checking
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_logs_key_timestamp 
+             ON api_usage_logs(key, timestamp)",
             [],
         )?;
 
@@ -214,5 +245,52 @@ impl ApiKeyManager {
         }
 
         Ok(true)
+    }
+
+    pub async fn check_rate_limit(&self, key: &str, rate_limit: u32) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let one_minute_ago = (Utc::now() - chrono::Duration::minutes(1)).timestamp();
+
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM api_usage_logs 
+             WHERE key = ? AND timestamp > ?",
+            params![key, one_minute_ago],
+            |row| row.get(0),
+        )?;
+
+        Ok(count + 1 < rate_limit as i64) // +1 for the current request
+    }
+
+    pub async fn log_api_usage(
+        &self,
+        key: &str,
+        endpoint: &str,
+        upload_bytes: u64,
+        download_bytes: u64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let now = Utc::now();
+
+        conn.execute(
+            "INSERT INTO api_usage_logs (
+                key, endpoint, timestamp, upload_bytes, download_bytes
+            ) VALUES (?, ?, ?, ?, ?)",
+            params![key, endpoint, now.timestamp(), upload_bytes, download_bytes],
+        )?;
+
+        Ok(())
+    }
+
+    // Add cleanup method for old logs
+    pub async fn cleanup_old_logs(&self, days_to_keep: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let cutoff = (Utc::now() - chrono::Duration::days(days_to_keep)).timestamp();
+
+        conn.execute(
+            "DELETE FROM api_usage_logs WHERE timestamp < ?",
+            params![cutoff],
+        )?;
+
+        Ok(())
     }
 }

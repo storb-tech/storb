@@ -8,29 +8,32 @@ use axum::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub async fn require_api_key(req: Request<Body>, next: Next) -> Result<Response, StatusCode> {
+pub async fn require_api_key(
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
     tracing::debug!("In require_api_key middleware");
 
-    // Extract API key from header
     let api_key = req
         .headers()
         .get("X-API-Key")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
             tracing::error!("No API key found in request headers");
-            StatusCode::UNAUTHORIZED
+            (StatusCode::UNAUTHORIZED, "Missing API key".to_string())
         })?;
 
-    // Get API key manager from extensions
     let api_key_manager = req
         .extensions()
         .get::<Arc<RwLock<ApiKeyManager>>>()
         .ok_or_else(|| {
             tracing::error!("ApiKeyManager not found in request extensions");
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ApiKeyManager not found".to_string(),
+            )
         })?;
 
-    // Validate API key
     let key_info = api_key_manager
         .read()
         .await
@@ -38,47 +41,39 @@ pub async fn require_api_key(req: Request<Body>, next: Next) -> Result<Response,
         .await
         .map_err(|e| {
             tracing::error!("Error validating API key: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error validating API key: {}", e),
+            )
         })?
         .ok_or_else(|| {
             tracing::error!("Invalid API key: {}", api_key);
-            StatusCode::UNAUTHORIZED
+            (StatusCode::UNAUTHORIZED, "Invalid API key".to_string())
         })?;
 
-    tracing::debug!("Key info found: {:?}", key_info);
-
-    // Check rate limit
+    // Check rate limit only
     if let Some(rate_limit) = key_info.rate_limit {
-        // TODO: Implement rate limiting
-        tracing::debug!("Rate limit found: {}", rate_limit);
-    }
+        let within_limit = api_key_manager
+            .read()
+            .await
+            .check_rate_limit(api_key, rate_limit)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check rate limit: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to check rate limit".to_string(),
+                )
+            })?;
 
-    tracing::debug!("Checking upload/download limits");
-
-    // Check upload/download limits
-    if let Some(upload_limit) = key_info.upload_limit {
-        if key_info.upload_used >= upload_limit {
-            tracing::error!(
-                "Upload limit exceeded: used={}, limit={}",
-                key_info.upload_used,
-                upload_limit
-            );
-            return Err(StatusCode::FORBIDDEN);
+        if !within_limit {
+            tracing::error!("Rate limit exceeded for API key: {}", api_key);
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded".to_string(),
+            ));
         }
     }
-
-    if let Some(download_limit) = key_info.download_limit {
-        if key_info.download_used >= download_limit {
-            tracing::error!(
-                "Download limit exceeded: used={}, limit={}",
-                key_info.download_used,
-                download_limit
-            );
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-
-    tracing::debug!("API key validated successfully");
 
     Ok(next.run(req).await)
 }
