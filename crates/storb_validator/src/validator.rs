@@ -467,7 +467,7 @@ impl Validator {
         info!("Syncing validator");
 
         let uids_to_update = self.neuron.sync_metagraph().await?;
-        let neuron_count = self.neuron.neurons.len();
+        let neuron_count = self.neuron.neurons.read().await.len();
         self.scoring_system
             .write()
             .await

@@ -18,7 +18,57 @@ use tracing::{debug, error, info, trace, warn};
 use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
 use crate::memory_db::MemoryDb;
+use crate::utils::is_valid_external_addr;
+use crate::AddressBook;
 
+#[async_trait::async_trait]
+pub trait PeerVerifier: Send + Sync {
+    /// Verifies if the peer identified by the public key is allowed.
+    /// Returns Ok(true) if allowed, Ok(false) if not allowed, Err if the check failed.
+    async fn verify_peer(
+        &self,
+        peer_id: libp2p::identity::PeerId,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>>;
+}
+
+// Public BittensorPeerVerifier implementation
+pub struct BittensorPeerVerifier {
+    pub address_book: AddressBook,
+}
+
+#[async_trait::async_trait]
+impl PeerVerifier for BittensorPeerVerifier {
+    async fn verify_peer(
+        &self,
+        peer_id: libp2p::identity::PeerId,
+    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        info!("Verifying peer {}", peer_id);
+
+        // Access the neurons list with read lock
+        let neurons_list = self.address_book.read().await;
+
+        if neurons_list.is_empty() {
+            warn!("No neurons registered in the address book. Try again later.");
+            return Ok(false);
+        }
+
+        if neurons_list.contains_key(&peer_id) {
+            // Peer is registered
+            info!(
+                "Peer {} verified: Hotkey found in registered neurons.",
+                peer_id
+            );
+            return Ok(true);
+        }
+
+        // No match found
+        warn!(
+            "Peer {} NOT verified: Hotkey not found in registered neurons.",
+            peer_id
+        );
+        Ok(false)
+    }
+}
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
 ///
 /// This behaviour aggregates multiple protocols into a single behaviour that can be used
@@ -139,6 +189,13 @@ pub struct StorbDHT {
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
     bootstrap_nodes: Vec<Multiaddr>,
+    peer_verifier: Arc<dyn PeerVerifier>,
+    /// Peers that have established a connection but haven't been identified and verified yet.
+    pending_verification: Arc<Mutex<HashSet<PeerId>>>,
+    /// Peers that have been successfully verified.
+    verified_peers: Arc<Mutex<HashSet<PeerId>>>,
+    /// Public keys received via Identify protocol. Needed for verification.
+    known_peers: Arc<Mutex<HashSet<PeerId>>>,
 }
 
 impl StorbDHT {
@@ -158,6 +215,7 @@ impl StorbDHT {
         port: u16,
         bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
+        peer_verifier: Arc<dyn PeerVerifier>,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
 
@@ -267,6 +325,10 @@ impl StorbDHT {
                 queries: Arc::new(Mutex::new(HashMap::new())),
                 command_receiver,
                 bootstrap_nodes,
+                peer_verifier,
+                pending_verification: Arc::new(Mutex::new(HashSet::new())),
+                verified_peers: Arc::new(Mutex::new(HashSet::new())),
+                known_peers: Arc::new(Mutex::new(HashSet::new())),
             },
             command_sender,
         ))
@@ -470,6 +532,10 @@ impl StorbDHT {
     pub async fn process_events(&mut self) {
         let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
+            let peer_verifier = self.peer_verifier.clone();
+            let pending_verification = self.pending_verification.clone();
+            let verified_peers = self.verified_peers.clone();
+            let known_peers = self.known_peers.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
                     let connected_count = self.bootstrap_nodes.iter()
@@ -506,13 +572,29 @@ impl StorbDHT {
                 Some(event) = self.swarm.next() => {
                     match event {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            debug!("Swarm is listening on {:?}", address);
+                            info!("Swarm is listening on {:?}", address);
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                            debug!("Connection established with peer: {:?}", peer_id);
+                        SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, concurrent_dial_errors, established_in} => {
+                            info!(peer_id=%peer_id, connection_id=%connection_id, ?endpoint, num_established, ?established_in, ?concurrent_dial_errors, "Connection established. Adding to pending verification.");
+                            let mut pending = pending_verification.lock().await;
+                            pending.insert(peer_id);
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             debug!("Connection closed with peer: {:?}", peer_id);
+                            let mut pending = pending_verification.lock().await;
+                            pending.remove(&peer_id);
+                            drop(pending); // Release lock
+
+                            let mut verified = verified_peers.lock().await;
+                            verified.remove(&peer_id);
+                            drop(verified);
+
+                            let mut keys = known_peers.lock().await;
+                            keys.remove(&peer_id);
+                            drop(keys);
+
+                            debug!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
+                            self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                         }
                         SwarmEvent::IncomingConnection { .. } => {
                             trace!("Incoming connection");
@@ -538,14 +620,129 @@ impl StorbDHT {
                                 StorbEvent::Identify(event) => {
                                     trace!("Identify event: {:?}", event);
                                     match *event {
-                                        identify::Event::Received { connection_id: _, peer_id, info } => {
-                                            info!(
-                                                "Identify::Received from {}: ListenAddrs: {:?}, ObservedAddr: {:?}, Protocols: {:?}",
-                                                peer_id, info.listen_addrs, info.observed_addr, info.protocols
+                                        identify::Event::Received { peer_id, info, connection_id } => {
+                                            // Existing logging...
+                                                info!(
+                                                connection_id=%connection_id,
+                                                peer_id=%peer_id,
+                                                listen_addrs=?info.listen_addrs,
+                                                observed_addr=?info.observed_addr,
+                                                protocols=?info.protocols,
+                                                public_key=?info.public_key,
+                                                agent_version=?info.agent_version,
+                                                protocol_version=?info.protocol_version,
+                                                "Identify::Received"
                                             );
-                                                // Ensure the address is usable
-                                            self.swarm.behaviour_mut().kademlia.add_address(&peer_id, info.observed_addr.clone());
-                                            debug!("Added Kademlia address for {}: {}", peer_id, info.observed_addr);
+
+                                            // Store public key (as before)
+                                            {
+                                                let mut keys = known_peers.lock().await;
+                                                keys.insert(peer_id);
+                                            }
+
+                                            // Check if pending verification (as before)
+                                            let is_pending = {
+                                                    let mut pending = pending_verification.lock().await;
+                                                    pending.remove(&peer_id)
+                                            };
+
+                                            if is_pending {
+                                                info!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
+                                                let verifier = peer_verifier.clone();
+                                                let verified_peers_clone = verified_peers.clone();
+                                                let known_peers_clone = known_peers.clone();
+
+                                                match verifier.verify_peer(peer_id).await {
+                                                    Ok(true) => {
+                                                        // Peer is verified
+                                                        info!(peer_id=%peer_id, "Peer successfully verified");
+                                                        {
+                                                            let mut verified = verified_peers_clone.lock().await;
+                                                            verified.insert(peer_id);
+                                                        }
+
+                                                        // --- Add valid addresses to Kademlia ---
+                                                        debug!(peer_id=%peer_id, "Adding verified peer's valid addresses to Kademlia.");
+
+                                                        let mut potential_addrs = HashSet::new(); // Use HashSet to avoid duplicates
+                                                        // Add observed address first if potentially valid
+                                                        let observed_addr = info.observed_addr.clone();
+                                                        if is_valid_external_addr(&observed_addr) {
+                                                            potential_addrs.insert(observed_addr);
+                                                        }
+
+                                                        // Add valid listen addresses
+                                                        for addr in info.listen_addrs {
+                                                            if is_valid_external_addr(&addr) {
+                                                                potential_addrs.insert(addr);
+                                                            } else {
+                                                                trace!(peer_id=%peer_id, address=%addr, "Skipping invalid/local listen address for Kademlia.");
+                                                            }
+                                                        }
+
+                                                        if potential_addrs.is_empty() {
+                                                            warn!(peer_id=%peer_id, "No valid external addresses found for verified peer in Identify info.");
+                                                        } else {
+                                                            let kademlia = &mut self.swarm.behaviour_mut().kademlia;
+                                                            for addr in potential_addrs {
+                                                                debug!(peer_id=%peer_id, address=%addr, "Adding address to Kademlia.");
+                                                                kademlia.add_address(&peer_id, addr);
+                                                            }
+                                                        }
+
+                                                    }
+                                                    Ok(false) => {
+                                                        // Peer failed verification - Remove from Kademlia and Disconnect (as before)
+                                                        warn!(peer_id=%peer_id, "Peer failed verification (e.g., not registered). Disconnecting and removing from Kademlia.");
+                                                        self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+                                                        let _ = self.swarm.disconnect_peer_id(peer_id);
+                                                        {
+                                                            let mut keys = known_peers_clone.lock().await;
+                                                            keys.remove(&peer_id);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        // Verification error - Remove from Kademlia and Disconnect (as before)
+                                                            error!(peer_id=%peer_id, error=%e, "Verification check failed. Disconnecting and removing peer from Kademlia.");
+                                                            self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+                                                            let _ = self.swarm.disconnect_peer_id(peer_id);
+                                                            {
+                                                                let mut keys = known_peers_clone.lock().await;
+                                                                keys.remove(&peer_id);
+                                                            }
+                                                    }
+                                                }
+                                            } else {
+                                                    // Handle non-pending peer (as before)
+                                                    trace!(peer_id=%peer_id, "Received identify info for non-pending peer.");
+                                                    let is_verified = {
+                                                        let verified = verified_peers.lock().await;
+                                                        verified.contains(&peer_id)
+                                                    };
+                                                    if is_verified {
+                                                        // Already verified, update Kademlia addresses
+                                                        debug!(peer_id=%peer_id, "Peer already verified. Ensuring Kademlia addresses are up-to-date.");
+                                                        let mut potential_addrs = HashSet::new();
+                                                        let observed_addr = info.observed_addr.clone();
+                                                        if is_valid_external_addr(&observed_addr) {
+                                                            potential_addrs.insert(observed_addr);
+                                                        }
+                                                        for addr in info.listen_addrs {
+                                                            if is_valid_external_addr(&addr) {
+                                                                potential_addrs.insert(addr);
+                                                            }
+                                                        }
+                                                        if !potential_addrs.is_empty() {
+                                                                let kademlia = &mut self.swarm.behaviour_mut().kademlia;
+                                                            for addr in potential_addrs {
+                                                                kademlia.add_address(&peer_id, addr);
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // Not pending and not verified (as before)
+                                                        warn!(peer_id=%peer_id, "Received identify info for peer that is neither pending nor verified. Ignoring.");
+                                                    }
+                                            }
                                         },
                                         identify::Event::Sent { connection_id, peer_id } => {
                                             debug!("Identify::Sent to {}: {:?}", peer_id, connection_id);

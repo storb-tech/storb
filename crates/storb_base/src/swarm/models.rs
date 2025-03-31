@@ -80,6 +80,12 @@ pub enum DHTError {
     SerializationError(#[from] bincode::Error),
 }
 
+/// Signed DHT value type.
+pub struct SignedData {
+    pub payload: Vec<u8>,
+    pub signature: KeypairSignature,
+}
+
 /// Represents a DHT value, which can be a chunk, piece, or tracker entry.
 #[derive(Debug, PartialEq)]
 pub enum DHTValue {

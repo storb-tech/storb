@@ -11,6 +11,7 @@ name = "base"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+async-trait.workspace = true
 bimap.workspace = true
 bincode.workspace = true
 blake3.workspace = true
