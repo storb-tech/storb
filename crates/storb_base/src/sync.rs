@@ -107,8 +107,8 @@ impl Synchronizable for BaseNeuron {
 
             changed_neurons.append(&mut new_neurons);
 
-            let mut neurons_gaurd = self.neurons.write().await;
-            *neurons_gaurd = neurons.clone();
+            let mut neurons_guard = self.neurons.write().await;
+            *neurons_guard = neurons.clone();
         } else if !original_neurons.is_empty() {
             changed_neurons = neurons
                 .iter()
@@ -117,8 +117,8 @@ impl Synchronizable for BaseNeuron {
                 .map(|(curr, _)| curr.uid)
                 .collect();
 
-            let mut neurons_gaurd = self.neurons.write().await;
-            *neurons_gaurd = neurons.clone();
+            let mut neurons_guard = self.neurons.write().await;
+            *neurons_guard = neurons.clone();
         }
 
         info!("Updated local neurons state");
