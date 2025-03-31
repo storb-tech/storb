@@ -1,12 +1,17 @@
+use base::swarm;
+use libp2p::kad::RecordKey;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock; // Changed from std::sync::RwLock
 
 use anyhow::Result;
-use axum::extract::{Multipart, Query};
+use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use tracing::{error, info};
 
+use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
@@ -50,6 +55,7 @@ pub async fn node_info(
 #[axum::debug_handler]
 pub async fn upload_file(
     state: axum::extract::State<ValidatorState>,
+    Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -65,6 +71,29 @@ pub async fn upload_file(
         })?;
 
     info!("Content-Length header: {} bytes", content_length);
+
+    // Get API key and update usage
+    let api_key = get_api_key(&headers)
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "API key required".to_string()))?;
+
+    // Check quota before processing
+    let key_manager = api_key_manager.read().await;
+    let has_quota = key_manager
+        .check_quota(&api_key, content_length, 0)
+        .await
+        .map_err(|e| {
+            error!("Failed to check API key quota: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+
+    if !has_quota {
+        return Err((StatusCode::FORBIDDEN, "Upload quota exceeded".to_string()));
+    }
+    drop(key_manager);
 
     let processor = UploadProcessor::new(&state).await.map_err(|e| {
         error!("Failed to initialise the upload processor: {e}");
@@ -102,7 +131,37 @@ pub async fn upload_file(
         .process_upload(stream, content_length, processor.validator_id)
         .await
     {
-        Ok(infohash) => Ok((StatusCode::OK, infohash)),
+        Ok(infohash) => {
+            // Update API key usage after successful upload
+            // Log API usage after successful upload
+            api_key_manager
+                .write()
+                .await
+                .log_api_usage(&api_key, "/file", content_length, 0)
+                .await
+                .map_err(|e| {
+                    error!("Failed to log API usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+            api_key_manager
+                .write()
+                .await // Changed from expect()
+                .update_usage(&api_key, content_length, 0)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update API key usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+            Ok((StatusCode::OK, infohash))
+        }
         Err(e) => {
             error!("The processor failed to process the upload: {e}");
             Err((
@@ -129,9 +188,14 @@ pub async fn upload_file(
 #[axum::debug_handler]
 pub async fn download_file(
     state: axum::extract::State<ValidatorState>,
-    _headers: HeaderMap,
+    Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let api_key = get_api_key(&headers)
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "API key required".to_string()))?;
+
     let infohash = params.get("infohash").ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -157,8 +221,78 @@ pub async fn download_file(
         ),
     ]);
 
+    // get tracker info
+    let key = RecordKey::new(&infohash.as_bytes().to_vec());
+    let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(processor.dht_sender.clone(), key)
+        .await
+        .map_err(|e| {
+            error!("Error getting tracker entry: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+    let tracker = tracker_res.ok_or_else(|| {
+        error!("Tracker entry not found for infohash: {}", infohash);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    // get file size
+    let content_length = tracker.length;
+
+    // Check quota before processing
+    let key_manager = api_key_manager.read().await;
+    let has_quota = key_manager
+        .check_quota(&api_key, 0, content_length)
+        .await
+        .map_err(|e| {
+            error!("Failed to check API key quota: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+    if !has_quota {
+        return Err((StatusCode::FORBIDDEN, "Download quota exceeded".to_string()));
+    }
+    drop(key_manager);
+
+    // Process the download
     match processor.process_download(infohash.clone()).await {
-        Ok(body) => Ok((headers, body)),
+        Ok(body) => {
+            // Update API key usage after successful download
+            api_key_manager
+                .write()
+                .await
+                .update_usage(&api_key, 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update API key usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+            // Log API usage after successful download start
+            api_key_manager
+                .write()
+                .await
+                .log_api_usage(&api_key, "/file", 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to log API usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+            Ok((headers, body))
+        }
         Err(e) => {
             error!("The processor failed to process the upload: {:?}", e);
             Err((
@@ -167,4 +301,11 @@ pub async fn download_file(
             ))
         }
     }
+}
+
+async fn get_api_key(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }

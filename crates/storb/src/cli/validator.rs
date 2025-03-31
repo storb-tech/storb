@@ -15,10 +15,16 @@ pub fn cli() -> Command {
     Command::new("validator")
         .about("Run a Storb validator")
         .args([
+            // Validator settings
             Arg::new("scores_state_file")
                 .long("scores-state-file")
                 .value_name("path")
                 .help("The path to the scores state file")
+                .action(ArgAction::Set),
+            Arg::new("api_keys_db")
+                .long("api-keys-db")
+                .value_name("path")
+                .help("The path to the API keys database")
                 .action(ArgAction::Set),
             // Neuron settings
             Arg::new("neuron.num_concurrent_forwards")
@@ -66,6 +72,12 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
         String,
         settings.validator.scores_state_file
     ))?;
+    let api_keys_db = expanduser(get_config_value!(
+        args,
+        "api_keys_db",
+        String,
+        settings.validator.api_keys_db
+    ))?;
 
     // Get validator config with CLI overrides
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
@@ -78,6 +90,7 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
             &settings.validator.neuron.moving_average_alpha
         ),
         neuron_config,
+        api_keys_db,
     };
 
     storb_validator::run(validator_config);

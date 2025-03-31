@@ -73,6 +73,7 @@ impl MinerLatencyMap {
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
     pub moving_average_alpha: f64,
+    pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
 }
 

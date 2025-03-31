@@ -4,17 +4,21 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
+use axum::middleware::from_fn;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Extension, Router};
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
+use middleware::require_api_key;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 
 use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
+pub mod apikey;
 mod constants;
 mod download;
+mod middleware;
 mod quic;
 mod routes;
 mod scoring;
@@ -110,15 +114,28 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             .await; // TODO: constant
     });
 
-    let state = ValidatorState { validator };
+    // Initialize API key manager
+    let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(
+        config.api_keys_db.clone(),
+    )?));
 
-    let app = Router::new()
+    // Create protected routes that require API key
+    let protected_routes = Router::new()
         .route("/file", post(upload_file))
         .route("/file", get(download_file))
-        .route("/info", get(node_info))
-        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
-        .with_state(state);
+        .route_layer(from_fn(require_api_key));
 
+    // Create main router with all routes
+    let app = Router::new()
+        .merge(protected_routes) // Add protected routes
+        .route("/info", get(node_info)) // Public route
+        .layer(Extension(api_key_manager))
+        .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .with_state(ValidatorState {
+            validator: validator.clone(),
+        });
+
+    // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 

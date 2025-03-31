@@ -307,15 +307,19 @@ impl DownloadProcessor {
         let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(self.dht_sender.clone(), key)
             .await
             .map_err(|e| {
+                error!("Error getting tracker entry: {}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Error getting tracker entry: {}", e),
+                    "Internal server error".to_string(),
                 )
             })?;
-        let tracker = tracker_res.ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Tracker entry not found".to_string(),
-        ))?;
+        let tracker = tracker_res.ok_or_else(|| {
+            error!("Tracker entry not found");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
         info!("Tracker hash: {:?}", tracker.infohash);
 
         let chunk_hashes = tracker.chunk_hashes;
