@@ -484,13 +484,6 @@ async fn consume_bytes(
             signature: chunk_sig,
         };
 
-        // // insert chunk value into sqlite db
-        // insert_chunk_dht_value(
-        //     chunk_dht_value.clone(),
-        //     scoring_system.write().await.db.clone().conn.clone(),
-        // )
-        // .await?;
-
         swarm::dht::StorbDHT::put_chunk_entry(
             dht_sender.clone(),
             chunk_key.clone(),

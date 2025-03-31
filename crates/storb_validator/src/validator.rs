@@ -269,13 +269,6 @@ impl Validator {
             signature: chunk_sig,
         };
 
-        // Insert into SQLite DB
-        // insert_chunk_dht_value(
-        //     chunk_dht_value.clone(),
-        //     self.scoring_system.write().await.db.clone().conn.clone(),
-        // )
-        // .await?;
-
         // Put chunk entry in DHT
         swarm::dht::StorbDHT::put_chunk_entry(
             self.neuron.command_sender.clone(),

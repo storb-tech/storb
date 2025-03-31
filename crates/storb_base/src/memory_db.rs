@@ -54,10 +54,10 @@ pub async fn insert_chunk_dht_value(
     db_conn: Arc<Mutex<Connection>>,
 ) -> Result<()> {
     let conn = db_conn.lock().await;
-    let chunk_hash = chunk_dht_value.chunk_hash.as_ref(); // TODO: error handle
+    let chunk_hash = chunk_dht_value.chunk_hash.as_ref();
     let vali_id = chunk_dht_value.validator_id.0 as i64;
     let serialized_piece_hashes = bincode::serialize(&chunk_dht_value.piece_hashes)?;
-    // TODO: do we really want to replace?
+
     let mut stmt = conn.prepare(
         "INSERT OR REPLACE INTO chunks (chunk_hash, validator_id, piece_hashes, chunk_idx, k, m, chunk_size, padlen, original_chunk_size, signature) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )?;
