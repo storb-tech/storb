@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace};
 
 use crate::constants::DB_MPSC_BUFFER_SIZE;
 use crate::memory_db::{insert_chunk_dht_value, MemoryDb};
@@ -347,10 +347,8 @@ impl RocksDBStore {
                             Ok(_) => {}
                             Err(inner_err) => {
                                 // Failed to deserialize the inner Record's value.
-                                warn!(
-                                    "Failed to deserialize inner Record value [CF: {}, Key: '{}', InnerError: {}] (contained in StorbRecord). Storing raw StorbRecord.",
-                                    cf.name(),
-                                    String::from_utf8_lossy(&key),
+                                trace!(
+                                    "Failed to deserialize inner Record value InnerError: {}",
                                     inner_err
                                 );
                             }
@@ -358,10 +356,8 @@ impl RocksDBStore {
                     }
                     Err(outer_err) => {
                         // Failed to deserialize the outer StorbRecord wrapper.
-                        warn!(
-                            "Failed to deserialize StorbRecord wrapper during Put apply_op [CF: {}, Key: '{}', OuterError: {}]. Storing raw bytes.",
-                            cf.name(),
-                            String::from_utf8_lossy(&key),
+                        trace!(
+                            "Failed to deserialize StorbRecord wrapper during Put apply_op  OuterError: {}",
                             outer_err
                         );
                     }
