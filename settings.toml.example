@@ -26,11 +26,14 @@ address = "wss://entrypoint-finney.opentensor.ai:443"
 insecure = true
 
 [neuron]
-sync_frequency = 120
+sync_frequency = 300
 
 [dht]
 port = 6942
-bootstrap_nodes = ["/ip4/<ipv4-addr>/udp/<port>/quic-v1/p2p/<peer-id>"] 
+
+# mainnet dht bootstrap node
+bootstrap_nodes = ["/ip4/185.216.203.183/udp/6970/quic-v1/p2p/12D3KooWHD7S45Y2ao9bK6W8zKWxzkTBaDqNU7iKnX1jJr49okov"]
+# bootstrap_nodes = ["/ip4/<ipv4-addr>/udp/<port>/quic-v1/p2p/<peer-id>"] 
 
 [miner]
 store_dir = "object_store"
