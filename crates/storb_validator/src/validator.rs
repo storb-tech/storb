@@ -26,7 +26,6 @@ use tracing::{debug, error, info, trace};
 
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
-use crate::upload::insert_chunk_dht_value;
 use crate::upload::upload_piece_data;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 use rand::seq::IteratorRandom;
@@ -88,7 +87,6 @@ pub struct Validator {
 impl Validator {
     pub async fn new(config: ValidatorConfig) -> Result<Self, NeuronError> {
         let neuron_config = config.neuron_config.clone();
-        let neuron = BaseNeuron::new(neuron_config).await?;
 
         let scoring_system = Arc::new(RwLock::new(
             ScoringSystem::new(
@@ -99,6 +97,9 @@ impl Validator {
             .await
             .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
         ));
+
+        let neuron =
+            BaseNeuron::new(neuron_config, Some(scoring_system.read().await.db.clone())).await?;
 
         let validator = Validator {
             config,
@@ -267,13 +268,6 @@ impl Validator {
             original_chunk_size: encoded.original_chunk_size,
             signature: chunk_sig,
         };
-
-        // Insert into SQLite DB
-        insert_chunk_dht_value(
-            chunk_dht_value.clone(),
-            self.scoring_system.write().await.db.clone().conn.clone(),
-        )
-        .await?;
 
         // Put chunk entry in DHT
         swarm::dht::StorbDHT::put_chunk_entry(

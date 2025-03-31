@@ -5,9 +5,13 @@ use std::sync::Arc;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::DB_MPSC_BUFFER_SIZE;
+use crate::memory_db::{insert_chunk_dht_value, MemoryDb};
+
+use super::models;
+use super::record::StorbRecord;
 
 /// Configuration for the RocksDBStore.
 ///
@@ -81,7 +85,7 @@ impl RocksDBStore {
     ///
     /// This function initializes the database, creates any missing column families,
     /// and spawns a background worker to process write operations in batches.
-    pub fn new(config: RocksDBConfig) -> Result<Self, Error> {
+    pub fn new(config: RocksDBConfig, mem_db: Option<Arc<MemoryDb>>) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -129,6 +133,7 @@ impl RocksDBStore {
         tokio::spawn(async move {
             Self::bg_worker(
                 db_clone,
+                mem_db,
                 receiver,
                 config.max_batch_delay,
                 config.max_batch_size,
@@ -240,6 +245,7 @@ impl RocksDBStore {
     /// waits for a maximum delay or batch size to be reached, and then writes them atomically.
     async fn bg_worker(
         db: Arc<DB>,
+        mem_db: Option<Arc<MemoryDb>>,
         mut rx: mpsc::Receiver<DbOp>,
         max_batch_delay: Duration,
         max_batch_size: usize,
@@ -254,7 +260,7 @@ impl RocksDBStore {
             };
             let mut batch = WriteBatch::default();
             let mut batch_size: usize = 0;
-            if let Err(e) = Self::apply_op(&db, &mut batch, op) {
+            if let Err(e) = Self::apply_op(&db, mem_db.clone(), &mut batch, op) {
                 error!("Failed to apply operation to batch: {}", e);
                 continue;
             }
@@ -275,7 +281,7 @@ impl RocksDBStore {
 
                 match timeout(remaining, rx.recv()).await {
                     Ok(Some(op)) => {
-                        if let Err(e) = Self::apply_op(&db, &mut batch, op) {
+                        if let Err(e) = Self::apply_op(&db, mem_db.clone(), &mut batch, op) {
                             error!("Failed to apply operation to batch: {}", e);
                             continue;
                         }
@@ -305,7 +311,12 @@ impl RocksDBStore {
     /// Applies a database operation to the given write batch.
     ///
     /// This internal function updates the WriteBatch with either a put or delete operation.
-    fn apply_op(db: &DB, batch: &mut WriteBatch, op: DbOp) -> Result<(), Error> {
+    fn apply_op(
+        db: &DB,
+        mem_db: Option<Arc<MemoryDb>>,
+        batch: &mut WriteBatch,
+        op: DbOp,
+    ) -> Result<(), Error> {
         match op {
             DbOp::Put { cf, key, val } => {
                 let cf_handle = cf.handle(db).map_err(|e| {
@@ -314,6 +325,62 @@ impl RocksDBStore {
                         format!("Column family not found: {}", e),
                     )
                 })?;
+
+                match bincode::deserialize::<StorbRecord>(&val) {
+                    Ok(storb_record) => {
+                        // Step 2: Try deserializing the inner Record's value into a DHTValue
+                        match models::deserialize_dht_value(&storb_record.value) {
+                            Ok(models::DHTValue::Chunk(chunk_data)) => {
+                                // Success! Log the human-readable Chunk.
+                                debug!(
+                                    "Applying Put for Chunk [CF: {}, Key: '{}']:\n{:#?}",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key),
+                                    chunk_data
+                                );
+                                // insert the chunk into the memory db
+                                if let Some(mem_db) = mem_db {
+                                    let mem_db = mem_db.clone();
+                                    tokio::spawn(async move {
+                                        let conn = mem_db.conn.clone();
+                                        if let Err(e) =
+                                            insert_chunk_dht_value(chunk_data, conn).await
+                                        {
+                                            error!("Failed to insert chunk into memory db: {}", e);
+                                        }
+                                    });
+                                }
+                            }
+                            Ok(_) => {
+                                // Inner value deserialized, but wasn't a chunk.
+                                trace!(
+                                    "Applying Put for non-Chunk DHTValue [CF: {}, Key: '{}'] (contained in StorbRecord)",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key)
+                                );
+                            }
+                            Err(inner_err) => {
+                                // Failed to deserialize the inner Record's value.
+                                warn!(
+                                    "Failed to deserialize inner Record value [CF: {}, Key: '{}', InnerError: {}] (contained in StorbRecord). Storing raw StorbRecord.",
+                                    cf.name(),
+                                    String::from_utf8_lossy(&key),
+                                    inner_err
+                                );
+                            }
+                        }
+                    }
+                    Err(outer_err) => {
+                        // Failed to deserialize the outer StorbRecord wrapper.
+                        warn!(
+                            "Failed to deserialize StorbRecord wrapper during Put apply_op [CF: {}, Key: '{}', OuterError: {}]. Storing raw bytes.",
+                            cf.name(),
+                            String::from_utf8_lossy(&key),
+                            outer_err
+                        );
+                    }
+                }
+
                 batch.put_cf(cf_handle, &key, &val);
             }
             DbOp::Del { cf, key } => {
@@ -367,11 +434,14 @@ mod tests {
         let tmp_dir = tempdir().expect("Failed to create a temporary directory");
         let db_path = tmp_dir.path().join("test_db");
 
-        let db = RocksDBStore::new(RocksDBConfig {
-            path: db_path,
-            max_batch_delay: Duration::from_millis(10),
-            max_batch_size: 100,
-        })
+        let db = RocksDBStore::new(
+            RocksDBConfig {
+                path: db_path,
+                max_batch_delay: Duration::from_millis(10),
+                max_batch_size: 100,
+            },
+            None,
+        )
         .expect("Failed to create RocksDBStore");
 
         let chunk_val = ChunkDHTValue {

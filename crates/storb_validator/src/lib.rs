@@ -14,7 +14,6 @@ use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
 mod constants;
-mod db;
 mod download;
 mod quic;
 mod routes;

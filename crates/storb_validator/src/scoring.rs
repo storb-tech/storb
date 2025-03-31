@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use base::memory_db::MemoryDb;
 use libp2p::kad::RecordKey;
 use ndarray::{array, s, Array, Array1};
 use rand::rngs::StdRng;
@@ -13,8 +14,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
-
-use crate::db::MemoryDb;
 
 // Add these error types at the top of the file
 #[derive(Debug, Error)]

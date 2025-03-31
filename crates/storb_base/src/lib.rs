@@ -1,3 +1,4 @@
+use memory_db::MemoryDb;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -18,6 +19,7 @@ use crate::swarm::dht::StorbDHT;
 use crate::version::Version;
 
 pub mod constants;
+pub mod memory_db;
 pub mod piece;
 pub mod piece_hash;
 pub mod swarm;
@@ -146,7 +148,10 @@ impl BaseNeuron {
             .map_err(|e| NeuronError::SubtensorError(e.to_string()))
     }
 
-    pub async fn new(config: BaseNeuronConfig) -> Result<Self, NeuronError> {
+    pub async fn new(
+        config: BaseNeuronConfig,
+        mem_db: Option<Arc<MemoryDb>>,
+    ) -> Result<Self, NeuronError> {
         let subtensor =
             Self::get_subtensor_connection(config.subtensor.insecure, &config.subtensor.address)
                 .await?;
@@ -180,6 +185,7 @@ impl BaseNeuron {
 
         let (dht_og, command_sender) = StorbDHT::new(
             config.dht_dir.clone(),
+            mem_db,
             config.dht.port,
             bootstrap_nodes,
             libp2p_keypair.into(),
