@@ -1,4 +1,3 @@
-# Build Stage: Using Rust nightly with Bookworm-slim
 FROM rust:latest AS builder
 
 # Install required build dependencies
