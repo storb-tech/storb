@@ -23,6 +23,7 @@ use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
 use crate::memory_db::MemoryDb;
 use crate::utils::is_valid_external_addr;
+use crate::AddressBook;
 
 #[async_trait::async_trait]
 pub trait PeerVerifier: Send + Sync {
@@ -30,40 +31,38 @@ pub trait PeerVerifier: Send + Sync {
     /// Returns Ok(true) if allowed, Ok(false) if not allowed, Err if the check failed.
     async fn verify_peer(
         &self,
-        public_key: libp2p::identity::PublicKey,
+        peer_id: libp2p::identity::PeerId,
     ) -> Result<bool, Box<dyn Error + Send + Sync>>;
 }
 
 // Public BittensorPeerVerifier implementation
 pub struct BittensorPeerVerifier {
-    pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
+    pub address_book: AddressBook,
 }
 
 #[async_trait::async_trait]
 impl PeerVerifier for BittensorPeerVerifier {
     async fn verify_peer(
         &self,
-        public_key: libp2p::identity::PublicKey,
+        peer_id: libp2p::identity::PeerId,
     ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        let public_key_bytes = public_key.clone().try_into_ed25519()?.to_bytes();
-        let peer_id = PeerId::from_public_key(&public_key);
         info!("Verifying peer {}", peer_id);
 
         // Access the neurons list with read lock
-        let neurons_lock = self.neurons.read().await;
-        let neurons_list = &*neurons_lock; // Dereference to get the Vec
+        let neurons_list = self.address_book.read().await;
 
-        // Iterate and compare AccountIds
-        for neuron_info in neurons_list {
-            let hotkey_bytes = neuron_info.hotkey.0.to_vec();
-            debug!(
-                "Comparing hotkey bytes: {:?} with public key bytes: {:?}",
-                hotkey_bytes, public_key_bytes
+        if neurons_list.is_empty() {
+            warn!("No neurons registered in the address book. Try again later.");
+            return Ok(false);
+        }
+
+        if neurons_list.contains_key(&peer_id) {
+            // Peer is registered
+            info!(
+                "Peer {} verified: Hotkey found in registered neurons.",
+                peer_id
             );
-            if hotkey_bytes == public_key_bytes {
-                info!("Peer {} verified: Found matching hotkey.", peer_id);
-                return Ok(true); // Found a match
-            }
+            return Ok(true);
         }
 
         // No match found
@@ -211,7 +210,7 @@ pub struct StorbDHT {
     /// Peers that have been successfully verified.
     verified_peers: Arc<Mutex<HashSet<PeerId>>>,
     /// Public keys received via Identify protocol. Needed for verification.
-    known_public_keys: Arc<Mutex<HashMap<PeerId, identity::PublicKey>>>,
+    known_peers: Arc<Mutex<HashSet<PeerId>>>,
 }
 
 impl StorbDHT {
@@ -350,7 +349,7 @@ impl StorbDHT {
                 peer_verifier,
                 pending_verification: Arc::new(Mutex::new(HashSet::new())),
                 verified_peers: Arc::new(Mutex::new(HashSet::new())),
-                known_public_keys: Arc::new(Mutex::new(HashMap::new())),
+                known_peers: Arc::new(Mutex::new(HashSet::new())),
             },
             command_sender,
         ))
@@ -557,7 +556,7 @@ impl StorbDHT {
             let peer_verifier = self.peer_verifier.clone();
             let pending_verification = self.pending_verification.clone();
             let verified_peers = self.verified_peers.clone();
-            let known_public_keys = self.known_public_keys.clone();
+            let known_peers = self.known_peers.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
                     let connected_count = self.bootstrap_nodes.iter()
@@ -611,7 +610,7 @@ impl StorbDHT {
                             verified.remove(&peer_id);
                             drop(verified);
 
-                            let mut keys = known_public_keys.lock().await;
+                            let mut keys = known_peers.lock().await;
                             keys.remove(&peer_id);
                             drop(keys);
 
@@ -658,8 +657,8 @@ impl StorbDHT {
 
                                             // Store public key (as before)
                                             {
-                                                let mut keys = known_public_keys.lock().await;
-                                                keys.insert(peer_id, info.public_key.clone());
+                                                let mut keys = known_peers.lock().await;
+                                                keys.insert(peer_id);
                                             }
 
                                             // Check if pending verification (as before)
@@ -672,10 +671,9 @@ impl StorbDHT {
                                                 info!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
                                                 let verifier = peer_verifier.clone();
                                                 let verified_peers_clone = verified_peers.clone();
-                                                let known_public_keys_clone = known_public_keys.clone();
+                                                let known_peers_clone = known_peers.clone();
 
-                                                let public_key = info.public_key.clone();
-                                                match verifier.verify_peer(public_key).await {
+                                                match verifier.verify_peer(peer_id).await {
                                                     Ok(true) => {
                                                         // Peer is verified
                                                         info!(peer_id=%peer_id, "Peer successfully verified (e.g., registered neuron).");
@@ -720,7 +718,7 @@ impl StorbDHT {
                                                         self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                                         let _ = self.swarm.disconnect_peer_id(peer_id);
                                                         {
-                                                            let mut keys = known_public_keys_clone.lock().await;
+                                                            let mut keys = known_peers_clone.lock().await;
                                                             keys.remove(&peer_id);
                                                         }
                                                     }
@@ -730,7 +728,7 @@ impl StorbDHT {
                                                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                                             let _ = self.swarm.disconnect_peer_id(peer_id);
                                                             {
-                                                                let mut keys = known_public_keys_clone.lock().await;
+                                                                let mut keys = known_peers_clone.lock().await;
                                                                 keys.remove(&peer_id);
                                                             }
                                                     }

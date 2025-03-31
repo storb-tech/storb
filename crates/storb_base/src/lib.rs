@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use subxt::ext::subxt_core::constants::address;
 use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
@@ -156,11 +157,6 @@ impl BaseNeuron {
             Self::get_subtensor_connection(config.subtensor.insecure, &config.subtensor.address)
                 .await?;
 
-        let neurons_arc = Arc::new(RwLock::new(Vec::new()));
-        let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
-            neurons: neurons_arc.clone(), // Clone the Arc for the verifier
-        });
-
         let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
@@ -188,8 +184,9 @@ impl BaseNeuron {
 
         let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
         let neurons_arc = Arc::new(RwLock::new(Vec::new()));
+        let address_book = Arc::new(RwLock::new(HashMap::new()));
         let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
-            neurons: neurons_arc.clone(),
+            address_book: address_book.clone(),
         });
 
         let (dht_og, command_sender) = StorbDHT::new(
@@ -238,7 +235,7 @@ impl BaseNeuron {
             config: config.clone(),
             command_sender,
             neurons: neurons_arc,
-            address_book: Arc::new(RwLock::new(HashMap::new())),
+            address_book: address_book.clone(),
             peer_node_uid: bimap::BiMap::new(),
             subtensor,
             signer,
