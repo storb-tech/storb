@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::constants::DB_MPSC_BUFFER_SIZE;
 use crate::memory_db::{insert_chunk_dht_value, MemoryDb};
