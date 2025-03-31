@@ -86,7 +86,7 @@ pub async fn upload_file(
             error!("Failed to check API key quota: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check quota".to_string(),
+                "Internal server error".to_string(),
             )
         })?;
 
@@ -143,7 +143,7 @@ pub async fn upload_file(
                     error!("Failed to log API usage: {}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to log API usage".to_string(),
+                        "Internal server error".to_string(),
                     )
                 })?;
 
@@ -156,7 +156,7 @@ pub async fn upload_file(
                     error!("Failed to update API key usage: {}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to update API key usage".to_string(),
+                        "Internal server error".to_string(),
                     )
                 })?;
 
@@ -226,15 +226,19 @@ pub async fn download_file(
     let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(processor.dht_sender.clone(), key)
         .await
         .map_err(|e| {
+            error!("Error getting tracker entry: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Error getting tracker entry: {}", e),
+                "Internal server error".to_string(),
             )
         })?;
-    let tracker = tracker_res.ok_or((
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Tracker entry not found".to_string(),
-    ))?;
+    let tracker = tracker_res.ok_or_else(|| {
+        error!("Tracker entry not found for infohash: {}", infohash);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
 
     // get file size
     let content_length = tracker.length;
@@ -248,7 +252,7 @@ pub async fn download_file(
             error!("Failed to check API key quota: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check quota".to_string(),
+                "Internal server error".to_string(),
             )
         })?;
     if !has_quota {
@@ -269,7 +273,7 @@ pub async fn download_file(
                     error!("Failed to update API key usage: {}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to update API key usage".to_string(),
+                        "Internal server error".to_string(),
                     )
                 })?;
 
@@ -283,7 +287,7 @@ pub async fn download_file(
                     error!("Failed to log API usage: {}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to log API usage".to_string(),
+                        "Internal server error".to_string(),
                     )
                 })?;
 

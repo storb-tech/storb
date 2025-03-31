@@ -30,7 +30,7 @@ pub async fn require_api_key(
             tracing::error!("ApiKeyManager not found in request extensions");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "ApiKeyManager not found".to_string(),
+                "Internal server error".to_string(),
             )
         })?;
 
@@ -43,7 +43,7 @@ pub async fn require_api_key(
             tracing::error!("Error validating API key: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Error validating API key: {}", e),
+                "Internal server error".to_string(),
             )
         })?
         .ok_or_else(|| {
@@ -62,7 +62,7 @@ pub async fn require_api_key(
                 tracing::error!("Failed to check rate limit: {}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to check rate limit".to_string(),
+                    "Internal server error".to_string(),
                 )
             })?;
 
