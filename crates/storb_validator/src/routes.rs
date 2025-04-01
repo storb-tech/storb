@@ -30,8 +30,8 @@ pub async fn node_info(
     state: axum::extract::State<ValidatorState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
     info!("Got node info req");
-    let neuron = state.validator.read().await.neuron.clone();
-    let serialized_local_node_info = bincode::serialize(&neuron.local_node_info).map_err(|e| {
+    let local_node_info = state.validator.neuron.read().await.local_node_info.clone();
+    let serialized_local_node_info = bincode::serialize(&local_node_info).map_err(|e| {
         error!("Error while deserialising local node info: {e}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,

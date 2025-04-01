@@ -7,6 +7,7 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
+use base::sync::Synchronizable;
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use middleware::require_api_key;
 use tokio::{sync::RwLock, time};
@@ -35,7 +36,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
 /// as Axum requires state types to be cloneable to share them across requests.
 #[derive(Clone)]
 struct ValidatorState {
-    pub validator: Arc<RwLock<Validator>>,
+    pub validator: Arc<Validator>,
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC,
@@ -59,27 +60,53 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Load or generate server certificate
     // let server_cert = ensure_certificate_exists().await?;
 
-    // Clone config before first use to avoid move
-    let config_clone = config.clone();
-    let validator = Arc::new(RwLock::new(Validator::new(config_clone).await?));
+    let validator = Arc::new(Validator::new(config.clone()).await?);
 
-    // Create weak reference for sync task
-    let sync_validator = Arc::downgrade(&validator);
+    let neuron = validator.neuron.clone();
 
-    // Spawn background sync task
+    // Note: This should constant - so it is ok to clone it once and forget about it
+
+    let validator_for_sync = validator.clone();
+    let validator_for_backup = validator.clone();
+    let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
+    
+    let sync_config = config.clone();
+
     tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(
-            config.neuron_config.neuron.sync_frequency,
-        ));
+        let local_validator = validator_for_sync.clone();
+        let scoring_system = local_validator.scoring_system.clone();
+        let neuron = neuron.clone();
+        let freq_clone = sync_frequency.clone();
+
+        let mut interval = time::interval(Duration::from_secs(freq_clone));
         loop {
             interval.tick().await;
-            if let Some(validator) = sync_validator.upgrade() {
-                let mut guard = validator.write().await;
-                match guard.sync().await {
-                    Ok(_) => debug!("Sync ran successfully"),
-                    Err(err) => error!("Failed to run sync: {err}"),
+            info!("Syncing validator");
+            let uids_to_update = match neuron.write().await.sync_metagraph().await {
+                Ok(res) => res,
+                Err(err) => {
+                    error!("Failed to sync metagraph: {err}");
+                    continue;
                 }
-            }
+            };
+            let neuron_count = neuron.read().await.neurons.read().await.len();
+            scoring_system
+                .write()
+                .await
+                .update_scores(neuron_count, uids_to_update)
+                .await;
+            // drop(scorin)
+
+            let ema_scores = scoring_system.clone().read().await.state.ema_scores.clone();
+
+            match Validator::set_weights(neuron.read().await.clone(), ema_scores, sync_config.clone())
+                .await
+            {
+                Ok(_) => info!("Successfully set weights on chain"),
+                Err(e) => error!("Failed to set weights on chain: {}", e),
+            };
+
+            info!("Done syncing validator");
         }
     });
 
@@ -91,33 +118,29 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             // Interval tick MUST be called before the validator write, or else it will block
             // for in the initial loop-through
             interval.tick().await;
-            let guard = validator_clone.write().await;
             info!("Running synthetic challenges");
-            match guard.run_synthetic_challenges().await {
+            match validator.run_synthetic_challenges().await {
                 Ok(_) => debug!("Synthetic challenges ran successfully"),
                 Err(err) => error!("Synthetic challenges failed to run: {err}"),
             };
         }
     });
 
+    let vali_clone = validator_for_backup.clone();
     // Spawn background backup task
-    let validator_clone = validator.clone();
     tokio::spawn(async move {
-        validator_clone
-            .write()
-            .await
+        vali_clone
             .scoring_system
             .write()
             .await
             .db
-            .start_periodic_backup(config.neuron_config.neuron.sync_frequency)
+            .start_periodic_backup(sync_frequency)
             .await; // TODO: constant
     });
 
+    let db_path = config.clone().api_keys_db.clone();
     // Initialize API key manager
-    let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(
-        config.api_keys_db.clone(),
-    )?));
+    let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
 
     // Create protected routes that require API key
     let protected_routes = Router::new()
@@ -132,11 +155,11 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
-            validator: validator.clone(),
+            validator: validator_clone.clone(),
         });
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.clone().neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(

@@ -36,7 +36,7 @@ pub(crate) struct UploadProcessor<'a> {
 
 /// Upload piece data to a miner
 pub async fn upload_piece_data(
-    validator_base_neuron: BaseNeuron,
+    validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     miner_info: NodeInfo,
     conn: &Connection,
     data: Vec<u8>,
@@ -44,7 +44,7 @@ pub async fn upload_piece_data(
     // Send piece to miner via QUIC connection
     let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
 
-    let signer = validator_base_neuron.signer;
+    let signer = validator_base_neuron.read().await.signer.clone();
 
     let message = VerificationMessage {
         netuid: miner_info.neuron_info.netuid,
@@ -54,6 +54,8 @@ pub async fn upload_piece_data(
         },
         validator: KeyRegistrationInfo {
             uid: validator_base_neuron
+                .read()
+                .await
                 .local_node_info
                 .uid
                 .context("Failed to get UID for validator")?,
@@ -175,20 +177,20 @@ impl<'a> UploadProcessor<'a> {
         let miner_uids = self.miner_uids.clone();
         let miner_connections = self.miner_connections.clone();
         // TODO: all these clones are not the most ideal, perhaps fix?
-        let validator = self.state.validator.read().await;
-        let dht_sender = validator.neuron.command_sender.clone();
+        let validator = self.state.validator.clone();
+        let dht_sender = validator.neuron.read().await.command_sender.clone();
         let dht_sender_clone = dht_sender.clone();
 
         // get memorydb from state
-        let scoring_system = self.state.validator.read().await.scoring_system.clone();
+        let scoring_system = self.state.validator.scoring_system.clone();
 
-        let signer = self.state.validator.read().await.neuron.signer.clone();
+        let signer = self.state.validator.neuron.read().await.signer.clone();
         // let db_conn = self.state.db_conn.clone();
         let signer_clone = signer.clone();
         let validator_clone = validator.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(
-                validator_clone.neuron,
+                validator_clone.neuron.clone(),
                 scoring_system,
                 rx,
                 miner_uids,
@@ -317,7 +319,7 @@ where
 }
 
 async fn consume_bytes(
-    validator_base_neuron: BaseNeuron,
+    validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
     mut rx: mpsc::Receiver<Vec<u8>>,
     miner_uids: Vec<u16>,
@@ -330,6 +332,9 @@ async fn consume_bytes(
     let mut piece_hashes: Vec<[u8; 32]> = Vec::new();
     let validator_id = Compact(
         validator_base_neuron
+            .clone()
+            .read()
+            .await
             .local_node_info
             .uid
             .context("Failed to get validator UID")?,
@@ -341,6 +346,8 @@ async fn consume_bytes(
         let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
         let mut chunk_hash_raw = blake3::Hasher::new();
 
+        let vali_clone = validator_base_neuron.clone();
+
         // Distribute pieces to miners
         for piece in encoded.pieces {
             let piece_idx = piece.piece_idx;
@@ -350,11 +357,12 @@ async fn consume_bytes(
             let (addr, conn) = &miner_connections[idx];
             let miner_uid = miner_uids[idx];
 
-            let peer_id = validator_base_neuron
+            let vali_guard = vali_clone.read().await;
+            let peer_id = vali_guard
                 .peer_node_uid
                 .get_by_right(&miner_uid)
                 .context("No peer ID found for the miner UID")?;
-            let miner_info = validator_base_neuron
+            let miner_info = vali_guard
                 .address_book
                 .clone()
                 .read()
@@ -376,9 +384,7 @@ async fn consume_bytes(
 
             info!("Sending piece {piece_idx} to miner {addr}");
 
-            let hash =
-                upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data)
-                    .await?;
+            let hash = upload_piece_data(vali_clone.clone(), miner_info, conn, piece.data).await?;
             // Verification: Check if the hash received from the miner is the same
             // as the hash of the piece and update the stats of the miner in the database accordingly
 
