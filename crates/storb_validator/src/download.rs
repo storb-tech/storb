@@ -31,7 +31,7 @@ pub(crate) struct DownloadProcessor {
 impl DownloadProcessor {
     /// Create a new instance of the DownloadProcessor.
     pub(crate) async fn new(state: &ValidatorState) -> Result<Self> {
-        let dht_sender = state.validator.read().await.neuron.command_sender.clone();
+        let dht_sender = state.validator.neuron.read().await.command_sender.clone();
         Ok(Self {
             dht_sender,
             state: Arc::new(state.clone()),
@@ -40,7 +40,7 @@ impl DownloadProcessor {
 
     /// Producer for pieces. Queries the miners to get piece data.
     async fn produce_piece(
-        validator_base_neuron: BaseNeuron,
+        validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         local_address_book: AddressBook,
@@ -72,6 +72,15 @@ impl DownloadProcessor {
 
         let mut requests = FuturesUnordered::new();
 
+        let signer = validator_base_neuron.read().await.signer.clone();
+
+        let vali_uid = validator_base_neuron
+            .read()
+            .await
+            .local_node_info
+            .uid
+            .context("Failed to get UID for validator")?;
+
         for provider in piece_providers {
             // Look up node info from the address book.
             let node_info = local_address_book
@@ -83,7 +92,7 @@ impl DownloadProcessor {
 
             let scoring_system = scoring_system.clone();
             let db = scoring_system.write().await.db.clone();
-            let signer = Arc::new(validator_base_neuron.signer.clone());
+            let signer = Arc::new(signer.clone());
 
             // Each provider query is executed in its own async block.
             // The provider variable is moved into the block for logging purposes.
@@ -102,10 +111,7 @@ impl DownloadProcessor {
                         account_id: node_info.neuron_info.hotkey.clone(),
                     },
                     validator: KeyRegistrationInfo {
-                        uid: validator_base_neuron
-                            .local_node_info
-                            .uid
-                            .context("Failed to get UID for validator")?,
+                        uid: vali_uid,
                         account_id: signer.clone().account_id().clone(),
                     },
                 };
@@ -196,7 +202,7 @@ impl DownloadProcessor {
     /// Producer for chunks. It consumes the pieces produced to achieve this.
     /// The chunks are sent via the MPSC channel back to the HTTP stream processor.
     async fn produce_chunk(
-        validator_base_neuron: BaseNeuron,
+        validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         address_book: AddressBook,
@@ -324,8 +330,8 @@ impl DownloadProcessor {
 
         let chunk_hashes = tracker.chunk_hashes;
 
-        let state = self.state.validator.read().await.clone();
-        let address_book = state.neuron.address_book.clone();
+        let state = self.state.validator.clone();
+        let address_book = state.neuron.read().await.address_book.clone();
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 
