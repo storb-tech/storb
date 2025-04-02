@@ -114,6 +114,13 @@ impl Validator {
     pub async fn run_synthetic_challenges(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
+        // Check if we have any peers before proceeding
+        let peer_count = self.neuron.read().await.address_book.read().await.len();
+        if peer_count == 0 {
+            info!("No peers available, skipping synthetic challenges");
+            return Ok(());
+        }
+
         let signer = self.neuron.read().await.signer.clone();
         let mut rng: StdRng = SeedableRng::from_entropy();
         let mut store_latencies = MinerLatencyMap::default();

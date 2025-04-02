@@ -1,10 +1,9 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{Connection, DatabaseName};
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
-use tokio::{sync::Mutex, time::interval};
+use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::swarm::models;
@@ -28,23 +27,17 @@ impl MemoryDb {
         })
     }
 
-    pub async fn start_periodic_backup(&self, interval_secs: u64) {
+    pub async fn run_backup(&self) {
         let db_path = self.db_path.clone();
         let conn = self.conn.clone();
 
-        tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(interval_secs));
-            loop {
-                info!("Backing up database");
-                // Preview memory database
-                {
-                    let conn = conn.lock().await;
-                    conn.backup(DatabaseName::Main, &db_path, None).unwrap();
-                }
-                info!("Database backup complete");
-                interval.tick().await;
-            }
-        });
+        info!("Backing up database");
+        // Preview memory database
+        {
+            let conn = conn.lock().await;
+            conn.backup(DatabaseName::Main, &db_path, None).unwrap();
+        }
+        info!("Database backup complete");
     }
 }
 
@@ -83,19 +76,19 @@ mod tests {
     use std::sync::Once;
 
     use tempfile::NamedTempFile;
-    use tokio::time::sleep;
+    // use tokio::time::sleep;
 
     // This runs before any tests
-    static INIT: Once = Once::new();
+    // static INIT: Once = Once::new();
 
-    fn setup_logging() {
-        INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::DEBUG)
-                .with_test_writer() // This ensures output goes to the test console
-                .init();
-        });
-    }
+    // fn setup_logging() {
+    //     INIT.call_once(|| {
+    //         tracing_subscriber::fmt()
+    //             .with_max_level(tracing::Level::DEBUG)
+    //             .with_test_writer() // This ensures output goes to the test console
+    //             .init();
+    //     });
+    // }
 
     // helper function to initialize the disk database
     fn init_disk_db(db_path: &str) -> Result<()> {
@@ -123,42 +116,6 @@ mod tests {
         let value: String = stmt.query_row([], |row| row.get(0))?;
 
         assert_eq!(value, "test_value");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_periodic_backup() -> Result<()> {
-        setup_logging();
-
-        // Create a temporary file for testing
-        let temp_file = NamedTempFile::new()?;
-        let db_path = temp_file.path().to_str().unwrap();
-
-        // Initialize the disk database first
-        init_disk_db(db_path)?;
-
-        // Create MemoryDb instance
-        let memory_db = MemoryDb::new(db_path).await?;
-
-        // Modify data in memory
-        {
-            let conn = memory_db.conn.lock().await;
-            conn.execute("UPDATE test SET value = ?1 WHERE id = 1", ["updated_value"])?;
-        }
-
-        // Start periodic backup with a short interval
-        info!("Starting periodic backup");
-        memory_db.start_periodic_backup(1).await;
-
-        // Wait for backup to occur
-        sleep(Duration::from_secs(2)).await;
-
-        // Verify backup file contains updated data
-        let backup_conn = Connection::open(db_path)?;
-        let mut stmt = backup_conn.prepare("SELECT value FROM test WHERE id = 1")?;
-        let value: String = stmt.query_row([], |row| row.get(0))?;
-
-        assert_eq!(value, "updated_value");
         Ok(())
     }
 

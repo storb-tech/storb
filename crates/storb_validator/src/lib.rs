@@ -10,6 +10,7 @@ use axum::{Extension, Router};
 use base::sync::Synchronizable;
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use middleware::require_api_key;
+use tokio::time::interval;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 
@@ -67,13 +68,14 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Note: This should constant - so it is ok to clone it once and forget about it
 
     let validator_for_sync = validator.clone();
+    let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
-    
+
     let sync_config = config.clone();
 
     tokio::spawn(async move {
-        let local_validator = validator_for_sync.clone();
+        let local_validator = validator_for_sync;
         let scoring_system = local_validator.scoring_system.clone();
         let neuron = neuron.clone();
         let freq_clone = sync_frequency.clone();
@@ -99,8 +101,12 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
             let ema_scores = scoring_system.clone().read().await.state.ema_scores.clone();
 
-            match Validator::set_weights(neuron.read().await.clone(), ema_scores, sync_config.clone())
-                .await
+            match Validator::set_weights(
+                neuron.read().await.clone(),
+                ema_scores,
+                sync_config.clone(),
+            )
+            .await
             {
                 Ok(_) => info!("Successfully set weights on chain"),
                 Err(e) => error!("Failed to set weights on chain: {}", e),
@@ -111,7 +117,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     });
 
     // Spawn background synthetic challenge tasks
-    let validator_clone = validator.clone();
     tokio::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(SYNTHETIC_CHALLENGE_FREQUENCY));
         loop {
@@ -119,7 +124,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             // for in the initial loop-through
             interval.tick().await;
             info!("Running synthetic challenges");
-            match validator.run_synthetic_challenges().await {
+            match validator_for_challenges.run_synthetic_challenges().await {
                 Ok(_) => debug!("Synthetic challenges ran successfully"),
                 Err(err) => error!("Synthetic challenges failed to run: {err}"),
             };
@@ -129,13 +134,17 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let vali_clone = validator_for_backup.clone();
     // Spawn background backup task
     tokio::spawn(async move {
-        vali_clone
-            .scoring_system
-            .write()
-            .await
-            .db
-            .start_periodic_backup(sync_frequency)
-            .await; // TODO: constant
+        let mut interval = interval(Duration::from_secs(sync_frequency));
+        loop {
+            interval.tick().await;
+            vali_clone
+                .scoring_system
+                .write()
+                .await
+                .db
+                .run_backup()
+                .await; // TODO: constant
+        }
     });
 
     let db_path = config.clone().api_keys_db.clone();
@@ -155,7 +164,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
-            validator: validator_clone.clone(),
+            validator: validator.clone(),
         });
 
     // Start server
