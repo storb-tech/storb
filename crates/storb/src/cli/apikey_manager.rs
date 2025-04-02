@@ -11,6 +11,11 @@ use storb_validator::apikey::{ApiKeyConfig, ApiKeyManager};
 pub fn cli() -> Command {
     Command::new("apikey")
         .about("Manage API keys for validator access")
+        .arg(
+            arg!(--"api-keys-db" <PATH> "Path to the API keys database")
+                .required(false)
+                .global(true)
+        )
         .subcommand(
             Command::new("create")
                 .about("Create a new API key")
@@ -50,7 +55,7 @@ pub fn handle_command(matches: &clap::ArgMatches) -> Result<()> {
 
     // create new API key manager with the database path from args
     let db_path = matches
-        .get_one::<String>("db_path")
+        .get_one::<String>("api_keys_db")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let settings = Settings::new(None).expect("Failed to load settings");
