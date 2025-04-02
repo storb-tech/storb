@@ -479,7 +479,7 @@ impl Validator {
         Ok(())
     }
 
-    /// Sync the validator with the metagraph.
+    // Sync the validator with the metagraph.
     // pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
     //     info!("Syncing validator");
 

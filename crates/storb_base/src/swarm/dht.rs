@@ -538,6 +538,9 @@ impl StorbDHT {
             let known_peers = self.known_peers.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
+                    if self.bootstrap_nodes.is_empty() {
+                        return;
+                    }
                     let connected_count = self.bootstrap_nodes.iter()
                         .filter_map(Self::extract_peer_info)
                         .filter(|peer_id| self.swarm.connected_peers().any(|p| p == peer_id))
@@ -1198,9 +1201,11 @@ impl StorbDHT {
     ///
     /// This internal function blocks until the bootstrap watch channel signals completion.
     async fn wait_for_bootstrap(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        info!("Waiting for bootstrap to complete...");
         while !*self.bootstrap_done.borrow() {
             self.bootstrap_done.changed().await?;
         }
+        info!("Bootstrap completed.");
         Ok(())
     }
 }

@@ -64,6 +64,7 @@ pub struct NeuronConfig {
 #[derive(Clone)]
 pub struct DhtConfig {
     pub port: u16,
+    pub no_bootstrap: bool,
     pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
@@ -182,6 +183,12 @@ impl BaseNeuron {
             };
 
         let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+
+        if !config.dht.no_bootstrap && bootstrap_nodes.as_ref().map_or(0, |nodes| nodes.len()) == 0
+        {
+            panic!("Bootstrap is enabled, but no bootstrap nodes were provided. Please specify at least one bootstrap node in the settings.toml.");
+        }
+
         let neurons_arc = Arc::new(RwLock::new(Vec::new()));
         let address_book = Arc::new(RwLock::new(HashMap::new()));
         let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
@@ -357,6 +364,7 @@ mod tests {
             },
             dht: DhtConfig {
                 port: 8081,
+                no_bootstrap: true,
                 bootstrap_nodes: None,
             },
         }
