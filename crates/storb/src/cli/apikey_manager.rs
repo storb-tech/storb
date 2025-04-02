@@ -14,7 +14,7 @@ pub fn cli() -> Command {
         .arg(
             arg!(--"api-keys-db" <PATH> "Path to the API keys database")
                 .required(false)
-                .global(true)
+                .global(true),
         )
         .subcommand(
             Command::new("create")

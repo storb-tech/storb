@@ -22,6 +22,7 @@ pub struct Neuron {
 #[derive(Debug, Deserialize)]
 pub struct Dht {
     pub port: u16,
+    pub no_bootstrap: bool,
     pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 

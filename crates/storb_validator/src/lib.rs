@@ -78,9 +78,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         let local_validator = validator_for_sync;
         let scoring_system = local_validator.scoring_system.clone();
         let neuron = neuron.clone();
-        let freq_clone = sync_frequency.clone();
 
-        let mut interval = time::interval(Duration::from_secs(freq_clone));
+        let mut interval = time::interval(Duration::from_secs(sync_frequency));
         loop {
             interval.tick().await;
             info!("Syncing validator");
