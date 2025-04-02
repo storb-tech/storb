@@ -346,106 +346,112 @@ async fn consume_bytes(
         let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
         let mut chunk_hash_raw = blake3::Hasher::new();
 
-        let vali_clone = validator_base_neuron.clone();
-
         // Distribute pieces to miners
+        let mut futures = Vec::new();
+
         for piece in encoded.pieces {
             let piece_idx = piece.piece_idx;
-
-            // Round-robin distribution to miners
             let idx = (piece_idx as usize) % miner_connections.len();
-            let (addr, conn) = &miner_connections[idx];
             let miner_uid = miner_uids[idx];
+            let (_, conn) = miner_connections[idx].clone();
 
-            let vali_guard = vali_clone.read().await;
-            let peer_id = vali_guard
-                .peer_node_uid
-                .get_by_right(&miner_uid)
-                .context("No peer ID found for the miner UID")?;
-            let miner_info = vali_guard
-                .address_book
-                .clone()
-                .read()
-                .await
-                .get(peer_id)
-                .context("No NodeInfo found for the given miner")?
-                .clone();
+            let vali_clone = validator_base_neuron.clone();
+            let scoring_clone = scoring_system.clone();
 
-            let piece_hash_raw = blake3::hash(&piece.data);
-            let piece_hash = piece_hash_raw.as_bytes();
+            // Create future for parallel execution
+            let future = tokio::spawn(async move {
+                let vali_guard = vali_clone.read().await;
+                let peer_id = vali_guard
+                    .peer_node_uid
+                    .get_by_right(&miner_uid)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Peer ID not found for miner UID {}", miner_uid)
+                    })?;
+                let miner_info = vali_guard
+                    .address_book
+                    .clone()
+                    .read()
+                    .await
+                    .get(peer_id)
+                    .ok_or_else(|| anyhow::anyhow!("Miner info not found for peer ID {}", peer_id))?
+                    .clone();
+                let conn = conn.clone();
 
-            let db = scoring_system.write().await.db.clone();
+                let piece_clone = piece.clone();
+                let res = upload_piece_with_retry(
+                    vali_clone.clone(),
+                    miner_info,
+                    &conn,
+                    piece,
+                    scoring_clone,
+                    miner_uid,
+                )
+                .await;
 
-            // increase store attempts, etc for the miner uid in the db:
-            db.conn.lock().await.execute(
-                "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
-                [miner_uid],
-            )?;
-
-            info!("Sending piece {piece_idx} to miner {addr}");
-
-            let hash = upload_piece_data(vali_clone.clone(), miner_info, conn, piece.data).await?;
-            // Verification: Check if the hash received from the miner is the same
-            // as the hash of the piece and update the stats of the miner in the database accordingly
-
-            info!("Received hash: {:?}", hash.as_bytes_ref());
-            info!("Expected hash: {:?}", piece_hash);
-
-            if hash.as_bytes_ref() != piece_hash {
-                error!("Hash mismatch for piece {piece_idx} from miner {addr}");
-            } else {
-                info!("Received hash for piece {piece_idx} from miner {addr}");
-                // Increase store successes
-                db.conn.lock().await.execute(
-                    "UPDATE miner_stats SET store_successes = store_successes + 1 WHERE miner_uid = ?",
-                    [miner_uid],
-                )?;
-                // Increase total successes
-                db.conn.lock().await.execute(
-                    "UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = ?",
-                    [miner_uid],
-                )?;
-            }
-
-            // TODO: maybe do this in a background thread instead of doing it here?
-            // Add piece metadata to DHT
-            // TODO: some of this stuff can be moved into its own helper function
-            let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
-            info!("UPLOAD PIECE KEY: {:?}", &piece_key);
-
-            let msg = (
-                piece_key.clone(),
-                validator_id,
-                chunk_idx,
-                piece_idx,
-                piece.piece_type.clone(),
-            );
-            let msg_bytes = match bincode::serialize(&msg) {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    error!("Failed to serialize msg: {:?}", err);
-                    continue; // Skip to the next iteration on error
+                // return piece index, piece type, piece, and result (piece hash) if result is Ok
+                match res {
+                    // TODO: cloning piece is not ideal, perhaps use a reference
+                    Ok(piece_hash) => Ok((piece_idx, piece_clone, piece_hash)),
+                    Err(e) => {
+                        error!("Failed to upload piece: {}", e);
+                        Err(e)
+                    }
                 }
-            };
-            let signature = sign_message(&signer, msg_bytes);
-            // Get netuid from validator state
-            let value = models::PieceDHTValue {
-                piece_hash: piece_key.clone(),
-                validator_id,
-                chunk_idx,
-                piece_idx,
-                piece_type: piece.piece_type,
-                signature,
-            };
+            });
 
-            swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
-                .await
-                .expect("Failed to put piece entry in DHT"); // TODO: handle error
+            futures.push(future);
+        }
 
-            info!("Received hash for piece {piece_idx} from miner {addr}");
-            chunk_hash_raw.update(piece_hash);
-            chunk_piece_hashes.push(*piece_hash);
-            piece_hashes.extend(chunk_piece_hashes.iter().cloned());
+        // Wait for all uploads to complete
+        let results = futures::future::join_all(futures).await;
+
+        for result in results {
+            match result {
+                Ok(Ok((piece_idx, piece, piece_hash))) => {
+                    chunk_hash_raw.update(&piece_hash);
+                    chunk_piece_hashes.push(piece_hash);
+                    piece_hashes.push(piece_hash);
+
+                    // add piece entry to dht
+                    let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
+                    info!("UPLOAD PIECE KEY: {:?}", &piece_key);
+
+                    let msg = (
+                        piece_key.clone(),
+                        validator_id,
+                        chunk_idx,
+                        piece_idx,
+                        piece.piece_type.clone(),
+                    );
+                    let msg_bytes = match bincode::serialize(&msg) {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            error!("Failed to serialize msg: {:?}", err);
+                            continue; // Skip to the next iteration on error
+                        }
+                    };
+                    let signature = sign_message(&signer, msg_bytes);
+                    // Get netuid from validator state
+                    let value = models::PieceDHTValue {
+                        piece_hash: piece_key.clone(),
+                        validator_id,
+                        chunk_idx,
+                        piece_idx,
+                        piece_type: piece.piece_type,
+                        signature,
+                    };
+
+                    swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
+                        .await
+                        .expect("Failed to put piece entry in DHT"); // TODO: handle error
+                }
+                Ok(Err(e)) => {
+                    error!("Failed to upload piece: {}", e);
+                }
+                Err(e) => {
+                    error!("Failed to join piece upload task: {}", e);
+                }
+            }
         }
 
         // TODO: some of this stuff can be moved into its own helper function
@@ -505,4 +511,44 @@ async fn consume_bytes(
     }
 
     Ok((piece_hashes, chunk_hashes))
+}
+
+// Add this helper function
+async fn upload_piece_with_retry(
+    validator_base_neuron: Arc<RwLock<BaseNeuron>>,
+    miner_info: NodeInfo,
+    conn: &Connection,
+    piece: base::piece::Piece,
+    scoring_system: Arc<RwLock<ScoringSystem>>,
+    miner_uid: u16,
+) -> Result<[u8; 32]> {
+    let piece_hash = *blake3::hash(&piece.data).as_bytes();
+    let upload_result =
+        upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;
+
+    // Verification: Check if the hash received from the miner is the same
+    // as the hash of the piece and update the stats of the miner in the database accordingly
+
+    // log hash that we get vs. hash that we expect
+    info!(
+        "Hash from miner: {:?}, Expected hash: {:?}",
+        upload_result.as_bytes_ref(),
+        piece_hash
+    );
+
+    // Update stats
+    let db = scoring_system.write().await.db.clone();
+    db.conn.lock().await.execute(
+        "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
+        [miner_uid],
+    )?;
+
+    if upload_result.as_bytes_ref() == piece_hash {
+        db.conn.lock().await.execute(
+            "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
+            [miner_uid],
+        )?;
+    }
+
+    Ok(piece_hash)
 }
