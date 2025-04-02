@@ -180,10 +180,10 @@ pub enum DhtCommand {
 pub struct StorbDHT {
     /// The libp2p swarm managing network behaviour.
     pub swarm: Swarm<StorbBehaviour>,
-    /// Watch channel sender used to signal when bootstrap is complete.
-    bootstrap_done_sender: watch::Sender<bool>,
+    /// Watch channel sender to signal bootstrap completion.
+    bootstrap_done_send: watch::Sender<bool>,
     /// Watch channel receiver to observe bootstrap completion.
-    bootstrap_done: watch::Receiver<bool>,
+    bootstrap_done_recv: watch::Receiver<bool>,
     /// Mapping of query IDs to their corresponding response channels.
     queries: Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
     /// Channel receiver for DHT commands
@@ -287,7 +287,7 @@ impl StorbDHT {
         info!("Listening on {:?}", listeners);
 
         // Create the watch channel that indicates when bootstrap is done.
-        let (bootstrap_done_sender, bootstrap_done) = watch::channel(false);
+        let (bootstrap_done_send, bootstrap_done_recv) = watch::channel(false);
 
         let mut bootstrap_nodes = Vec::new();
         if let Some(peers) = bootstrap_peers {
@@ -308,20 +308,26 @@ impl StorbDHT {
             }
         }
 
-        match swarm.behaviour_mut().kademlia.bootstrap() {
-            Ok(query_id) => {
-                info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+        if !bootstrap_nodes.is_empty() {
+            match swarm.behaviour_mut().kademlia.bootstrap() {
+                Ok(query_id) => {
+                    info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+                }
+                Err(e) => {
+                    error!("Failed to initiate Kademlia bootstrap: {:?}", e);
+                }
             }
-            Err(e) => {
-                error!("Failed to initiate Kademlia bootstrap: {:?}", e);
-            }
+        } else {
+            bootstrap_done_send.send(true).unwrap_or_else(|e| {
+                debug!("Failed to signal bootstrap completion after error: {:?}", e)
+            });
         }
 
         Ok((
             Self {
                 swarm,
-                bootstrap_done_sender,
-                bootstrap_done,
+                bootstrap_done_send,
+                bootstrap_done_recv,
                 queries: Arc::new(Mutex::new(HashMap::new())),
                 command_receiver,
                 bootstrap_nodes,
@@ -369,15 +375,18 @@ impl StorbDHT {
                         "Bootstrap succeeded with {:?} remaining and {:?}",
                         num_remaining, peer
                     );
-                    if num_remaining == 0 {
+
+                    if !self.bootstrap_nodes.is_empty() && num_remaining == 0 {
                         // Signal that bootstrap is complete via the watch channel.
-                        self.bootstrap_done_sender.send(true).unwrap_or_else(|e| {
+                        self.bootstrap_done_send.send(true).unwrap_or_else(|e| {
                             debug!("Failed to signal bootstrap completion: {:?}", e)
                         });
                         if let Some(QueryChannel::Bootstrap(ch)) = queries.remove(&query_id) {
                             let _ = ch.send(Ok(()));
                         }
                     }
+
+                    debug!("No Bootstrap Nodes")
                 }
                 QueryResult::Bootstrap(Err(e)) => {
                     error!("Bootstrap query failed: {:?}", e); // Logged as error now
@@ -385,7 +394,7 @@ impl StorbDHT {
                                                                // This allows operations to proceed, though DHT might be poorly bootstrapped.
                                                                // Better long-term solutions might involve retries or checking table size.
                     warn!("Signalling bootstrap as 'done' despite error to prevent deadlock.");
-                    self.bootstrap_done_sender.send(true).unwrap_or_else(|e| {
+                    self.bootstrap_done_send.send(true).unwrap_or_else(|e| {
                         debug!("Failed to signal bootstrap completion after error: {:?}", e)
                     });
                     // Remove query channel if you track the specific bootstrap query ID
@@ -538,37 +547,36 @@ impl StorbDHT {
             let known_peers = self.known_peers.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
-                    if self.bootstrap_nodes.is_empty() {
-                        return;
-                    }
-                    let connected_count = self.bootstrap_nodes.iter()
-                        .filter_map(Self::extract_peer_info)
-                        .filter(|peer_id| self.swarm.connected_peers().any(|p| p == peer_id))
-                        .count();
+                    if !self.bootstrap_nodes.is_empty() {
+                        let connected_count = self.bootstrap_nodes.iter()
+                            .filter_map(Self::extract_peer_info)
+                            .filter(|peer_id| self.swarm.connected_peers().any(|p| p == peer_id))
+                            .count();
 
-                if connected_count < 1 {
-                        // Dial any bootstrap node that's not connected.
-                        for addr in self.bootstrap_nodes.clone() {
-                            if let Some(peer_id) = Self::extract_peer_info(&addr) {
-                                if !self.swarm.connected_peers().any(|p| p == &peer_id) {
-                                    debug!("Dialing bootstrap node: {} at {}", peer_id, addr);
-                                    if let Err(err) = self.swarm.dial(addr.clone()) {
-                                        error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                        if connected_count < 1 {
+                            // Dial any bootstrap node that's not connected.
+                            for addr in self.bootstrap_nodes.clone() {
+                                if let Some(peer_id) = Self::extract_peer_info(&addr) {
+                                    if !self.swarm.connected_peers().any(|p| p == &peer_id) {
+                                        debug!("Dialing bootstrap node: {} at {}", peer_id, addr);
+                                        if let Err(err) = self.swarm.dial(addr.clone()) {
+                                            error!("Failed to dial bootstrap node {}: {:?}", addr, err);
+                                        }
+                                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+
+                                    } else {
+                                        debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
                                     }
-                                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-
                                 } else {
-                                    debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
+                                    error!("Failed to extract PeerId from bootstrap address: {}", addr);
                                 }
-                            } else {
-                                error!("Failed to extract PeerId from bootstrap address: {}", addr);
                             }
+                        } else {
+                            debug!(
+                                "Desired number of bootstrap nodes connected ({}); stopping reconnection attempts.",
+                                connected_count
+                            );
                         }
-                    } else {
-                        debug!(
-                            "Desired number of bootstrap nodes connected ({}); stopping reconnection attempts.",
-                            connected_count
-                        );
                     }
                 }
 
@@ -1202,8 +1210,12 @@ impl StorbDHT {
     /// This internal function blocks until the bootstrap watch channel signals completion.
     async fn wait_for_bootstrap(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Waiting for bootstrap to complete...");
-        while !*self.bootstrap_done.borrow() {
-            self.bootstrap_done.changed().await?;
+        while !*self.bootstrap_done_recv.borrow() {
+            debug!("Bootstrap status: waiting for change...");
+            debug!(
+                "Bootstrap status: {:?}",
+                self.bootstrap_done_recv.changed().await?
+            );
         }
         info!("Bootstrap completed.");
         Ok(())

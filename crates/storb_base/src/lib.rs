@@ -182,7 +182,20 @@ impl BaseNeuron {
                 }
             };
 
-        let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+        let mut bootstrap_nodes: Option<Vec<Multiaddr>> = None;
+
+        if !config.dht.no_bootstrap {
+            bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+        }
+
+        // log no bootstrap and bootstrap nodes
+        if config.dht.no_bootstrap {
+            info!("Bootstrap is disabled, no bootstrap nodes will be used.");
+            // log bootstrap nodes
+            if let Some(nodes) = &bootstrap_nodes {
+                info!("Bootstrap nodes: {:?}", nodes);
+            }
+        }
 
         if !config.dht.no_bootstrap && bootstrap_nodes.as_ref().map_or(0, |nodes| nodes.len()) == 0
         {
