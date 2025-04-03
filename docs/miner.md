@@ -11,9 +11,10 @@ Have a look over the `settings.toml` file. There are various parameters there th
 ### Running miner
 
 - Mainnet
+
     ```bash
     ./target/release/storb miner \
-        --netuid 269 --external-ip EXTERNAL_IP \
+        --netuid 26 --external-ip EXTERNAL_IP \
         --api-port API_PORT \
         --quic-port QUIC_PORT \
         --wallet-name WALLET_NAME \
@@ -25,9 +26,10 @@ Have a look over the `settings.toml` file. There are various parameters there th
     ```
 
 - Testnet
+
     ```bash
     ./target/release/storb miner \
-        --netuid 26 --external-ip EXTERNAL_IP \
+        --netuid 269 --external-ip EXTERNAL_IP \
         --api-port API_PORT \
         --quic-port QUIC_PORT \
         --wallet-name WALLET_NAME \
