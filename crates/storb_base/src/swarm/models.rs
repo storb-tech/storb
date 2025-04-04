@@ -53,6 +53,7 @@ pub struct PieceDHTValue {
     pub validator_id: Compact<u16>,
     pub chunk_idx: u64,
     pub piece_idx: u64,
+    pub piece_size: u64,
     pub piece_type: PieceType,
     pub signature: KeypairSignature,
 }
@@ -196,6 +197,7 @@ mod tests {
             validator_id: Compact(98),
             chunk_idx: 55,
             piece_idx: 99,
+            piece_size: 2048,
             piece_type: PieceType::Data,
             signature: KeypairSignature::from_raw([0x11; 64]),
         }

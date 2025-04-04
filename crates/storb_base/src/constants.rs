@@ -17,3 +17,6 @@ pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 
 /// Timeout for node HTTP requests.
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Timeout params for upload requests
+pub const MIN_BANDWIDTH: u64 = 12 * 1024 * 1024; // 12MiB/s
