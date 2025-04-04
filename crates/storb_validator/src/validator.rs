@@ -193,13 +193,22 @@ impl Validator {
                 };
 
                 let start_time = Instant::now();
-                let hash_vec = upload_piece_data(
+
+                let hash_vec = match upload_piece_data(
                     self.neuron.clone(),
                     miner_info,
                     &quic_conn,
                     piece.data.clone(),
                 )
-                .await?;
+                .await
+                {
+                    Ok(hash) => hash,
+                    Err(_) => {
+                        error!("Timed out trying to upload piece data to miner {quic_miner_uid}");
+                        vec![]
+                    }
+                };
+
                 let latency = start_time.elapsed().as_secs_f64();
                 let hash = hash_vec.as_bytes_ref();
 
@@ -369,7 +378,7 @@ impl Validator {
                         account_id: miner_info.neuron_info.hotkey.clone(),
                     },
                     validator: KeyRegistrationInfo {
-                        uid: validator_id as u16,
+                        uid: validator_id,
                         account_id: signer.account_id().clone(),
                     },
                 };

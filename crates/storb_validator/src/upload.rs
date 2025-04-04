@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
+use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length};
 use base::swarm::{self, dht::DhtCommand, models};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
@@ -67,32 +68,42 @@ pub async fn upload_piece_data(
     let payload_bytes = bincode::serialize(&payload)?;
     debug!("payload_bytes: {:?}", payload_bytes);
 
-    // Send payload length
-    send_stream
-        .write_all(&(payload_bytes.len() as u64).to_be_bytes())
-        .await?;
-    // Send signature to the miner for it to verify. Note that the miner could
-    // abort the stream if the verification fails.
-    send_stream.write_all(&payload_bytes).await?;
+    let piece_size = data.len();
+    let timeout_duration =
+        std::time::Duration::from_secs_f64(piece_size as f64 / MIN_BANDWIDTH as f64 * 1.25); // this should scale with piece size
 
-    // Send data length and data itself
-    send_stream
-        .write_all(&(data.len() as u64).to_be_bytes())
-        .await?;
-    send_stream.write_all(&data).await?;
-    send_stream.finish()?;
+    // Wrap the upload operation in a timeout
+    let hash = tokio::time::timeout(timeout_duration, async {
+        // Send payload length
+        send_stream
+            .write_all(&(payload_bytes.len() as u64).to_be_bytes())
+            .await?;
 
-    // Read hash response
-    let mut hash = Vec::new();
-    let mut buf = [0u8; 1];
-    let mut count = 0;
-    while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
-        if n == 0 || count > 31 {
-            break;
+        // Send signature to the miner for it to verify
+        send_stream.write_all(&payload_bytes).await?;
+
+        // Send data length and data itself
+        send_stream
+            .write_all(&(piece_size as u64).to_be_bytes())
+            .await?;
+        send_stream.write_all(&data).await?;
+        send_stream.finish()?;
+
+        // Read hash response
+        let mut hash = Vec::new();
+        let mut buf = [0u8; 1];
+        let mut count = 0;
+        while let Ok(Some(n)) = recv_stream.read(&mut buf).await {
+            if n == 0 || count > 31 {
+                break;
+            }
+            hash.push(buf[0]);
+            count += 1;
         }
-        hash.push(buf[0]);
-        count += 1;
-    }
+        Ok::<Vec<u8>, anyhow::Error>(hash)
+    })
+    .await
+    .context("Upload operation timed out")??;
 
     Ok(hash)
 }
@@ -431,12 +442,14 @@ async fn consume_bytes(
                         }
                     };
                     let signature = sign_message(&signer, msg_bytes);
+                    let piece_size = piece.data.len() as u64;
                     // Get netuid from validator state
                     let value = models::PieceDHTValue {
                         piece_hash: piece_key.clone(),
                         validator_id,
                         chunk_idx,
                         piece_idx,
+                        piece_size,
                         piece_type: piece.piece_type,
                         signature,
                     };

@@ -12,6 +12,7 @@ use crate::constants::{
 #[derive(Debug, Clone)]
 pub struct Piece {
     pub chunk_idx: u64,
+    pub piece_size: u64,
     pub piece_idx: u64,
     pub piece_type: PieceType,
     pub data: Vec<u8>,
@@ -178,6 +179,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
 
         pieces.push(Piece {
             piece_type,
+            piece_size,
             data: piece_data,
             chunk_idx,
             piece_idx: i.try_into().expect("Failed to convert i"),
@@ -228,6 +230,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .iter()
             .map(|p| Piece {
                 chunk_idx: p.chunk_idx,
+                piece_size: p.piece_size,
                 piece_idx: p.piece_idx,
                 piece_type: p.piece_type.clone(),
                 data: vec![] // Exclude data from debug output

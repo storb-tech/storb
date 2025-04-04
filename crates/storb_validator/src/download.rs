@@ -1,10 +1,11 @@
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use base::constants::CLIENT_TIMEOUT;
+use base::constants::MIN_BANDWIDTH;
 use base::swarm::dht::DhtCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, AddressBook, BaseNeuron};
@@ -100,7 +101,9 @@ impl DownloadProcessor {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 let req_client = reqwest::Client::builder()
-                    .timeout(CLIENT_TIMEOUT)
+                    .timeout(Duration::from_secs_f64(
+                        piece_entry.piece_size as f64 / MIN_BANDWIDTH as f64,
+                    ))
                     .build()
                     .context("Failed to build reqwest client")?;
 
@@ -183,6 +186,7 @@ impl DownloadProcessor {
                     // Return immediately on the first valid response.
                     let piece = base::piece::Piece {
                         chunk_idx: piece_entry.chunk_idx,
+                        piece_size: piece_entry.piece_size,
                         piece_idx: piece_entry.piece_idx,
                         piece_type: piece_entry.piece_type.clone(),
                         data: piece_data,
