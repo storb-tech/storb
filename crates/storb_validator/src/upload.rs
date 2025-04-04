@@ -69,8 +69,15 @@ pub async fn upload_piece_data(
     debug!("payload_bytes: {:?}", payload_bytes);
 
     let piece_size = data.len();
-    let timeout_duration =
-        std::time::Duration::from_secs_f64(piece_size as f64 / MIN_BANDWIDTH as f64 * 1.25); // this should scale with piece size
+    let size: f64 = piece_size as f64;
+    let min_bandwidth = MIN_BANDWIDTH as f64;
+    let timeout_duration = std::time::Duration::from_secs_f64(size / min_bandwidth * 1.25); // this should scale with piece size
+
+    // log the timeout duration
+    debug!(
+        "Timeout duration for upload: {} milliseconds",
+        timeout_duration.as_millis()
+    );
 
     // Wrap the upload operation in a timeout
     let hash = tokio::time::timeout(timeout_duration, async {
@@ -460,9 +467,13 @@ async fn consume_bytes(
                 }
                 Ok(Err(e)) => {
                     error!("Failed to upload piece: {}", e);
+                    // return error
+                    return Err(anyhow::anyhow!("Failed to upload piece: {}", e));
                 }
                 Err(e) => {
                     error!("Failed to join piece upload task: {}", e);
+                    // return error
+                    return Err(anyhow::anyhow!("Failed to join piece upload task: {}", e));
                 }
             }
         }
