@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -129,6 +131,7 @@ impl<'a> UploadProcessor<'a> {
         info!("Quic addresses: {:?}", quic_addresses);
 
         // Establish QUIC connections with miners
+        // TODO: do we want to establish connections with all miners?
         let miner_connections = match establish_miner_connections(quic_addresses).await {
             Ok(connections) => {
                 if connections.is_empty() {
@@ -366,71 +369,118 @@ async fn consume_bytes(
 
         // Distribute pieces to miners
         let mut futures = Vec::new();
+        let successful_pieces = Arc::new(RwLock::new(HashSet::new()));
+        let upload_count = Arc::new(AtomicUsize::new(0));
+        let target_piece_count = encoded.pieces.len();
 
-        for piece in encoded.pieces {
-            let piece_idx = piece.piece_idx;
-            let idx = (piece_idx as usize) % miner_connections.len();
-            let miner_uid = miner_uids[idx];
-            let (_, conn) = miner_connections[idx].clone();
+        // Create a channel to signal when we have enough successful uploads
+        let (completion_tx, _) = tokio::sync::broadcast::channel(1);
+        let completion_tx = Arc::new(completion_tx);
 
-            let vali_clone = validator_base_neuron.clone();
-            let scoring_clone = scoring_system.clone();
+        // Calculate how many times we'll try to distribute each piece
+        // set the number of miner connections to use for this chunk
+        // TODO: this may become a constant in the future: https://github.com/storb-tech/storb/issues/66
+        let num_connections = 2 * encoded.pieces.len();
+        let attempts_per_piece = num_connections / encoded.pieces.len();
 
-            // Create future for parallel execution
-            let future = tokio::spawn(async move {
-                let vali_guard = vali_clone.read().await;
-                let peer_id = vali_guard
-                    .peer_node_uid
-                    .get_by_right(&miner_uid)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Peer ID not found for miner UID {}", miner_uid)
-                    })?;
-                let miner_info = vali_guard
-                    .address_book
-                    .clone()
-                    .read()
-                    .await
-                    .get(peer_id)
-                    .ok_or_else(|| anyhow::anyhow!("Miner info not found for peer ID {}", peer_id))?
-                    .clone();
-                let conn = conn.clone();
+        // For each attempt at distributing pieces
+        for attempt in 0..attempts_per_piece {
+            // For each piece
+            for (piece_idx, piece) in encoded.pieces.iter().enumerate() {
+                // Calculate which miner connection to use for this piece in this attempt
+                let connection_idx = attempt * encoded.pieces.len() + piece_idx;
+                // NOTE: This will wrap around if there are more attempts than connections
+                // This is not ideal, but it will work for now
+                let miner_idx = connection_idx % miner_connections.len();
 
-                let piece_clone = piece.clone();
-                let res = upload_piece_with_retry(
-                    vali_clone.clone(),
-                    miner_info,
-                    &conn,
-                    piece,
-                    scoring_clone,
-                    miner_uid,
-                )
-                .await;
+                let piece = piece.clone();
+                let miner_uid = miner_uids[miner_idx];
+                let (_, conn) = miner_connections[miner_idx].clone();
 
-                // return piece index, piece type, piece, and result (piece hash) if result is Ok
-                match res {
-                    // TODO: cloning piece is not ideal, perhaps use a reference
-                    Ok(piece_hash) => Ok((piece_idx, piece_clone, piece_hash)),
-                    Err(e) => {
-                        error!("Failed to upload piece: {}", e);
-                        Err(e)
+                let vali_clone = validator_base_neuron.clone();
+                let scoring_clone = scoring_system.clone();
+                let successful_pieces = successful_pieces.clone();
+                let upload_count = upload_count.clone();
+                let completion_tx = completion_tx.clone();
+                let mut completion_rx = completion_tx.subscribe();
+
+                let piece_data = piece.clone();
+                let future = tokio::spawn(async move {
+                    // Check if this piece was already successfully uploaded
+                    if successful_pieces.read().await.contains(&piece.piece_idx) {
+                        return Ok(None);
                     }
-                }
-            });
 
-            futures.push(future);
+                    let vali_guard = vali_clone.read().await;
+                    let peer_id = vali_guard
+                        .peer_node_uid
+                        .get_by_right(&miner_uid)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Peer ID not found for miner UID {}", miner_uid)
+                        })?;
+                    let miner_info = vali_guard
+                        .address_book
+                        .clone()
+                        .read()
+                        .await
+                        .get(peer_id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Miner info not found for peer ID {}", peer_id)
+                        })?
+                        .clone();
+
+                    tokio::select! {
+                        upload_result = upload_piece_with_retry(
+                            vali_clone.clone(),
+                            miner_info,
+                            &conn,
+                            piece_data.clone(),
+                            scoring_clone,
+                            miner_uid,
+                        ) => {
+                            match upload_result {
+                                Ok(piece_hash) => {
+                                    let mut pieces = successful_pieces.write().await;
+                                    if !pieces.contains(&piece.piece_idx) {
+                                        pieces.insert(piece.piece_idx);
+                                        let count = upload_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+                                        // If we've uploaded all pieces, signal completion
+                                        if count >= target_piece_count {
+                                            let _ = completion_tx.send(());
+                                        }
+
+                                        return Ok(Some((piece.piece_idx, piece_data, piece_hash)));
+                                    }
+                                    Ok(None)
+                                }
+                                Err(e) => Err(e)
+                            }
+                        }
+                        _ = completion_rx.recv() => {
+                            // Upload was cancelled because we have enough successful pieces
+                            Ok(None)
+                        }
+                    }
+                });
+
+                futures.push(future);
+            }
         }
 
-        // Wait for all uploads to complete
+        // Wait for all uploads to complete or be cancelled
         let results = futures::future::join_all(futures).await;
 
+        // Process successful uploads
         for result in results {
             match result {
-                Ok(Ok((piece_idx, piece, piece_hash))) => {
+                Ok(Ok(Some((piece_idx, piece, piece_hash)))) => {
+                    // Process successful upload (DHT updates etc)
                     chunk_hash_raw.update(&piece_hash);
                     chunk_piece_hashes.push(piece_hash);
                     piece_hashes.push(piece_hash);
 
-                    // add piece entry to dht
+                    // Add piece entry to DHT...
                     let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
                     info!("UPLOAD PIECE KEY: {:?}", &piece_key);
 
@@ -465,15 +515,14 @@ async fn consume_bytes(
                         .await
                         .expect("Failed to put piece entry in DHT"); // TODO: handle error
                 }
+                Ok(Ok(None)) => {
+                    // Upload was skipped or cancelled - no action needed
+                }
                 Ok(Err(e)) => {
                     error!("Failed to upload piece: {}", e);
-                    // return error
-                    return Err(anyhow::anyhow!("Failed to upload piece: {}", e));
                 }
                 Err(e) => {
                     error!("Failed to join piece upload task: {}", e);
-                    // return error
-                    return Err(anyhow::anyhow!("Failed to join piece upload task: {}", e));
                 }
             }
         }
