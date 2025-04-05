@@ -125,7 +125,7 @@ impl DownloadProcessor {
 
                 // log timeout
                 debug!(
-                    "Timeout duration for upload acknowledgement: {} milliseconds",
+                    "Timeout duration for download acknowledgement: {} milliseconds",
                     timeout_duration.as_millis()
                 );
 
@@ -281,7 +281,8 @@ impl DownloadProcessor {
                                         }
                                     }
                                     _ = completion_rx.recv() => {
-                                        // Upload was cancelled because we have enough successful pieces
+                                        // Download was cancelled because we have enough successful pieces
+                                        debug!("Download cancelled for piece hash: {:?}", piece_hash);
                                         break;
                                     }
                                 }
@@ -306,6 +307,7 @@ impl DownloadProcessor {
             // the chunk then we can exit early
             if collected_pieces.len() as u64 >= chunk_info.k {
                 let _ = completion_tx.send(());
+                debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
                 break;
             }
             collected_pieces.push(piece);
