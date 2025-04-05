@@ -12,6 +12,7 @@ use crate::constants::{
 #[derive(Debug, Clone)]
 pub struct Piece {
     pub chunk_idx: u64,
+    pub piece_size: u64,
     pub piece_idx: u64,
     pub piece_type: PieceType,
     pub data: Vec<u8>,
@@ -154,11 +155,13 @@ pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     (k, m)
 }
 
+// TODO: maybe update parts of this function in the future to adhere the fact that k and m are going to be constant
 pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     let chunk_size = chunk.len() as u64;
     let piece_size = piece_length(chunk_size, None, None);
     debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
+    // TODO: these may be constant in the future: https://github.com/storb-tech/storb/issues/66
     let (k, m) = get_k_and_m(chunk_size);
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
@@ -178,6 +181,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
 
         pieces.push(Piece {
             piece_type,
+            piece_size,
             data: piece_data,
             chunk_idx,
             piece_idx: i.try_into().expect("Failed to convert i"),
@@ -228,6 +232,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .iter()
             .map(|p| Piece {
                 chunk_idx: p.chunk_idx,
+                piece_size: p.piece_size,
                 piece_idx: p.piece_idx,
                 piece_type: p.piece_type.clone(),
                 data: vec![] // Exclude data from debug output

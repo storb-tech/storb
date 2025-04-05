@@ -30,6 +30,7 @@ sync_frequency = 300
 
 [dht]
 port = 6942
+no_bootstrap = false
 
 # mainnet dht bootstrap node
 bootstrap_nodes = ["/ip4/185.216.203.183/udp/6970/quic-v1/p2p/12D3KooWHD7S45Y2ao9bK6W8zKWxzkTBaDqNU7iKnX1jJr49okov"]

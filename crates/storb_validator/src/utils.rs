@@ -3,7 +3,6 @@ use std::sync::Arc;
 use libp2p::Multiaddr;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use subxt::ext::codec::Compact;
-use tokio::sync::RwLock;
 
 use crate::validator::Validator;
 
@@ -15,10 +14,11 @@ pub fn generate_synthetic_data(size: usize) -> Vec<u8> {
 }
 
 pub async fn get_id_quic_uids(
-    validator: Arc<RwLock<Validator>>,
+    validator: Arc<Validator>,
 ) -> (Compact<u16>, Vec<Multiaddr>, Vec<u16>) {
-    let address_book_arc = validator.read().await.neuron.address_book.clone();
-    let validator_id = match validator.read().await.neuron.local_node_info.uid {
+    let neuron_guard = validator.neuron.read().await;
+    let address_book_arc = neuron_guard.address_book.clone();
+    let validator_id = match neuron_guard.clone().local_node_info.uid {
         Some(id) => Compact(id),
         None => {
             return (Compact(0), Vec::new(), Vec::new());
@@ -31,7 +31,8 @@ pub async fn get_id_quic_uids(
     let mut quic_addresses_with_uids = Vec::new();
     for (peer_id, node_info) in address_book.iter() {
         if let Some(quic_addr) = node_info.quic_address.clone() {
-            let peer_id_to_uid = validator.read().await.neuron.peer_node_uid.clone();
+            let neuron_guard = validator.neuron.read().await;
+            let peer_id_to_uid = neuron_guard.peer_node_uid.clone();
             if let Some(uid) = peer_id_to_uid.get_by_left(peer_id) {
                 quic_addresses_with_uids.push((quic_addr, *uid));
             }

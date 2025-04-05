@@ -443,6 +443,7 @@ mod tests {
             validator_id: Compact(77u16),
             chunk_idx: 456,
             piece_idx: 2,
+            piece_size: 2048,
             piece_type: PieceType::Data,
             signature: KeypairSignature::from_raw([0x11; 64]),
         };
