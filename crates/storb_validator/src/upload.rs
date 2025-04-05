@@ -73,31 +73,31 @@ pub async fn upload_piece_data(
     let piece_size = data.len();
     let size: f64 = piece_size as f64;
     let min_bandwidth = MIN_BANDWIDTH as f64;
-    let timeout_duration = std::time::Duration::from_secs_f64(size / min_bandwidth * 1.25); // this should scale with piece size
+    let timeout_duration = std::time::Duration::from_secs_f64(size / min_bandwidth); // this should scale with piece size
+
+    // Send payload length
+    send_stream
+        .write_all(&(payload_bytes.len() as u64).to_be_bytes())
+        .await?;
+
+    // Send signature to the miner for it to verify
+    send_stream.write_all(&payload_bytes).await?;
+
+    // Send data length and data itself
+    send_stream
+        .write_all(&(piece_size as u64).to_be_bytes())
+        .await?;
+    send_stream.write_all(&data).await?;
+    send_stream.finish()?;
 
     // log the timeout duration
     debug!(
-        "Timeout duration for upload: {} milliseconds",
+        "Timeout duration for upload acknowledgement: {} milliseconds",
         timeout_duration.as_millis()
     );
 
-    // Wrap the upload operation in a timeout
+    // Wrap the upload response operation in a timeout
     let hash = tokio::time::timeout(timeout_duration, async {
-        // Send payload length
-        send_stream
-            .write_all(&(payload_bytes.len() as u64).to_be_bytes())
-            .await?;
-
-        // Send signature to the miner for it to verify
-        send_stream.write_all(&payload_bytes).await?;
-
-        // Send data length and data itself
-        send_stream
-            .write_all(&(piece_size as u64).to_be_bytes())
-            .await?;
-        send_stream.write_all(&data).await?;
-        send_stream.finish()?;
-
         // Read hash response
         let mut hash = Vec::new();
         let mut buf = [0u8; 1];
@@ -112,7 +112,7 @@ pub async fn upload_piece_data(
         Ok::<Vec<u8>, anyhow::Error>(hash)
     })
     .await
-    .context("Upload operation timed out")??;
+    .context("Timed out waiting for upload acknowledgement")??;
 
     Ok(hash)
 }
