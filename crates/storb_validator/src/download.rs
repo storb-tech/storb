@@ -228,7 +228,7 @@ impl DownloadProcessor {
         let (piece_result_tx, mut piece_result_rx) =
             mpsc::channel::<base::piece::Piece>(total_pieces);
 
-        let mut join_handles = Vec::with_capacity(10);
+        let mut join_handles = Vec::with_capacity(THREAD_COUNT);
         let dht_sender = dht_sender.clone();
         let local_address_book = address_book.clone();
 
@@ -290,6 +290,11 @@ impl DownloadProcessor {
 
         let mut collected_pieces = Vec::new();
         while let Some(piece) = piece_result_rx.recv().await {
+            // If we have the minimum k pieces necessary for reconstructing
+            // the chunk then we can exit early
+            if collected_pieces.len() as u64 >= chunk_info.k {
+                break;
+            }
             collected_pieces.push(piece);
         }
 
