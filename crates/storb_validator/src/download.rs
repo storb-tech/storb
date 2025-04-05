@@ -97,13 +97,14 @@ impl DownloadProcessor {
 
             // Each provider query is executed in its own async block.
             // The provider variable is moved into the block for logging purposes.
+            let size: f64 = piece_entry.piece_size as f64;
+            let min_bandwidth = MIN_BANDWIDTH as f64;
+            let timeout_duration = Duration::from_secs_f64(size / min_bandwidth);
             let fut = async move {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 let req_client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs_f64(
-                        piece_entry.piece_size as f64 / MIN_BANDWIDTH as f64,
-                    ))
+                    .timeout(timeout_duration)
                     .build()
                     .context("Failed to build reqwest client")?;
 
@@ -121,6 +122,12 @@ impl DownloadProcessor {
                 let signature = sign_message(&signer.clone(), &message);
                 let payload = HandshakePayload { signature, message };
                 let payload_bytes = bincode::serialize(&payload)?;
+
+                // log timeout
+                debug!(
+                    "Timeout duration for upload acknowledgement: {} milliseconds",
+                    timeout_duration.as_millis()
+                );
 
                 let url = node_info
                     .http_address
