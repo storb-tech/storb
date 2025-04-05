@@ -125,7 +125,7 @@ impl DownloadProcessor {
 
                 // log timeout
                 debug!(
-                    "Timeout duration for upload acknowledgement: {} milliseconds",
+                    "Timeout duration for download acknowledgement: {} milliseconds",
                     timeout_duration.as_millis()
                 );
 
@@ -228,9 +228,12 @@ impl DownloadProcessor {
         let (piece_result_tx, mut piece_result_rx) =
             mpsc::channel::<base::piece::Piece>(total_pieces);
 
-        let mut join_handles = Vec::with_capacity(10);
+        let mut join_handles = Vec::with_capacity(THREAD_COUNT);
         let dht_sender = dht_sender.clone();
         let local_address_book = address_book.clone();
+
+        let (completion_tx, _) = tokio::sync::broadcast::channel(1);
+        let completion_tx = Arc::new(completion_tx);
 
         // Spawn threads
         for _ in 0..THREAD_COUNT {
@@ -241,36 +244,46 @@ impl DownloadProcessor {
             let scoring_system_clone = scoring_system.clone();
             let validator_base_clone = validator_base_neuron.clone();
 
+            let completion_tx = completion_tx.clone();
+            let mut completion_rx = completion_tx.subscribe();
+
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
                     .expect("Failed to create Tokio runtime to process pieces");
 
                 rt.block_on(async move {
                     loop {
-                        let task = {
+                        let piece_hash = {
                             let mut rx_lock = piece_task_rx.lock().await;
                             rx_lock.recv().await
                         };
 
-                        match task {
-                            Some(task) => {
-                                match Self::produce_piece(
-                                    validator_base_clone.clone(),
-                                    scoring_system_clone.clone(),
-                                    dht_sender_clone.clone(),
-                                    address_book_clone.clone(),
-                                    task,
-                                )
-                                .await
-                                {
-                                    Ok(piece) => {
-                                        piece_result_tx
-                                            .send(piece)
-                                            .await
-                                            .expect("Failed to send piece");
+                        match piece_hash {
+                            Some(piece_hash) => {
+                                tokio::select! {
+                                    byte_prod_res = Self::produce_piece(
+                                        validator_base_clone.clone(),
+                                        scoring_system_clone.clone(),
+                                        dht_sender_clone.clone(),
+                                        address_book_clone.clone(),
+                                        piece_hash,
+                                    ) => {
+                                        match byte_prod_res {
+                                            Ok(piece) => {
+                                                piece_result_tx
+                                                    .send(piece)
+                                                    .await
+                                                    .expect("Failed to send piece");
+                                            }
+                                            Err(err) => {
+                                                error!("Failed to process piece: {}", err);
+                                            }
+                                        }
                                     }
-                                    Err(err) => {
-                                        error!("Failed to process piece: {}", err);
+                                    _ = completion_rx.recv() => {
+                                        // Download was cancelled because we have enough successful pieces
+                                        debug!("Download cancelled for piece hash: {:?}", piece_hash);
+                                        break;
                                     }
                                 }
                             }
@@ -290,6 +303,13 @@ impl DownloadProcessor {
 
         let mut collected_pieces = Vec::new();
         while let Some(piece) = piece_result_rx.recv().await {
+            // If we have the minimum k pieces necessary for reconstructing
+            // the chunk then we can exit early
+            if collected_pieces.len() as u64 >= chunk_info.k {
+                let _ = completion_tx.send(());
+                debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
+                break;
+            }
             collected_pieces.push(piece);
         }
 
