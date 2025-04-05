@@ -15,10 +15,13 @@ use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
 use quinn::Connection;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::quic::establish_miner_connections;
@@ -361,6 +364,20 @@ async fn consume_bytes(
             .context("Failed to get validator UID")?,
     );
 
+    // TODO: the miners connections that will be used here should be determined by the scoring system
+    // and hence determine which miners to use for each piece. we do the following for the timebeing:
+    // randomly shuffle the miner connections and uids, but do so so that they are shuffled in the same order
+    // good way to do this is to first create a vector of indices and then shuffle that
+    // and then use that to index into the miner connections and uids
+    let mut indices: Vec<usize> = (0..miner_connections.len()).collect();
+    let mut rng: StdRng = SeedableRng::from_entropy();
+    indices.shuffle(&mut rng);
+    let miner_connections: Vec<(SocketAddr, Connection)> = indices
+        .iter()
+        .map(|&i| miner_connections[i].clone())
+        .collect();
+    let miner_uids: Vec<u16> = indices.iter().map(|&i| miner_uids[i]).collect();
+
     while let Some(chunk) = rx.recv().await {
         // Encode the chunk using FEC
         let encoded = encode_chunk(&chunk, chunk_idx);
@@ -448,6 +465,7 @@ async fn consume_bytes(
                                         // If we've uploaded all pieces, signal completion
                                         if count >= target_piece_count {
                                             let _ = completion_tx.send(());
+                                            debug!("Required number of pieces uploaded - signalling completion");
                                         }
 
                                         return Ok(Some((piece.piece_idx, piece_data, piece_hash)));
@@ -459,6 +477,7 @@ async fn consume_bytes(
                         }
                         _ = completion_rx.recv() => {
                             // Upload was cancelled because we have enough successful pieces
+                            trace!("Upload cancelled for piece {}", piece.piece_idx);
                             Ok(None)
                         }
                     }
