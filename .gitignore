@@ -24,3 +24,6 @@ test_dir_*
 # Certificates
 *.der
 *.pem
+
+# Config
+.config/

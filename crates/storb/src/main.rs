@@ -10,12 +10,6 @@ mod constants;
 mod log;
 
 pub fn main() -> Result<()> {
-    // CLI values take precedence over settings.toml
-    let settings = match config::Settings::new(None) {
-        Ok(s) => s,
-        Err(error) => fatal!("Failed to parse settings file: {error:?}"),
-    };
-
     let about_text = format!("{} {}\n{}", NAME, VERSION, ABOUT);
     let usage_text = format!("{} <command> [options] [<path>]", BIN_NAME);
     let after_help_text = format!(
@@ -36,6 +30,19 @@ pub fn main() -> Result<()> {
         .subcommand_required(true);
 
     let matches = storb.get_matches();
+
+    let config_file: Option<&str> = match matches.try_get_one::<String>("config") {
+        Ok(config_path) => config_path.map(|s| s.as_str()),
+        Err(error) => {
+            fatal!("Error while parsing config file flag: {error}")
+        }
+    };
+
+    // CLI values take precedence over settings.toml
+    let settings = match config::Settings::new(config_file) {
+        Ok(s) => s,
+        Err(error) => fatal!("Failed to parse settings file: {error:?}"),
+    };
 
     // Initialise logger and set the logging level
     let log_level_arg = match matches.try_get_one::<String>("log_level") {
