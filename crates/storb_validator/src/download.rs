@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -232,7 +233,7 @@ impl DownloadProcessor {
         let dht_sender = dht_sender.clone();
         let local_address_book = address_book.clone();
 
-        let (completion_tx, _) = tokio::sync::broadcast::channel(1);
+        let (completion_tx, _) = tokio::sync::broadcast::channel::<()>(1);
         let completion_tx = Arc::new(completion_tx);
 
         // Spawn threads
@@ -302,14 +303,18 @@ impl DownloadProcessor {
         drop(piece_task_tx);
 
         let mut collected_pieces = Vec::new();
+        let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
+
         while let Some(piece) = piece_result_rx.recv().await {
             // If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
-            if collected_pieces.len() as u64 >= chunk_info.k {
+            if unique_pieces.read().await.len() as u64 > chunk_info.k {
                 let _ = completion_tx.send(());
                 debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
                 break;
             }
+            let mut pieces =  unique_pieces.write().await;
+            pieces.insert(piece.piece_idx);
             collected_pieces.push(piece);
         }
 
@@ -369,59 +374,59 @@ impl DownloadProcessor {
         let scoring_system = state.scoring_system.clone();
         let validator_base_neuron = state.neuron.clone();
 
-        tokio::spawn(async move {
-            for chunk_hash in chunk_hashes.clone() {
-                // convert chunk_hash to a string
-                let chunk_key = RecordKey::new(&chunk_hash);
-                info!("RecordKey of chunk hash: {:?}", chunk_key);
+        for chunk_hash in chunk_hashes.clone() {
+            // convert chunk_hash to a string
+            let chunk_key = RecordKey::new(&chunk_hash);
+            info!("RecordKey of chunk hash: {:?}", chunk_key);
 
-                let chunk_res = match swarm::dht::StorbDHT::get_chunk_entry(
-                    dht_sender.clone(),
-                    chunk_key,
-                )
-                .await
-                {
-                    Ok(chunk) => Some(chunk),
-                    Err(e) => {
-                        error!("Error getting chunk entry: {}", e);
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "An internal server error occurred".to_string(),
-                        ));
-                    }
-                };
-
-                let chunk = match chunk_res {
-                    Some(Some(chunk)) => chunk,
-                    Some(None) | None => {
-                        error!("Chunk entry not found");
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "An internal server error occurred".to_string(),
-                        ));
-                    }
-                };
-                info!(
-                    "Found chunk hash: {:?} with {:?} pieces",
-                    &chunk.chunk_hash,
-                    &chunk.piece_hashes.len()
-                );
-
-                if let Err(e) = Self::produce_chunk(
-                    validator_base_neuron.clone(),
-                    scoring_system.clone(),
-                    dht_sender.clone(),
-                    address_book.clone(),
-                    chunk_tx.clone(),
-                    chunk,
-                )
-                .await
-                {
-                    error!("Error producing chunk: {}", e);
+            let chunk_res = match swarm::dht::StorbDHT::get_chunk_entry(
+                dht_sender.clone(),
+                chunk_key,
+            )
+            .await
+            {
+                Ok(chunk) => Some(chunk),
+                Err(e) => {
+                    error!("Error getting chunk entry: {}", e);
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "An internal server error occurred".to_string(),
+                    ));
                 }
+            };
+
+            let chunk = match chunk_res {
+                Some(Some(chunk)) => chunk,
+                Some(None) | None => {
+                    error!("Chunk entry not found");
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "An internal server error occurred".to_string(),
+                    ));
+                }
+            };
+            info!(
+                "Found chunk hash: {:?} with {:?} pieces",
+                &chunk.chunk_hash,
+                &chunk.piece_hashes.len()
+            );
+
+            let chunk_idx = chunk.chunk_idx;
+            if let Err(e) = Self::produce_chunk(
+                validator_base_neuron.clone(),
+                scoring_system.clone(),
+                dht_sender.clone(),
+                address_book.clone(),
+                chunk_tx.clone(),
+                chunk,
+            )
+            .await
+            {
+                error!("Error producing chunk: {}", e);
             }
-            Ok(())
-        });
+
+            info!("Produced chunk {:?}", chunk_idx);
+        }
 
         let stream =
             tokio_stream::wrappers::ReceiverStream::new(chunk_rx).map(Ok::<_, std::io::Error>);
