@@ -13,9 +13,9 @@ use expanduser::expanduser;
 pub fn common_args() -> Vec<Arg> {
     vec![
         Arg::new("config")
-            .long("config_file")
-            .value_name("config_file")
-            .help("Custom config file")
+            .long("config-file")
+            .value_name("file")
+            .help("Use a custom config file")
             .action(ArgAction::Set)
             .global(true),
         Arg::new("netuid")

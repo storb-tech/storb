@@ -1,4 +1,5 @@
 .DS_Store
+.config/
 .direnv
 .sqlx
 .vscode
@@ -24,6 +25,3 @@ test_dir_*
 # Certificates
 *.der
 *.pem
-
-# Config
-.config/

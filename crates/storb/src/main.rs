@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Command;
 
 use constants::{ABOUT, BIN_NAME, NAME, VERSION};
+use expanduser::expanduser;
 use tracing::info;
 
 mod cli;
@@ -31,15 +32,35 @@ pub fn main() -> Result<()> {
 
     let matches = storb.get_matches();
 
-    let config_file: Option<&str> = match matches.try_get_one::<String>("config") {
+    // Gets the config file as str
+    let config_file_raw: Option<&str> = match matches.try_get_one::<String>("config") {
         Ok(config_path) => config_path.map(|s| s.as_str()),
         Err(error) => {
             fatal!("Error while parsing config file flag: {error}")
         }
     };
 
+    // Expands the path
+    let config_file = match config_file_raw {
+        Some(path_str) => {
+            let expanded_path = expanduser(path_str)
+                .unwrap_or_else(|e| fatal!("Error while parsing config file flag: {e}"));
+
+            match expanded_path.to_str() {
+                Some(s) => Some(s.to_owned()),
+                None => {
+                    fatal!(
+                        "Config path is not valid UTF-8: {}",
+                        expanded_path.display()
+                    );
+                }
+            }
+        }
+        None => None,
+    };
+
     // CLI values take precedence over settings.toml
-    let settings = match config::Settings::new(config_file) {
+    let settings = match config::Settings::new(config_file.as_deref()) {
         Ok(s) => s,
         Err(error) => fatal!("Failed to parse settings file: {error:?}"),
     };
