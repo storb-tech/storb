@@ -240,7 +240,7 @@ impl DownloadProcessor {
         for _ in 0..THREAD_COUNT {
             let piece_task_rx = Arc::clone(&piece_task_rx);
             let piece_result_tx = piece_result_tx.clone();
-            let dht_sender_clone = dht_sender.clone();
+            let dht_sender_clone: mpsc::Sender<DhtCommand> = dht_sender.clone();
             let address_book_clone = local_address_book.clone();
             let scoring_system_clone = scoring_system.clone();
             let validator_base_clone = validator_base_neuron.clone();
@@ -306,14 +306,14 @@ impl DownloadProcessor {
         let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
 
         while let Some(piece) = piece_result_rx.recv().await {
-            // If we have the minimum k pieces necessary for reconstructing
+            // TODO: If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
-            if unique_pieces.read().await.len() as u64 > chunk_info.k {
-                let _ = completion_tx.send(());
-                debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
-                break;
-            }
-            let mut pieces =  unique_pieces.write().await;
+            // if unique_pieces.read().await.len() as u64 > chunk_info.k {
+            //     let _ = completion_tx.send(());
+            //     debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
+            //     break;
+            // }
+            let mut pieces = unique_pieces.write().await;
             pieces.insert(piece.piece_idx);
             collected_pieces.push(piece);
         }
@@ -379,21 +379,17 @@ impl DownloadProcessor {
             let chunk_key = RecordKey::new(&chunk_hash);
             info!("RecordKey of chunk hash: {:?}", chunk_key);
 
-            let chunk_res = match swarm::dht::StorbDHT::get_chunk_entry(
-                dht_sender.clone(),
-                chunk_key,
-            )
-            .await
-            {
-                Ok(chunk) => Some(chunk),
-                Err(e) => {
-                    error!("Error getting chunk entry: {}", e);
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "An internal server error occurred".to_string(),
-                    ));
-                }
-            };
+            let chunk_res =
+                match swarm::dht::StorbDHT::get_chunk_entry(dht_sender.clone(), chunk_key).await {
+                    Ok(chunk) => Some(chunk),
+                    Err(e) => {
+                        error!("Error getting chunk entry: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "An internal server error occurred".to_string(),
+                        ));
+                    }
+                };
 
             let chunk = match chunk_res {
                 Some(Some(chunk)) => chunk,

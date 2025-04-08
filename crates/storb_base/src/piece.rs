@@ -5,7 +5,7 @@ use tracing::{debug, error};
 use zfec_rs::Chunk as ZFecChunk;
 
 use crate::constants::{
-    PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
+    CHUNK_K, CHUNK_M, PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
     PIECE_LENGTH_SCALING,
 };
 
@@ -161,8 +161,10 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     let piece_size = piece_length(chunk_size, None, None);
     debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
-    // TODO: these may be constant in the future: https://github.com/storb-tech/storb/issues/66
-    let (k, m) = get_k_and_m(chunk_size);
+    // TODO: see TODO(k_and_m)
+    // let (k, m) = get_k_and_m(chunk_size);
+    let k = CHUNK_K;
+    let m = CHUNK_M;
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
