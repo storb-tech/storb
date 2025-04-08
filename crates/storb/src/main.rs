@@ -40,23 +40,18 @@ pub fn main() -> Result<()> {
         }
     };
 
-    // Expands the path
-    let config_file = match config_file_raw {
-        Some(path_str) => {
-            let expanded_path = expanduser(path_str)
-                .unwrap_or_else(|e| fatal!("Error while parsing config file flag: {e}"));
+    let expanded_path = expanduser(config_file_raw.unwrap_or("settings.toml"))
+        .map_err(|e| fatal!("Error while expanding config file path: {e}"))
+        .unwrap_or_else(|_| fatal!("Failed to expand config file path"));
 
-            match expanded_path.to_str() {
-                Some(s) => Some(s.to_owned()),
-                None => {
-                    fatal!(
-                        "Config path is not valid UTF-8: {}",
-                        expanded_path.display()
-                    );
-                }
-            }
+    let config_file = match expanded_path.to_str() {
+        Some(s) => Some(s.to_owned()),
+        None => {
+            fatal!(
+                "Config path is not valid UTF-8: {}",
+                expanded_path.display()
+            );
         }
-        None => None,
     };
 
     // CLI values take precedence over settings.toml
