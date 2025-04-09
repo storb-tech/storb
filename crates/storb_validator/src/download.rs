@@ -308,11 +308,11 @@ impl DownloadProcessor {
         while let Some(piece) = piece_result_rx.recv().await {
             // TODO: If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
-            // if unique_pieces.read().await.len() as u64 > chunk_info.k {
-            //     let _ = completion_tx.send(());
-            //     debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
-            //     break;
-            // }
+            if unique_pieces.read().await.len() as u64 > chunk_info.k {
+                let _ = completion_tx.send(());
+                debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
+                break;
+            }
             let mut pieces = unique_pieces.write().await;
             pieces.insert(piece.piece_idx);
             collected_pieces.push(piece);

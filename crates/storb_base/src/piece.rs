@@ -5,7 +5,7 @@ use tracing::{debug, error};
 use zfec_rs::Chunk as ZFecChunk;
 
 use crate::constants::{
-    CHUNK_K, CHUNK_M, PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
+    PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
     PIECE_LENGTH_SCALING,
 };
 
@@ -159,12 +159,12 @@ pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
 pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     let chunk_size = chunk.len() as u64;
     let piece_size = piece_length(chunk_size, None, None);
-    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
     // TODO: see TODO(k_and_m)
-    // let (k, m) = get_k_and_m(chunk_size);
-    let k = CHUNK_K;
-    let m = CHUNK_M;
+    let (k, m) = get_k_and_m(chunk_size);
+    // let k: usize = CHUNK_K;
+    // let m = CHUNK_M;
+    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}, k = {k}, m = {m}");
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
@@ -205,18 +205,19 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
     let k: usize = encoded_chunk.k as usize;
     let m: usize = encoded_chunk.m as usize;
     let padlen = encoded_chunk.padlen;
-    let pieces = encoded_chunk.pieces.clone();
+    let mut pieces = encoded_chunk.pieces.clone();
+    pieces.sort_unstable_by_key(|p| p.piece_idx);
 
     let mut pieces_to_decode: Vec<ZFecChunk> = Vec::new();
 
     // zfec decode requires exactly k blocks
     if pieces.len() > k {
-        for (i, p) in pieces.iter().take(k).enumerate() {
-            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), i));
+        for p in pieces.iter().take(k) {
+            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), p.piece_idx as usize));
         }
     } else {
-        for (i, p) in pieces.iter().enumerate() {
-            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), i));
+        for p in pieces.iter() {
+            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), p.piece_idx as usize));
         }
     }
 
