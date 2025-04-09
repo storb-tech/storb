@@ -11,7 +11,7 @@ use libp2p::kad::{
     PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{identify, identity, mdns, noise, ping, yamux, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
@@ -268,7 +268,11 @@ impl StorbDHT {
         // Build the Swarm using QUIC transport and Tokio.
         let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
             .with_tokio()
-            .with_quic() // Using QUIC for transport.
+            // .with_tcp(libp2p::tcp::Config::default(), noise::Config::new, || {
+            //     yamux::Config::default()
+            // })?
+            .with_quic()
+            // Using QUIC for transport.
             .with_behaviour(|_| Ok(behaviour))?
             .with_swarm_config(|cfg| cfg)
             .build();
@@ -319,7 +323,7 @@ impl StorbDHT {
             }
         } else {
             bootstrap_done_send.send(true).unwrap_or_else(|e| {
-                debug!("Failed to signal bootstrap completion after error: {:?}", e)
+                warn!("Failed to signal bootstrap completion after error: {:?}", e)
             });
         }
 
@@ -371,22 +375,23 @@ impl StorbDHT {
                     num_remaining,
                     peer,
                 })) => {
-                    debug!(
+                    trace!(
                         "Bootstrap succeeded with {:?} remaining and {:?}",
-                        num_remaining, peer
+                        num_remaining,
+                        peer
                     );
 
                     if !self.bootstrap_nodes.is_empty() && num_remaining == 0 {
                         // Signal that bootstrap is complete via the watch channel.
                         self.bootstrap_done_send.send(true).unwrap_or_else(|e| {
-                            debug!("Failed to signal bootstrap completion: {:?}", e)
+                            warn!("Failed to signal bootstrap completion: {:?}", e)
                         });
                         if let Some(QueryChannel::Bootstrap(ch)) = queries.remove(&query_id) {
                             let _ = ch.send(Ok(()));
                         }
                     }
 
-                    debug!("No Bootstrap Nodes")
+                    trace!("No Bootstrap Nodes")
                 }
                 QueryResult::Bootstrap(Err(e)) => {
                     error!("Bootstrap query failed: {:?}", e); // Logged as error now
@@ -395,7 +400,7 @@ impl StorbDHT {
                                                                // Better long-term solutions might involve retries or checking table size.
                     warn!("Signalling bootstrap as 'done' despite error to prevent deadlock.");
                     self.bootstrap_done_send.send(true).unwrap_or_else(|e| {
-                        debug!("Failed to signal bootstrap completion after error: {:?}", e)
+                        warn!("Failed to signal bootstrap completion after error: {:?}", e)
                     });
                     // Remove query channel if you track the specific bootstrap query ID
                 }
@@ -558,14 +563,14 @@ impl StorbDHT {
                             for addr in self.bootstrap_nodes.clone() {
                                 if let Some(peer_id) = Self::extract_peer_info(&addr) {
                                     if !self.swarm.connected_peers().any(|p| p == &peer_id) {
-                                        debug!("Dialing bootstrap node: {} at {}", peer_id, addr);
+                                        trace!("Dialing bootstrap node: {} at {}", peer_id, addr);
                                         if let Err(err) = self.swarm.dial(addr.clone()) {
                                             error!("Failed to dial bootstrap node {}: {:?}", addr, err);
                                         }
                                         self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
 
                                     } else {
-                                        debug!("Already connected to bootstrap node: {} at {}", peer_id, addr);
+                                        trace!("Already connected to bootstrap node: {} at {}", peer_id, addr);
                                     }
                                 } else {
                                     error!("Failed to extract PeerId from bootstrap address: {}", addr);
@@ -591,7 +596,7 @@ impl StorbDHT {
                             pending.insert(peer_id);
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            debug!("Connection closed with peer: {:?}", peer_id);
+                            trace!("Connection closed with peer: {:?}", peer_id);
                             let mut pending = pending_verification.lock().await;
                             pending.remove(&peer_id);
                             drop(pending); // Release lock
@@ -604,7 +609,7 @@ impl StorbDHT {
                             keys.remove(&peer_id);
                             drop(keys);
 
-                            debug!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
+                            trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                         }
                         SwarmEvent::IncomingConnection { .. } => {
@@ -673,7 +678,7 @@ impl StorbDHT {
                                                         }
 
                                                         // --- Add valid addresses to Kademlia ---
-                                                        debug!(peer_id=%peer_id, "Adding verified peer's valid addresses to Kademlia.");
+                                                        trace!(peer_id=%peer_id, "Adding verified peer's valid addresses to Kademlia.");
 
                                                         let mut potential_addrs = HashSet::new(); // Use HashSet to avoid duplicates
                                                         // Add observed address first if potentially valid
@@ -696,7 +701,7 @@ impl StorbDHT {
                                                         } else {
                                                             let kademlia = &mut self.swarm.behaviour_mut().kademlia;
                                                             for addr in potential_addrs {
-                                                                debug!(peer_id=%peer_id, address=%addr, "Adding address to Kademlia.");
+                                                                trace!(peer_id=%peer_id, address=%addr, "Adding address to Kademlia.");
                                                                 kademlia.add_address(&peer_id, addr);
                                                             }
                                                         }
@@ -732,7 +737,7 @@ impl StorbDHT {
                                                     };
                                                     if is_verified {
                                                         // Already verified, update Kademlia addresses
-                                                        debug!(peer_id=%peer_id, "Peer already verified. Ensuring Kademlia addresses are up-to-date.");
+                                                        trace!(peer_id=%peer_id, "Peer already verified. Ensuring Kademlia addresses are up-to-date.");
                                                         let mut potential_addrs = HashSet::new();
                                                         let observed_addr = info.observed_addr.clone();
                                                         if is_valid_external_addr(&observed_addr) {
@@ -756,10 +761,10 @@ impl StorbDHT {
                                             }
                                         },
                                         identify::Event::Sent { connection_id, peer_id } => {
-                                            debug!("Identify::Sent to {}: {:?}", peer_id, connection_id);
+                                            trace!("Identify::Sent to {}: {:?}", peer_id, connection_id);
                                         }
                                         identify::Event::Pushed { connection_id: _, peer_id, info } => {
-                                            debug!("Identify::Pushed to {}: {:?}", peer_id, info);
+                                            trace!("Identify::Pushed to {}: {:?}", peer_id, info);
                                         }
                                         identify::Event::Error { connection_id: _, peer_id, error } => {
                                             error!("Identify::Error with {}: {:?}", peer_id, error);
@@ -772,7 +777,7 @@ impl StorbDHT {
                             }
                         }
                         SwarmEvent::Dialing { peer_id, .. } => {
-                            debug!("Dialing peer: {:?}", peer_id);
+                            trace!("Dialing peer: {:?}", peer_id);
                         }
                         _ => {
                             trace!("Other swarm event: {:?}", event);
@@ -1211,8 +1216,8 @@ impl StorbDHT {
     async fn wait_for_bootstrap(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Waiting for bootstrap to complete...");
         while !*self.bootstrap_done_recv.borrow() {
-            debug!("Bootstrap status: waiting for change...");
-            debug!(
+            trace!("Bootstrap status: waiting for change...");
+            trace!(
                 "Bootstrap status: {:?}",
                 self.bootstrap_done_recv.changed().await?
             );
