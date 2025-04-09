@@ -120,6 +120,7 @@ pub struct LocalNodeInfo {
     pub version: Version,
 }
 
+// TODO: Break this up into separateto prevent locking constantly
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
