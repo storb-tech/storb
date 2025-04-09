@@ -270,7 +270,7 @@ impl BaseNeuron {
         if config.post_ip {
             let address = format!("{}:{}", config.external_ip, config.api_port)
                 .parse()
-                .unwrap();
+                .expect("Failed to parse address when attempting to post IP. Is it correct?");
             info!("Serving axon as: {}", address);
             let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Udp);
             neuron
@@ -278,7 +278,7 @@ impl BaseNeuron {
                 .tx()
                 .sign_and_submit_default(&payload, &neuron.signer)
                 .await
-                .unwrap();
+                .expect("Failed to post IP to Subtensor");
             info!("Successfully served axon!");
         }
 
