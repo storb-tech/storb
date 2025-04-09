@@ -11,7 +11,7 @@ use libp2p::kad::{
     PutRecordOk, QueryId, QueryResult, Quorum, Record, RecordKey,
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
-use libp2p::{identify, identity, mdns, noise, ping, yamux, Multiaddr, PeerId, SwarmBuilder};
+use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
@@ -616,10 +616,10 @@ impl StorbDHT {
                             trace!("Incoming connection");
                         }
                         SwarmEvent::IncomingConnectionError { error, .. } => {
-                            error!("Incoming connection failed: {:?}", error);
+                            trace!("Incoming connection failed: {:?}", error);
                         }
                         SwarmEvent::OutgoingConnectionError { error, .. } => {
-                            error!("Outgoing connection failed: {:?}", error);
+                            trace!("Outgoing connection failed: {:?}", error);
                         }
                         SwarmEvent::Behaviour(event) => {
                             match event {

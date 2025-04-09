@@ -1,12 +1,10 @@
 use std::io::stderr;
 
-use tracing::level_filters::LevelFilter;
-use tracing::Level;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::Registry;
+use tracing_subscriber::{fmt, EnvFilter};
 
 /// Print to stderr and exit with a non-zero exit code
 #[macro_export]
@@ -19,16 +17,16 @@ macro_rules! fatal {
 
 /// Initialise the global logger
 pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
-    let level: Level = match log_level {
-        "TRACE" => Level::TRACE,
-        "DEBUG" => Level::DEBUG,
-        "INFO" => Level::INFO,
-        "WARN" => Level::WARN,
-        "ERROR" => Level::ERROR,
+    match log_level {
+        "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" => {}
         _ => {
             fatal!("Invalid log level `{log_level}`. Valid levels are: TRACE, DEBUG, INFO, WARN, ERROR");
         }
     };
+
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(log_level))
+        .expect("Failed to create log filter");
 
     let appender = RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
@@ -40,7 +38,7 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
     let (non_blocking_stdout, stdout_guard) = tracing_appender::non_blocking(stderr());
 
     let logger = Registry::default()
-        .with(LevelFilter::from_level(level))
+        .with(filter)
         .with(
             fmt::Layer::default()
                 .with_writer(non_blocking_stdout)
