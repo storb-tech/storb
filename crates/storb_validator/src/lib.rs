@@ -58,14 +58,12 @@ struct ValidatorState {
 /// On success, returns Ok(()).
 /// On failure, returns error with details of the failure.
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
-    // Load or generate server certificate
+    // TODO: Load or generate server certificate
     // let server_cert = ensure_certificate_exists().await?;
 
     let validator = Arc::new(Validator::new(config.clone()).await?);
 
     let neuron = validator.neuron.clone();
-
-    // Note: This should constant - so it is ok to clone it once and forget about it
 
     let validator_for_sync = validator.clone();
     let validator_for_challenges = validator.clone();

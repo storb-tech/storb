@@ -306,7 +306,7 @@ impl DownloadProcessor {
         let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
 
         while let Some(piece) = piece_result_rx.recv().await {
-            // TODO: If we have the minimum k pieces necessary for reconstructing
+            // If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
             if unique_pieces.read().await.len() as u64 > chunk_info.k {
                 let _ = completion_tx.send(());

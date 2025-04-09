@@ -93,7 +93,6 @@ pub async fn upload_piece_data(
     send_stream.write_all(&data).await?;
     send_stream.finish()?;
 
-    // log the timeout duration
     debug!(
         "Timeout duration for upload acknowledgement: {} milliseconds",
         timeout_duration.as_millis()
@@ -205,11 +204,10 @@ impl<'a> UploadProcessor<'a> {
         let dht_sender = validator.neuron.read().await.command_sender.clone();
         let dht_sender_clone = dht_sender.clone();
 
-        // get memorydb from state
+        // Get MemoryDB from state
         let scoring_system = self.state.validator.scoring_system.clone();
 
         let signer = self.state.validator.neuron.read().await.signer.clone();
-        // let db_conn = self.state.db_conn.clone();
         let signer_clone = signer.clone();
         let validator_clone = validator.clone();
         let consumer_handle = tokio::spawn(async move {
@@ -365,7 +363,7 @@ async fn consume_bytes(
     );
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
-    // and hence determine which miners to use for each piece. we do the following for the timebeing:
+    // and hence determine which miners to use for each piece. we do the following for the time being:
     // randomly shuffle the miner connections and uids, but do so so that they are shuffled in the same order
     // good way to do this is to first create a vector of indices and then shuffle that
     // and then use that to index into the miner connections and uids

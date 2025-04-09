@@ -125,7 +125,6 @@ impl Validator {
         let mut rng: StdRng = SeedableRng::from_entropy();
         let mut store_latencies = MinerLatencyMap::default();
         let mut retrieval_latencies = MinerLatencyMap::default();
-        // let num_neurons = self.neuron.neurons.len();
 
         // ----==== Synthetic store challenges ====----
 
@@ -294,8 +293,6 @@ impl Validator {
 
         // Put chunk entry in DHT
         swarm::dht::StorbDHT::put_chunk_entry(
-            // TODO: read or write?
-            // self.neuron.write().await.command_sender.clone(),
             self.neuron.read().await.command_sender.clone(),
             chunk_key,
             chunk_dht_value,
@@ -457,14 +454,7 @@ impl Validator {
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
             }
 
-            // TODO: latency scoring?
-            // for miner_uid in miner_uids {
-            //     match new_ret_latency_map.get(&miner_uid) {
-            //         Some(curr_latency) => {
-            //             new_ret_la
-            //         }
-            //     }
-            // }
+            // TODO: latency scoring
 
             pieces_checked += 1;
         }
@@ -487,28 +477,6 @@ impl Validator {
         // record latency and response rate scores
         Ok(())
     }
-
-    // Sync the validator with the metagraph.
-    // pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-    //     info!("Syncing validator");
-
-    //     let uids_to_update = self.neuron.sync_metagraph().await?;
-    //     let neuron_count = self.neuron.neurons.read().await.len();
-    //     self.scoring_system
-    //         .write()
-    //         .await
-    //         .update_scores(neuron_count, uids_to_update)
-    //         .await;
-
-    //     match Self::set_weights().await {
-    //         Ok(_) => info!("Successfully set weights on chain"),
-    //         Err(e) => error!("Failed to set weights on chain: {}", e),
-    //     };
-
-    //     info!("Done syncing validator");
-
-    //     Ok(())
-    // }
 
     /// Set weights for each miner to publish to the chain.
     pub async fn set_weights(
