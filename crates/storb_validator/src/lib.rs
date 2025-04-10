@@ -10,11 +10,10 @@ use axum::{Extension, Router};
 use base::sync::Synchronizable;
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use middleware::require_api_key;
+use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
-
-use routes::{download_file, node_info, upload_file};
 use validator::{Validator, ValidatorConfig};
 
 pub mod apikey;

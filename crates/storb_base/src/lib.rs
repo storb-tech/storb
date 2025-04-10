@@ -1,10 +1,7 @@
-use memory_db::MemoryDb;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use subxt::utils::H256;
-use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
 use crabtensor::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
@@ -13,6 +10,9 @@ use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
+use memory_db::MemoryDb;
+use subxt::utils::H256;
+use tokio::sync::RwLock;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
 
@@ -339,8 +339,9 @@ impl BaseNeuron {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs::{self, create_dir_all};
+
+    use super::*;
 
     fn setup_test_wallet() -> (PathBuf, String) {
         let temp_dir = std::env::temp_dir().join("storb_test_wallets");

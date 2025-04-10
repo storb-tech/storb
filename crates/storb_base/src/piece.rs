@@ -323,11 +323,13 @@ pub fn reconstruct_chunk(chunk: &EncodedChunk) -> Result<Vec<u8>, PieceError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Once;
+
     use rand;
     use rand::seq::SliceRandom;
     use rand::RngCore;
-    use std::sync::Once;
+
+    use super::*;
 
     // This runs before any tests
     static INIT: Once = Once::new();

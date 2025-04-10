@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Command;
-
 use constants::{ABOUT, BIN_NAME, NAME, VERSION};
 use expanduser::expanduser;
 use tracing::info;

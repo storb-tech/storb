@@ -374,10 +374,12 @@ impl ScoringSystem {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use rusqlite::Connection;
     use std::sync::Arc;
+
+    use rusqlite::Connection;
     use tokio::sync::Mutex;
+
+    use super::*;
 
     async fn setup_test_db() -> Arc<Mutex<Connection>> {
         let conn = Connection::open_in_memory().unwrap();

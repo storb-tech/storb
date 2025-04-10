@@ -1,15 +1,13 @@
 use anyhow::Result;
-use clap::{Arg, ArgAction, ArgMatches, Command};
-
 use base::BaseNeuronConfig;
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use expanduser::expanduser;
 use storb_validator;
 use storb_validator::validator::ValidatorConfig;
 
+use super::args::get_neuron_config;
 use crate::config::Settings;
 use crate::get_config_value;
-
-use super::args::get_neuron_config;
 
 pub fn cli() -> Command {
     Command::new("validator")

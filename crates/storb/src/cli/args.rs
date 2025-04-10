@@ -3,12 +3,13 @@
 
 use std::str::FromStr;
 
-use crate::{config::Settings, get_config_value};
 use anyhow::Result;
 use base::version::Version;
 use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 use expanduser::expanduser;
+
+use crate::{config::Settings, get_config_value};
 
 pub fn common_args() -> Vec<Arg> {
     vec![
