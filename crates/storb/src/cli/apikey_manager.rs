@@ -3,10 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use clap::{arg, Command};
+use storb_validator::apikey::{ApiKeyConfig, ApiKeyManager};
 use tokio::runtime::Runtime;
 
 use crate::config::Settings;
-use storb_validator::apikey::{ApiKeyConfig, ApiKeyManager};
 
 pub fn cli() -> Command {
     Command::new("apikey")

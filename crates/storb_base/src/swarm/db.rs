@@ -7,11 +7,10 @@ use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{debug, error, info, trace};
 
-use crate::constants::DB_MPSC_BUFFER_SIZE;
-use crate::memory_db::{insert_chunk_dht_value, MemoryDb};
-
 use super::models;
 use super::record::StorbRecord;
+use crate::constants::DB_MPSC_BUFFER_SIZE;
+use crate::memory_db::{insert_chunk_dht_value, MemoryDb};
 
 /// Configuration for the RocksDBStore.
 ///
@@ -384,11 +383,6 @@ mod tests {
     use std::sync::Once;
     use std::time::Duration;
 
-    use crate::swarm::db::{CfType, RocksDBConfig, RocksDBStore};
-    use crate::swarm::models::{
-        deserialize_dht_value, serialize_dht_value, ChunkDHTValue, DHTValue, PieceDHTValue,
-        TrackerDHTValue,
-    };
     use chrono::Utc;
     use crabtensor::sign::KeypairSignature;
     use libp2p::kad::RecordKey;
@@ -397,6 +391,11 @@ mod tests {
     use tracing::error;
 
     use crate::piece::PieceType;
+    use crate::swarm::db::{CfType, RocksDBConfig, RocksDBStore};
+    use crate::swarm::models::{
+        deserialize_dht_value, serialize_dht_value, ChunkDHTValue, DHTValue, PieceDHTValue,
+        TrackerDHTValue,
+    };
 
     // This runs before any tests
     static INIT: Once = Once::new();

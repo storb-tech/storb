@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use crabtensor::weights::NormalizedWeight;
 use libp2p::kad::RecordKey;
 use ndarray::Array1;
 use rand::rngs::StdRng;
+use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use subxt::ext::codec::Compact;
@@ -24,17 +26,14 @@ use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
-use crate::quic::{create_quic_client, make_client_endpoint};
-use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
-use crate::upload::upload_piece_data;
-use crate::utils::{generate_synthetic_data, get_id_quic_uids};
-use rand::seq::IteratorRandom;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
 use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
     SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
+use crate::quic::{create_quic_client, make_client_endpoint};
+use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
+use crate::upload::upload_piece_data;
+use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
 #[derive(Default)]
 struct LatencyStats {

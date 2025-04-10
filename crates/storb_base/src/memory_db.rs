@@ -71,11 +71,10 @@ pub async fn insert_chunk_dht_value(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     // use std::sync::Once;
-
     use tempfile::NamedTempFile;
+
+    use super::*;
     // use tokio::time::sleep;
 
     // This runs before any tests

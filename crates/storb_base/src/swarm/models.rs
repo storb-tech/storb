@@ -171,8 +171,9 @@ pub fn deserialize_dht_value(bytes: &[u8]) -> Result<DHTValue, DHTError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use chrono::Utc;
+
+    use super::*;
 
     /// Creates a sample ChunkDHTValue for testing purposes.
     fn sample_chunk_dht_value() -> ChunkDHTValue {

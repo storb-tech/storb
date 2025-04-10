@@ -1,12 +1,14 @@
-use crate::apikey::ApiKeyManager;
+use std::sync::Arc;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::Next,
     response::Response,
 };
-use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::apikey::ApiKeyManager;
 
 pub async fn require_api_key(
     req: Request<Body>,

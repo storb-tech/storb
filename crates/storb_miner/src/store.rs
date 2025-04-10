@@ -2,11 +2,10 @@ use std::fs;
 use std::io::Error;
 use std::path::{Path, PathBuf};
 
+use base::piece_hash::PieceHash;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
-
-use base::piece_hash::PieceHash;
 
 /// Object store to store the piece data
 #[derive(Clone)]
