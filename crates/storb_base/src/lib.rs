@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use subxt::utils::H256;
 use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
@@ -13,7 +14,7 @@ use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signe
 use crabtensor::AccountId;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
 use tokio::sync::{mpsc, Mutex};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::swarm::dht::StorbDHT;
 use crate::version::Version;
@@ -29,6 +30,8 @@ pub mod verification;
 pub mod version;
 
 pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
+
+const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
 #[derive(Debug)]
 pub enum NeuronError {
@@ -272,13 +275,24 @@ impl BaseNeuron {
                 .parse()
                 .expect("Failed to parse address when attempting to post IP. Is it correct?");
             info!("Serving axon as: {}", address);
+
             let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Udp);
             neuron
                 .subtensor
                 .tx()
                 .sign_and_submit_default(&payload, &neuron.signer)
                 .await
-                .expect("Failed to post IP to Subtensor");
+                .unwrap_or_else(|err| {
+                    error!("Failed to post IP to Subtensor");
+                    if format!("{:?}", err).contains(SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED) {
+                        error!("Invalid Transaction: {err}");
+                        error!("Axon info not updated due to rate limit");
+                        H256::zero()
+                    } else {
+                        panic!("Unexpected error: {err}");
+                    }
+                });
+
             info!("Successfully served axon!");
         }
 
