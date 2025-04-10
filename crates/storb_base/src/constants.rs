@@ -24,4 +24,4 @@ pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Timeout params for upload requests
-pub const MIN_BANDWIDTH: u64 = 1024; // 1KiB/s 💀 TODO: increase this when things are more optimized lmao
+pub const MIN_BANDWIDTH: u64 = 512 * 1024; // minimum ~512KiB/s bandwidth

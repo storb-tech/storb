@@ -143,6 +143,8 @@ pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option
     length.clamp(min_size, max_size)
 }
 
+/// parameters for erasure coding
+/// TODO(k_and_m): we might change how we determined these in the future - related issue: https://github.com/storb-tech/storb/issues/66
 pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     let piece_size = piece_length(chunk_size, None, None);
     // Calculate how many data blocks (k) and parity blocks
@@ -162,8 +164,6 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     // Calculate how many data blocks (k) and parity blocks
     // TODO: see TODO(k_and_m)
     let (k, m) = get_k_and_m(chunk_size);
-    // let k: usize = CHUNK_K;
-    // let m = CHUNK_M;
     debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}, k = {k}, m = {m}");
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");

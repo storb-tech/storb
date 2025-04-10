@@ -56,7 +56,7 @@ pub fn handle_command(matches: &clap::ArgMatches) -> Result<()> {
 
     // create new API key manager with the database path from args
     let db_path = matches
-        .get_one::<String>("api-keys-db") // Use "api-keys-db" instead of "api_keys_db"
+        .get_one::<String>("api-keys-db")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             let settings = Settings::new(None).expect("Failed to load settings");

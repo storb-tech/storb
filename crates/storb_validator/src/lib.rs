@@ -94,7 +94,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                 .await
                 .update_scores(neuron_count, uids_to_update)
                 .await;
-            // drop(scorin)
 
             let ema_scores = scoring_system.clone().read().await.state.ema_scores.clone();
 

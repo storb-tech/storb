@@ -454,8 +454,6 @@ impl Validator {
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
             }
 
-            // TODO: latency scoring
-
             pieces_checked += 1;
         }
 

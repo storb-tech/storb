@@ -268,9 +268,6 @@ impl StorbDHT {
         // Build the Swarm using QUIC transport and Tokio.
         let mut swarm = SwarmBuilder::with_existing_identity(local_keypair)
             .with_tokio()
-            // .with_tcp(libp2p::tcp::Config::default(), noise::Config::new, || {
-            //     yamux::Config::default()
-            // })?
             .with_quic()
             // Using QUIC for transport.
             .with_behaviour(|_| Ok(behaviour))?
