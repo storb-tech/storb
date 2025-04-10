@@ -1,5 +1,8 @@
+// TODO: should we increase min required miners?
+// TODO: should we use it in consume_bytes to determine number of miners to distribute to?
+// NOTE: see: https://github.com/storb-tech/storb/issues/66
 pub const MIN_REQUIRED_MINERS: usize = 1;
-pub const SYNTHETIC_CHALLENGE_FREQUENCY: u64 = 60;
+pub const SYNTHETIC_CHALLENGE_FREQUENCY: u64 = 600;
 
 pub const MAX_CHALLENGE_PIECE_NUM: i32 = 5;
 pub const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this

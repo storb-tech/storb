@@ -8,7 +8,6 @@ use anyhow::{anyhow, Context};
 use base::constants::CLIENT_TIMEOUT;
 use base::piece::encode_chunk;
 use base::swarm::models::ChunkDHTValue;
-use base::sync::Synchronizable;
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
@@ -16,6 +15,7 @@ use crabtensor::sign::sign_message;
 use crabtensor::weights::set_weights_payload;
 use crabtensor::weights::NormalizedWeight;
 use libp2p::kad::RecordKey;
+use ndarray::Array1;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
@@ -81,7 +81,7 @@ pub struct ValidatorConfig {
 #[derive(Clone)]
 pub struct Validator {
     pub config: ValidatorConfig,
-    pub neuron: BaseNeuron,
+    pub neuron: Arc<RwLock<BaseNeuron>>,
     pub scoring_system: Arc<RwLock<ScoringSystem>>,
 }
 
@@ -99,8 +99,9 @@ impl Validator {
             .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
         ));
 
-        let neuron =
-            BaseNeuron::new(neuron_config, Some(scoring_system.read().await.db.clone())).await?;
+        let neuron = Arc::new(RwLock::new(
+            BaseNeuron::new(neuron_config, Some(scoring_system.read().await.db.clone())).await?,
+        ));
 
         let validator = Validator {
             config,
@@ -113,10 +114,17 @@ impl Validator {
     pub async fn run_synthetic_challenges(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
+        // Check if we have any peers before proceeding
+        let peer_count = self.neuron.read().await.address_book.read().await.len();
+        if peer_count == 0 {
+            info!("No peers available, skipping synthetic challenges");
+            return Ok(());
+        }
+
+        let signer = self.neuron.read().await.signer.clone();
         let mut rng: StdRng = SeedableRng::from_entropy();
         let mut store_latencies = MinerLatencyMap::default();
         let mut retrieval_latencies = MinerLatencyMap::default();
-        // let num_neurons = self.neuron.neurons.len();
 
         // ----==== Synthetic store challenges ====----
 
@@ -133,10 +141,9 @@ impl Validator {
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
 
-            let vali_arc = Arc::new(RwLock::new(self.clone()));
-
             // TODO: if we cannot get quic connections of certain miners should we should punish them?
-            let (_, quic_addresses, quic_miner_uids) = get_id_quic_uids(vali_arc).await;
+            let vali_arc = Arc::new(self.clone());
+            let (_, quic_addresses, quic_miner_uids) = get_id_quic_uids(vali_arc.clone()).await;
 
             let num_miners_to_query = std::cmp::min(10, quic_miner_uids.len()); // TODO: use a constant
             let idxs_to_query: Vec<usize> =
@@ -147,13 +154,15 @@ impl Validator {
                 let quic_miner_uid = quic_miner_uids[idx];
                 let db = self.scoring_system.write().await.db.clone();
 
-                let peer_id = self
-                    .neuron
+                let neuron_guard = self.neuron.read().await;
+                let peer_id = neuron_guard
                     .peer_node_uid
                     .get_by_right(&quic_miner_uid)
                     .ok_or("No peer ID found for the miner UID")?;
                 let miner_info = self
                     .neuron
+                    .read()
+                    .await
                     .address_book
                     .clone()
                     .read()
@@ -183,13 +192,22 @@ impl Validator {
                 };
 
                 let start_time = Instant::now();
-                let hash_vec = upload_piece_data(
+
+                let hash_vec = match upload_piece_data(
                     self.neuron.clone(),
                     miner_info,
                     &quic_conn,
                     piece.data.clone(),
                 )
-                .await?;
+                .await
+                {
+                    Ok(hash) => hash,
+                    Err(_) => {
+                        error!("Timed out trying to upload piece data to miner {quic_miner_uid}");
+                        vec![]
+                    }
+                };
+
                 let latency = start_time.elapsed().as_secs_f64();
                 let hash = hash_vec.as_bytes_ref();
 
@@ -235,12 +253,13 @@ impl Validator {
         let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
         // Create chunk DHT value
-        let validator_id = Compact(
-            self.neuron
-                .local_node_info
-                .uid
-                .ok_or("Failed to get validator UID")?,
-        );
+        let validator_id = self
+            .neuron
+            .read()
+            .await
+            .local_node_info
+            .uid
+            .ok_or("Failed to get validator UID")?;
 
         let chunk_msg = (
             chunk_key.clone(),
@@ -255,11 +274,13 @@ impl Validator {
         );
 
         let chunk_msg_bytes = bincode::serialize(&chunk_msg)?;
-        let chunk_sig = sign_message(&self.neuron.signer, chunk_msg_bytes);
+        let chunk_sig = sign_message(&signer, chunk_msg_bytes);
+
+        let vali_id_compact = Compact(validator_id);
 
         let chunk_dht_value = ChunkDHTValue {
             chunk_hash: chunk_key.clone(),
-            validator_id,
+            validator_id: vali_id_compact,
             piece_hashes: chunk_piece_hashes,
             chunk_idx: 0,
             k: encoded.k,
@@ -272,7 +293,7 @@ impl Validator {
 
         // Put chunk entry in DHT
         swarm::dht::StorbDHT::put_chunk_entry(
-            self.neuron.command_sender.clone(),
+            self.neuron.read().await.command_sender.clone(),
             chunk_key,
             chunk_dht_value,
         )
@@ -297,20 +318,26 @@ impl Validator {
         debug!("Selected chunk key: {:?}", chunk_key);
 
         // request pieces
-        let chunk_entry =
-            swarm::dht::StorbDHT::get_chunk_entry(self.neuron.command_sender.clone(), chunk_key)
-                .await?
-                .context("Chunk for the given record key was not found")?;
+        let chunk_entry = swarm::dht::StorbDHT::get_chunk_entry(
+            self.neuron.read().await.command_sender.clone(),
+            chunk_key,
+        )
+        .await?
+        .context("Chunk for the given record key was not found")?;
         let piece_hashes = chunk_entry.piece_hashes;
 
         let mut pieces_checked = 0;
+
+        let neuron_guard = self.neuron.read().await;
+        let dht_sender = neuron_guard.command_sender.clone();
+        let address_book = neuron_guard.address_book.clone();
+
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
             let idx = rng.gen_range(0..piece_hashes.len());
 
             let piece_hash = piece_hashes[idx];
             let piece_key = RecordKey::new(&piece_hash);
 
-            let dht_sender = self.neuron.command_sender.clone();
             let piece_providers =
                 swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_key.clone()).await?;
 
@@ -320,8 +347,8 @@ impl Validator {
 
             let mut miner_uids: Vec<u16> = Vec::new();
             for peer_id in piece_providers.clone() {
-                let address_book = self.neuron.address_book.read().await;
-                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
+                let addr_book_guard = address_book.read().await;
+                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
@@ -330,8 +357,8 @@ impl Validator {
 
             // go through bimap, get QUIC addresses of miners
             for peer_id in piece_providers {
-                let address_book = self.neuron.address_book.read().await;
-                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
+                let addr_book_guard = address_book.read().await;
+                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
@@ -348,15 +375,11 @@ impl Validator {
                         account_id: miner_info.neuron_info.hotkey.clone(),
                     },
                     validator: KeyRegistrationInfo {
-                        uid: self
-                            .neuron
-                            .local_node_info
-                            .uid
-                            .ok_or("Failed to get UID for validator")?,
-                        account_id: self.neuron.signer.account_id().clone(),
+                        uid: validator_id,
+                        account_id: signer.account_id().clone(),
                     },
                 };
-                let signature = sign_message(&self.neuron.signer, &message);
+                let signature = sign_message(&signer, &message);
                 let payload = HandshakePayload { signature, message };
                 let payload_bytes = bincode::serialize(&payload)?;
 
@@ -431,15 +454,6 @@ impl Validator {
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
             }
 
-            // TODO: latency scoring?
-            // for miner_uid in miner_uids {
-            //     match new_ret_latency_map.get(&miner_uid) {
-            //         Some(curr_latency) => {
-            //             new_ret_la
-            //         }
-            //     }
-            // }
-
             pieces_checked += 1;
         }
 
@@ -462,31 +476,13 @@ impl Validator {
         Ok(())
     }
 
-    /// Sync the validator with the metagraph.
-    pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Syncing validator");
-
-        let uids_to_update = self.neuron.sync_metagraph().await?;
-        let neuron_count = self.neuron.neurons.read().await.len();
-        self.scoring_system
-            .write()
-            .await
-            .update_scores(neuron_count, uids_to_update)
-            .await;
-
-        match self.set_weights().await {
-            Ok(_) => info!("Successfully set weights on chain"),
-            Err(e) => error!("Failed to set weights on chain: {}", e),
-        };
-
-        info!("Done syncing validator");
-
-        Ok(())
-    }
-
     /// Set weights for each miner to publish to the chain.
-    async fn set_weights(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let normed_scores = normalize_min_max(&self.scoring_system.read().await.state.ema_scores);
+    pub async fn set_weights(
+        neuron: BaseNeuron,
+        scores: Array1<f64>,
+        config: ValidatorConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let normed_scores = normalize_min_max(&scores);
         debug!("weights: {:?}", normed_scores);
 
         // Convert normalized scores to Vec<NormalizedWeight>
@@ -499,12 +495,12 @@ impl Validator {
             })
             .collect();
 
-        let payload = set_weights_payload(self.config.neuron_config.netuid, weights, 1);
+        let payload = set_weights_payload(config.neuron_config.netuid, weights, 1);
 
-        self.neuron
+        neuron
             .subtensor
             .tx()
-            .sign_and_submit_default(&payload, &self.neuron.signer)
+            .sign_and_submit_default(&payload, &neuron.signer)
             .await?;
 
         Ok(())

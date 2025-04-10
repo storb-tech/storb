@@ -1,10 +1,12 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use base::constants::CLIENT_TIMEOUT;
+use base::constants::MIN_BANDWIDTH;
 use base::swarm::dht::DhtCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, AddressBook, BaseNeuron};
@@ -31,7 +33,7 @@ pub(crate) struct DownloadProcessor {
 impl DownloadProcessor {
     /// Create a new instance of the DownloadProcessor.
     pub(crate) async fn new(state: &ValidatorState) -> Result<Self> {
-        let dht_sender = state.validator.read().await.neuron.command_sender.clone();
+        let dht_sender = state.validator.neuron.read().await.command_sender.clone();
         Ok(Self {
             dht_sender,
             state: Arc::new(state.clone()),
@@ -40,7 +42,7 @@ impl DownloadProcessor {
 
     /// Producer for pieces. Queries the miners to get piece data.
     async fn produce_piece(
-        validator_base_neuron: BaseNeuron,
+        validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         local_address_book: AddressBook,
@@ -72,6 +74,15 @@ impl DownloadProcessor {
 
         let mut requests = FuturesUnordered::new();
 
+        let signer = validator_base_neuron.read().await.signer.clone();
+
+        let vali_uid = validator_base_neuron
+            .read()
+            .await
+            .local_node_info
+            .uid
+            .context("Failed to get UID for validator")?;
+
         for provider in piece_providers {
             // Look up node info from the address book.
             let node_info = local_address_book
@@ -83,15 +94,18 @@ impl DownloadProcessor {
 
             let scoring_system = scoring_system.clone();
             let db = scoring_system.write().await.db.clone();
-            let signer = Arc::new(validator_base_neuron.signer.clone());
+            let signer = Arc::new(signer.clone());
 
             // Each provider query is executed in its own async block.
             // The provider variable is moved into the block for logging purposes.
+            let size: f64 = piece_entry.piece_size as f64;
+            let min_bandwidth = MIN_BANDWIDTH as f64;
+            let timeout_duration = Duration::from_secs_f64(size / min_bandwidth);
             let fut = async move {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 let req_client = reqwest::Client::builder()
-                    .timeout(CLIENT_TIMEOUT)
+                    .timeout(timeout_duration)
                     .build()
                     .context("Failed to build reqwest client")?;
 
@@ -102,16 +116,19 @@ impl DownloadProcessor {
                         account_id: node_info.neuron_info.hotkey.clone(),
                     },
                     validator: KeyRegistrationInfo {
-                        uid: validator_base_neuron
-                            .local_node_info
-                            .uid
-                            .context("Failed to get UID for validator")?,
+                        uid: vali_uid,
                         account_id: signer.clone().account_id().clone(),
                     },
                 };
                 let signature = sign_message(&signer.clone(), &message);
                 let payload = HandshakePayload { signature, message };
                 let payload_bytes = bincode::serialize(&payload)?;
+
+                // log timeout
+                debug!(
+                    "Timeout duration for download acknowledgement: {} milliseconds",
+                    timeout_duration.as_millis()
+                );
 
                 let url = node_info
                     .http_address
@@ -177,6 +194,7 @@ impl DownloadProcessor {
                     // Return immediately on the first valid response.
                     let piece = base::piece::Piece {
                         chunk_idx: piece_entry.chunk_idx,
+                        piece_size: piece_entry.piece_size,
                         piece_idx: piece_entry.piece_idx,
                         piece_type: piece_entry.piece_type.clone(),
                         data: piece_data,
@@ -196,7 +214,7 @@ impl DownloadProcessor {
     /// Producer for chunks. It consumes the pieces produced to achieve this.
     /// The chunks are sent via the MPSC channel back to the HTTP stream processor.
     async fn produce_chunk(
-        validator_base_neuron: BaseNeuron,
+        validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         dht_sender: mpsc::Sender<DhtCommand>,
         address_book: AddressBook,
@@ -211,18 +229,24 @@ impl DownloadProcessor {
         let (piece_result_tx, mut piece_result_rx) =
             mpsc::channel::<base::piece::Piece>(total_pieces);
 
-        let mut join_handles = Vec::with_capacity(10);
+        let mut join_handles = Vec::with_capacity(THREAD_COUNT);
         let dht_sender = dht_sender.clone();
         let local_address_book = address_book.clone();
+
+        let (completion_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let completion_tx = Arc::new(completion_tx);
 
         // Spawn threads
         for _ in 0..THREAD_COUNT {
             let piece_task_rx = Arc::clone(&piece_task_rx);
             let piece_result_tx = piece_result_tx.clone();
-            let dht_sender_clone = dht_sender.clone();
+            let dht_sender_clone: mpsc::Sender<DhtCommand> = dht_sender.clone();
             let address_book_clone = local_address_book.clone();
             let scoring_system_clone = scoring_system.clone();
             let validator_base_clone = validator_base_neuron.clone();
+
+            let completion_tx = completion_tx.clone();
+            let mut completion_rx = completion_tx.subscribe();
 
             let handle = thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new()
@@ -230,30 +254,37 @@ impl DownloadProcessor {
 
                 rt.block_on(async move {
                     loop {
-                        let task = {
+                        let piece_hash = {
                             let mut rx_lock = piece_task_rx.lock().await;
                             rx_lock.recv().await
                         };
 
-                        match task {
-                            Some(task) => {
-                                match Self::produce_piece(
-                                    validator_base_clone.clone(),
-                                    scoring_system_clone.clone(),
-                                    dht_sender_clone.clone(),
-                                    address_book_clone.clone(),
-                                    task,
-                                )
-                                .await
-                                {
-                                    Ok(piece) => {
-                                        piece_result_tx
-                                            .send(piece)
-                                            .await
-                                            .expect("Failed to send piece");
+                        match piece_hash {
+                            Some(piece_hash) => {
+                                tokio::select! {
+                                    byte_prod_res = Self::produce_piece(
+                                        validator_base_clone.clone(),
+                                        scoring_system_clone.clone(),
+                                        dht_sender_clone.clone(),
+                                        address_book_clone.clone(),
+                                        piece_hash,
+                                    ) => {
+                                        match byte_prod_res {
+                                            Ok(piece) => {
+                                                piece_result_tx
+                                                    .send(piece)
+                                                    .await
+                                                    .expect("Failed to send piece");
+                                            }
+                                            Err(err) => {
+                                                error!("Failed to process piece: {}", err);
+                                            }
+                                        }
                                     }
-                                    Err(err) => {
-                                        error!("Failed to process piece: {}", err);
+                                    _ = completion_rx.recv() => {
+                                        // Download was cancelled because we have enough successful pieces
+                                        debug!("Download cancelled for piece hash: {:?}", piece_hash);
+                                        break;
                                     }
                                 }
                             }
@@ -272,7 +303,18 @@ impl DownloadProcessor {
         drop(piece_task_tx);
 
         let mut collected_pieces = Vec::new();
+        let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
+
         while let Some(piece) = piece_result_rx.recv().await {
+            // If we have the minimum k pieces necessary for reconstructing
+            // the chunk then we can exit early
+            if unique_pieces.read().await.len() as u64 > chunk_info.k {
+                let _ = completion_tx.send(());
+                debug!("Received enough pieces for chunk reconstruction - signalling cancellation");
+                break;
+            }
+            let mut pieces = unique_pieces.write().await;
+            pieces.insert(piece.piece_idx);
             collected_pieces.push(piece);
         }
 
@@ -324,26 +366,21 @@ impl DownloadProcessor {
 
         let chunk_hashes = tracker.chunk_hashes;
 
-        let state = self.state.validator.read().await.clone();
-        let address_book = state.neuron.address_book.clone();
+        let state = self.state.validator.clone();
+        let address_book = state.neuron.read().await.address_book.clone();
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 
         let scoring_system = state.scoring_system.clone();
         let validator_base_neuron = state.neuron.clone();
 
-        tokio::spawn(async move {
-            for chunk_hash in chunk_hashes.clone() {
-                // convert chunk_hash to a string
-                let chunk_key = RecordKey::new(&chunk_hash);
-                info!("RecordKey of chunk hash: {:?}", chunk_key);
+        for chunk_hash in chunk_hashes.clone() {
+            // convert chunk_hash to a string
+            let chunk_key = RecordKey::new(&chunk_hash);
+            info!("RecordKey of chunk hash: {:?}", chunk_key);
 
-                let chunk_res = match swarm::dht::StorbDHT::get_chunk_entry(
-                    dht_sender.clone(),
-                    chunk_key,
-                )
-                .await
-                {
+            let chunk_res =
+                match swarm::dht::StorbDHT::get_chunk_entry(dht_sender.clone(), chunk_key).await {
                     Ok(chunk) => Some(chunk),
                     Err(e) => {
                         error!("Error getting chunk entry: {}", e);
@@ -354,37 +391,38 @@ impl DownloadProcessor {
                     }
                 };
 
-                let chunk = match chunk_res {
-                    Some(Some(chunk)) => chunk,
-                    Some(None) | None => {
-                        error!("Chunk entry not found");
-                        return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "An internal server error occurred".to_string(),
-                        ));
-                    }
-                };
-                info!(
-                    "Found chunk hash: {:?} with {:?} pieces",
-                    &chunk.chunk_hash,
-                    &chunk.piece_hashes.len()
-                );
-
-                if let Err(e) = Self::produce_chunk(
-                    validator_base_neuron.clone(),
-                    scoring_system.clone(),
-                    dht_sender.clone(),
-                    address_book.clone(),
-                    chunk_tx.clone(),
-                    chunk,
-                )
-                .await
-                {
-                    error!("Error producing chunk: {}", e);
+            let chunk = match chunk_res {
+                Some(Some(chunk)) => chunk,
+                Some(None) | None => {
+                    error!("Chunk entry not found");
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "An internal server error occurred".to_string(),
+                    ));
                 }
+            };
+            info!(
+                "Found chunk hash: {:?} with {:?} pieces",
+                &chunk.chunk_hash,
+                &chunk.piece_hashes.len()
+            );
+
+            let chunk_idx = chunk.chunk_idx;
+            if let Err(e) = Self::produce_chunk(
+                validator_base_neuron.clone(),
+                scoring_system.clone(),
+                dht_sender.clone(),
+                address_book.clone(),
+                chunk_tx.clone(),
+                chunk,
+            )
+            .await
+            {
+                error!("Error producing chunk: {}", e);
             }
-            Ok(())
-        });
+
+            info!("Produced chunk {:?}", chunk_idx);
+        }
 
         let stream =
             tokio_stream::wrappers::ReceiverStream::new(chunk_rx).map(Ok::<_, std::io::Error>);

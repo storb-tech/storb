@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use subxt::utils::H256;
 use tokio::sync::RwLock;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
@@ -13,7 +14,7 @@ use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signe
 use crabtensor::AccountId;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
 use tokio::sync::{mpsc, Mutex};
-use tracing::info;
+use tracing::{error, info};
 
 use crate::swarm::dht::StorbDHT;
 use crate::version::Version;
@@ -29,6 +30,8 @@ pub mod verification;
 pub mod version;
 
 pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
+
+const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
 #[derive(Debug)]
 pub enum NeuronError {
@@ -64,6 +67,7 @@ pub struct NeuronConfig {
 #[derive(Clone)]
 pub struct DhtConfig {
     pub port: u16,
+    pub no_bootstrap: bool,
     pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
@@ -119,6 +123,7 @@ pub struct LocalNodeInfo {
     pub version: Version,
 }
 
+// TODO: Break this up into separateto prevent locking constantly
 #[derive(Clone)]
 pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
@@ -181,7 +186,26 @@ impl BaseNeuron {
                 }
             };
 
-        let bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+        let mut bootstrap_nodes: Option<Vec<Multiaddr>> = None;
+
+        if !config.dht.no_bootstrap {
+            bootstrap_nodes = config.dht.bootstrap_nodes.clone();
+        }
+
+        // log no bootstrap and bootstrap nodes
+        if config.dht.no_bootstrap {
+            info!("Bootstrap is disabled, no bootstrap nodes will be used.");
+            // log bootstrap nodes
+            if let Some(nodes) = &bootstrap_nodes {
+                info!("Bootstrap nodes: {:?}", nodes);
+            }
+        }
+
+        if !config.dht.no_bootstrap && bootstrap_nodes.as_ref().map_or(0, |nodes| nodes.len()) == 0
+        {
+            panic!("Bootstrap is enabled, but no bootstrap nodes were provided. Please specify at least one bootstrap node in the settings.toml.");
+        }
+
         let neurons_arc = Arc::new(RwLock::new(Vec::new()));
         let address_book = Arc::new(RwLock::new(HashMap::new()));
         let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
@@ -249,22 +273,33 @@ impl BaseNeuron {
         if config.post_ip {
             let address = format!("{}:{}", config.external_ip, config.api_port)
                 .parse()
-                .unwrap();
+                .expect("Failed to parse address when attempting to post IP. Is it correct?");
             info!("Serving axon as: {}", address);
+
             let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Udp);
             neuron
                 .subtensor
                 .tx()
                 .sign_and_submit_default(&payload, &neuron.signer)
                 .await
-                .unwrap();
+                .unwrap_or_else(|err| {
+                    error!("Failed to post IP to Subtensor");
+                    if format!("{:?}", err).contains(SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED) {
+                        error!("Invalid Transaction: {err}");
+                        error!("Axon info not updated due to rate limit");
+                        H256::zero()
+                    } else {
+                        panic!("Unexpected error: {err}");
+                    }
+                });
+
             info!("Successfully served axon!");
         }
 
         info!(
             "My peer address: /ip4/{:?}/udp/{:?}/quic-v1/p2p/{}",
             external_ip,
-            config.quic_port.unwrap(),
+            config.dht.port,
             peer_id.to_string()
         );
         Ok(neuron.clone())
@@ -357,6 +392,7 @@ mod tests {
             },
             dht: DhtConfig {
                 port: 8081,
+                no_bootstrap: true,
                 bootstrap_nodes: None,
             },
         }

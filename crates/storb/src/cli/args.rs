@@ -143,6 +143,12 @@ pub fn common_args() -> Vec<Arg> {
             .help("DHT port")
             .action(ArgAction::Set)
             .global(true),
+        // set to true if you want to disable the bootstrap nodes
+        Arg::new("dht.no_bootstrap")
+            .long("dht.no-bootstrap")
+            .help("Disable bootstrap nodes")
+            .action(ArgAction::SetTrue)
+            .global(true),
         // NOTE: dht.bootstrap_nodes can only be used in config file
     ]
 }
@@ -183,8 +189,12 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
         ),
     };
 
+    let no_bootstrap =
+        *get_config_value!(args, "dht.no_bootstrap", bool, settings.dht.no_bootstrap);
+
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
+        no_bootstrap,
         bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
 

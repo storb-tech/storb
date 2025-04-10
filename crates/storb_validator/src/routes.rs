@@ -9,7 +9,7 @@ use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
@@ -30,8 +30,8 @@ pub async fn node_info(
     state: axum::extract::State<ValidatorState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
     info!("Got node info req");
-    let neuron = state.validator.read().await.neuron.clone();
-    let serialized_local_node_info = bincode::serialize(&neuron.local_node_info).map_err(|e| {
+    let local_node_info = state.validator.neuron.read().await.local_node_info.clone();
+    let serialized_local_node_info = bincode::serialize(&local_node_info).map_err(|e| {
         error!("Error while deserialising local node info: {e}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -77,8 +77,11 @@ pub async fn upload_file(
         .await
         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "API key required".to_string()))?;
 
+    debug!("Got API key of: {api_key}");
+
     // Check quota before processing
     let key_manager = api_key_manager.read().await;
+    debug!("Got key manager");
     let has_quota = key_manager
         .check_quota(&api_key, content_length, 0)
         .await
@@ -89,11 +92,13 @@ pub async fn upload_file(
                 "Internal server error".to_string(),
             )
         })?;
+    debug!("Checked key manager quota");
 
     if !has_quota {
         return Err((StatusCode::FORBIDDEN, "Upload quota exceeded".to_string()));
     }
     drop(key_manager);
+    debug!("Dropped key manager");
 
     let processor = UploadProcessor::new(&state).await.map_err(|e| {
         error!("Failed to initialise the upload processor: {e}");
@@ -102,6 +107,7 @@ pub async fn upload_file(
             "An internal server error occurred".to_string(),
         )
     })?;
+    debug!("Get processor for uploading");
 
     // Extract field and get bytes
     let field = multipart
@@ -109,6 +115,7 @@ pub async fn upload_file(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "No fields found".to_string()))?;
+    debug!("Got field from multipart");
 
     if field.name() != Some("file") {
         return Err((StatusCode::BAD_REQUEST, "No file field found".to_string()));
@@ -121,6 +128,7 @@ pub async fn upload_file(
             "An internal server error occurred".to_string(),
         )
     })?;
+    debug!("Got bytes from file field");
 
     // Create pinned stream from bytes with explicit error type
     let stream = Box::pin(futures::stream::once(async move {

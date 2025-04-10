@@ -12,6 +12,7 @@ use crate::constants::{
 #[derive(Debug, Clone)]
 pub struct Piece {
     pub chunk_idx: u64,
+    pub piece_size: u64,
     pub piece_idx: u64,
     pub piece_type: PieceType,
     pub data: Vec<u8>,
@@ -142,6 +143,8 @@ pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option
     length.clamp(min_size, max_size)
 }
 
+/// parameters for erasure coding
+/// TODO(k_and_m): we might change how we determined these in the future - related issue: https://github.com/storb-tech/storb/issues/66
 pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     let piece_size = piece_length(chunk_size, None, None);
     // Calculate how many data blocks (k) and parity blocks
@@ -154,12 +157,14 @@ pub fn get_k_and_m(chunk_size: u64) -> (usize, usize) {
     (k, m)
 }
 
+// TODO: maybe update parts of this function in the future to adhere the fact that k and m are going to be constant
 pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
     let chunk_size = chunk.len() as u64;
     let piece_size = piece_length(chunk_size, None, None);
-    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}");
     // Calculate how many data blocks (k) and parity blocks
+    // TODO: see TODO(k_and_m)
     let (k, m) = get_k_and_m(chunk_size);
+    debug!("[encode_chunk] chunk {chunk_idx}: {chunk_size} bytes, piece_size = {piece_size}, k = {k}, m = {m}");
 
     let encoder = zfec_rs::Fec::new(k, m).expect("Failed to create encoder");
     let (encoded_pieces, padlen) = encoder.encode(chunk).expect("Failed to encode chunk");
@@ -178,6 +183,7 @@ pub fn encode_chunk(chunk: &[u8], chunk_idx: u64) -> EncodedChunk {
 
         pieces.push(Piece {
             piece_type,
+            piece_size,
             data: piece_data,
             chunk_idx,
             piece_idx: i.try_into().expect("Failed to convert i"),
@@ -199,18 +205,19 @@ pub fn decode_chunk(encoded_chunk: &EncodedChunk) -> Vec<u8> {
     let k: usize = encoded_chunk.k as usize;
     let m: usize = encoded_chunk.m as usize;
     let padlen = encoded_chunk.padlen;
-    let pieces = encoded_chunk.pieces.clone();
+    let mut pieces = encoded_chunk.pieces.clone();
+    pieces.sort_unstable_by_key(|p| p.piece_idx);
 
     let mut pieces_to_decode: Vec<ZFecChunk> = Vec::new();
 
     // zfec decode requires exactly k blocks
     if pieces.len() > k {
-        for (i, p) in pieces.iter().take(k).enumerate() {
-            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), i));
+        for p in pieces.iter().take(k) {
+            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), p.piece_idx as usize));
         }
     } else {
-        for (i, p) in pieces.iter().enumerate() {
-            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), i));
+        for p in pieces.iter() {
+            pieces_to_decode.push(ZFecChunk::new(p.data.clone(), p.piece_idx as usize));
         }
     }
 
@@ -228,6 +235,7 @@ pub fn reconstruct_data(pieces: &[Piece], chunks: &[EncodedChunk]) -> Vec<u8> {
             .iter()
             .map(|p| Piece {
                 chunk_idx: p.chunk_idx,
+                piece_size: p.piece_size,
                 piece_idx: p.piece_idx,
                 piece_type: p.piece_type.clone(),
                 data: vec![] // Exclude data from debug output

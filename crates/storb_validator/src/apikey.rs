@@ -44,6 +44,7 @@ pub struct ApiKeyManager {
 }
 
 impl ApiKeyManager {
+    /// Create a new API key manager
     pub fn new(db_path: PathBuf) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
@@ -89,6 +90,7 @@ impl ApiKeyManager {
         })
     }
 
+    /// Create a new API key
     pub async fn create_key(&self, config: ApiKeyConfig) -> Result<ApiKey> {
         let key = format!("storb_{}", Uuid::new_v4());
         let now = Utc::now();
@@ -123,6 +125,7 @@ impl ApiKeyManager {
         })
     }
 
+    /// Validate the API key and check if it has expired
     pub async fn validate_key(&self, key: &str) -> Result<Option<ApiKey>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare("SELECT * FROM api_keys WHERE key = ?")?;
@@ -158,6 +161,7 @@ impl ApiKeyManager {
         }
     }
 
+    /// Update the usage stats for uploads and downloads
     pub async fn update_usage(
         &self,
         key: &str,
@@ -175,6 +179,7 @@ impl ApiKeyManager {
         Ok(())
     }
 
+    /// List all API keys
     pub async fn list_keys(&self) -> Result<Vec<ApiKey>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare("SELECT * FROM api_keys")?;
@@ -207,6 +212,7 @@ impl ApiKeyManager {
         Ok(rows > 0)
     }
 
+    /// Check the quota for upload and download
     pub async fn check_quota(
         &self,
         key: &str,
@@ -235,6 +241,7 @@ impl ApiKeyManager {
         Ok(true)
     }
 
+    /// Check the rate limit allowed by the API key
     pub async fn check_rate_limit(&self, key: &str, rate_limit: u32) -> Result<bool> {
         let conn = self.conn.lock().await;
         let one_minute_ago = (Utc::now() - chrono::Duration::minutes(1)).timestamp();
@@ -269,7 +276,7 @@ impl ApiKeyManager {
         Ok(())
     }
 
-    // Add cleanup method for old logs
+    /// Clean up old logs
     pub async fn cleanup_old_logs(&self, days_to_keep: i64) -> Result<()> {
         let conn = self.conn.lock().await;
         let cutoff = (Utc::now() - chrono::Duration::days(days_to_keep)).timestamp();

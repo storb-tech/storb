@@ -4,7 +4,7 @@ use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi
 use crabtensor::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
 use crabtensor::AccountId;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::constants::CLIENT_TIMEOUT;
 use crate::{BaseNeuron, LocalNodeInfo, NodeInfo};
@@ -140,6 +140,16 @@ impl Synchronizable for BaseNeuron {
                 let neuron_ip = &neuron_info.axon_info.ip;
                 let neuron_port = &neuron_info.axon_info.port;
 
+                // If IP is 0, it means the neuron did not post IP so we can
+                // assume they're non-functional
+                if *neuron_ip == 0 {
+                    warn!(
+                        "Invalid IP for neuron {:?}. Node has never been started",
+                        neuron_info.uid
+                    );
+                    continue;
+                }
+
                 // Check if its a valid port
                 if *neuron_port == 0 {
                     error!("Invalid port for neuron: {:?}", neuron_info.uid);
@@ -156,7 +166,10 @@ impl Synchronizable for BaseNeuron {
                 let remote_node_info = match Self::get_remote_node_info(url).await {
                     Ok(info) => info,
                     Err(err) => {
-                        error!("Failed to get remote node info: {:?}", err); // TODO: convert to warning?
+                        warn!(
+                            "Failed to get remote node info (it may be offline): {:?}",
+                            err
+                        );
                         continue;
                     }
                 };
