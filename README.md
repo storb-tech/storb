@@ -14,7 +14,7 @@ For an overview of how the subnet works, [see here](docs/overview.md).
 
 ## Installation
 
-1. **Clone the Repository**:
+1. **Clone the repository**:
 
    ```bash
    git clone https://github.com/storb-tech/storb.git
@@ -24,6 +24,13 @@ For an overview of how the subnet works, [see here](docs/overview.md).
 2. **Set up environment and dependencies**:
 
    Install the Rust nightly toolchain.
+
+   If you're using Ubuntu, you should be using Ubuntu 24.04 LTS. Ensure that the following dependencies are installed:
+
+   ```bash
+   sudo apt update
+   sudo apt install build-essential clang libclang-dev libssl-dev pkg-config
+   ```
 
    We highly recommend installing `librocksdb` locally to speed up compile times. If you're on a Debian-based system:
 
