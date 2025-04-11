@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-default-members = ["crates/storb"]
+default-members = ["crates/storb_cli"]
 
 [workspace.package]
 version = "0.1.1"
