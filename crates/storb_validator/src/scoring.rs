@@ -289,6 +289,23 @@ impl ScoringSystem {
         Ok(())
     }
 
+    /// Reset all statistics for a given miner UID in the database
+    async fn reset_miner_stats(&self, uid: usize) -> Result<(), rusqlite::Error> {
+        let db = self.db.clone();
+        let conn = db.conn.lock().await;
+        conn.execute(
+            "UPDATE miner_stats SET 
+                store_successes = 0,
+                store_attempts = 0,
+                retrieval_successes = 0,
+                retrieval_attempts = 0
+            WHERE miner_uid = ?",
+            [uid],
+        )?;
+        debug!("Reset stats for UID {} in database", uid);
+        Ok(())
+    }
+
     /// Update scores for each of the miners.
     pub async fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
         let extend_array = |old: &Array1<f64>, new_size: usize| -> Array1<f64> {
@@ -302,7 +319,7 @@ impl ScoringSystem {
         // Only extend/initialize if current arrays are empty or new size is larger
         let current_size = self.state.ema_scores.len();
         if current_size < neuron_count {
-            let state = &mut self.state;
+            let state = &self.state;
 
             let mut new_ema_scores = extend_array(&state.ema_scores, neuron_count);
             let mut new_retrieve_latency_scores =
@@ -312,23 +329,41 @@ impl ScoringSystem {
             let mut new_final_latency_scores =
                 extend_array(&state.final_latency_scores, neuron_count);
 
-            // Only initialize new UIDs that weren't in the original array
-            for uid in uids_to_update {
-                let uid = uid as usize;
-                if uid >= current_size {
-                    new_ema_scores[uid] = 0.0;
-                    new_retrieve_latency_scores[uid] = 0.0;
-                    new_store_latency_scores[uid] = 0.0;
-                    new_final_latency_scores[uid] = 0.0;
+            // Initialize new UIDs and reset scores for updated UIDs
+            for uid in uids_to_update.iter() {
+                let uid = *uid as usize;
+                new_ema_scores[uid] = 0.0;
+                new_retrieve_latency_scores[uid] = 0.0;
+                new_store_latency_scores[uid] = 0.0;
+                new_final_latency_scores[uid] = 0.0;
+
+                // Reset database stats
+                if let Err(e) = self.reset_miner_stats(uid).await {
+                    error!("Failed to reset stats for UID {} in database: {}", uid, e);
                 }
             }
 
-            state.ema_scores = new_ema_scores;
-            state.retrieve_latency_scores = new_retrieve_latency_scores;
-            state.store_latency_scores = new_store_latency_scores;
-            state.final_latency_scores = new_final_latency_scores;
+            self.state.ema_scores = new_ema_scores;
+            self.state.retrieve_latency_scores = new_retrieve_latency_scores;
+            self.state.store_latency_scores = new_store_latency_scores;
+            self.state.final_latency_scores = new_final_latency_scores;
+        } else {
+            // If we don't need to extend arrays, just reset scores for updated UIDs
+            for uid in uids_to_update.iter() {
+                let uid = *uid as usize;
+                self.state.ema_scores[uid] = 0.0;
+                self.state.retrieve_latency_scores[uid] = 0.0;
+                self.state.store_latency_scores[uid] = 0.0;
+                self.state.final_latency_scores[uid] = 0.0;
+
+                // Reset database stats
+                if let Err(e) = self.reset_miner_stats(uid).await {
+                    error!("Failed to reset stats for UID {} in database: {}", uid, e);
+                }
+            }
         }
 
+        // Rest of the existing update_scores implementation...
         // connect to db and compute new scores
         let state = &mut self.state;
 
