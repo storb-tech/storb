@@ -9,3 +9,8 @@ pub const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this
 pub const SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE: f64 = 3.0;
 pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synthetic data in bytes
 pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
+
+// Define the confidence level (e.g., 95%)
+// Z-score for 95% confidence interval (two-sided) is approximately 1.96
+pub const Z_SCORE: f64 = 1.96;
+pub const Z_SQUARED: f64 = Z_SCORE * Z_SCORE; // Pre-calculated
