@@ -635,7 +635,7 @@ impl StorbDHT {
                                     match *event {
                                         identify::Event::Received { peer_id, info, connection_id } => {
                                             // Existing logging...
-                                                info!(
+                                                trace!(
                                                 connection_id=%connection_id,
                                                 peer_id=%peer_id,
                                                 listen_addrs=?info.listen_addrs,
@@ -660,7 +660,7 @@ impl StorbDHT {
                                             };
 
                                             if is_pending {
-                                                info!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
+                                                trace!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
                                                 let verifier = peer_verifier.clone();
                                                 let verified_peers_clone = verified_peers.clone();
                                                 let known_peers_clone = known_peers.clone();
@@ -668,7 +668,7 @@ impl StorbDHT {
                                                 match verifier.verify_peer(peer_id).await {
                                                     Ok(true) => {
                                                         // Peer is verified
-                                                        info!(peer_id=%peer_id, "Peer successfully verified");
+                                                        trace!(peer_id=%peer_id, "Peer successfully verified");
                                                         {
                                                             let mut verified = verified_peers_clone.lock().await;
                                                             verified.insert(peer_id);
@@ -694,7 +694,7 @@ impl StorbDHT {
                                                         }
 
                                                         if potential_addrs.is_empty() {
-                                                            warn!(peer_id=%peer_id, "No valid external addresses found for verified peer in Identify info.");
+                                                            trace!(peer_id=%peer_id, "No valid external addresses found for verified peer in Identify info.");
                                                         } else {
                                                             let kademlia = &mut self.swarm.behaviour_mut().kademlia;
                                                             for addr in potential_addrs {
@@ -706,7 +706,7 @@ impl StorbDHT {
                                                     }
                                                     Ok(false) => {
                                                         // Peer failed verification - Remove from Kademlia and Disconnect (as before)
-                                                        warn!(peer_id=%peer_id, "Peer failed verification (e.g., not registered). Disconnecting and removing from Kademlia.");
+                                                        trace!(peer_id=%peer_id, "Peer failed verification (e.g., not registered). Disconnecting and removing from Kademlia.");
                                                         self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                                         let _ = self.swarm.disconnect_peer_id(peer_id);
                                                         {
@@ -716,7 +716,7 @@ impl StorbDHT {
                                                     }
                                                     Err(e) => {
                                                         // Verification error - Remove from Kademlia and Disconnect (as before)
-                                                            error!(peer_id=%peer_id, error=%e, "Verification check failed. Disconnecting and removing peer from Kademlia.");
+                                                            trace!(peer_id=%peer_id, error=%e, "Verification check failed. Disconnecting and removing peer from Kademlia.");
                                                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                                             let _ = self.swarm.disconnect_peer_id(peer_id);
                                                             {
