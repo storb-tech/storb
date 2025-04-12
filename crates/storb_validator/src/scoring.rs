@@ -15,6 +15,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+use crate::constants::{Z_SCORE, Z_SQUARED};
+
 // Add these error types at the top of the file
 #[derive(Debug, Error)]
 pub enum ChunkError {
@@ -184,6 +186,41 @@ pub async fn select_random_chunk_from_db(
     Ok(RecordKey::new(&chosen_chunk_raw))
 }
 
+/// Calculates the Lower Confidence Bound (LCB) of a binomial proportion
+/// using the Wilson Score Interval.
+///
+/// # Arguments
+/// * `successes` - The number of successful trials.
+/// * `attempts` - The total number of trials (n).
+///
+/// # Returns
+/// The lower bound of the confidence interval for the success rate.
+/// Returns 0.0 if attempts are 0.
+fn calculate_wilson_lcb(successes: f64, attempts: f64) -> f64 {
+    if attempts <= 0.0 {
+        return 0.0; // No data, return lowest score
+    }
+    if successes < 0.0 || successes > attempts {
+        // Handle potential invalid input data gracefully, though ideally this shouldn't happen
+        warn!(
+            "Invalid input for LCB: successes={}, attempts={}, returning 0",
+            successes, attempts
+        );
+        return 0.0;
+    }
+
+    let p_hat = successes / attempts; // Observed success rate
+
+    let numerator = p_hat + Z_SQUARED / (2.0 * attempts)
+        - Z_SCORE
+            * ((p_hat * (1.0 - p_hat) / attempts) + Z_SQUARED / (4.0 * attempts * attempts)).sqrt();
+
+    let denominator = 1.0 + Z_SQUARED / attempts;
+
+    // Clamp the result between 0 and 1, as floating point inaccuracies could theoretically push it slightly outside.
+    (numerator / denominator).clamp(0.0, 1.0)
+}
+
 impl ScoringSystem {
     pub async fn new(
         db_file: &PathBuf,
@@ -314,7 +351,6 @@ impl ScoringSystem {
                     |row| row.get(0),
                 )
                 .unwrap();
-            let store_rate = store_successes / store_attempts;
 
             let retrieval_successes: f64 = conn
                 .query_row(
@@ -330,9 +366,13 @@ impl ScoringSystem {
                     |row| row.get(0),
                 )
                 .unwrap();
-            let retrieval_rate = retrieval_successes / retrieval_attempts;
 
-            response_rate_scores[miner_uid] = 0.5 * store_rate + 0.5 * retrieval_rate;
+            // Calculate LCB for store and retrieval rates
+            let store_lcb = calculate_wilson_lcb(store_successes, store_attempts);
+            let retrieval_lcb = calculate_wilson_lcb(retrieval_successes, retrieval_attempts);
+
+            // Combine the LCB scores
+            response_rate_scores[miner_uid] = 0.5 * store_lcb + 0.5 * retrieval_lcb;
         }
 
         // zero out nans in response rate scores
