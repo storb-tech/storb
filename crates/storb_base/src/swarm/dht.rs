@@ -216,6 +216,7 @@ pub struct StorbDHT {
     peers_awaiting_verification: Arc<Mutex<HashSet<PeerId>>>,
     /// Peers that have been successfully verified.
     verified_peers: Arc<Mutex<HashSet<PeerId>>>,
+    address_book: AddressBook,
 }
 
 impl StorbDHT {
@@ -236,6 +237,7 @@ impl StorbDHT {
         bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
         peer_verifier: Arc<dyn PeerVerifier>,
+        address_book: AddressBook,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
 
@@ -357,6 +359,7 @@ impl StorbDHT {
             verified_peers: Arc::new(Mutex::new(HashSet::new())),
             peers_awaiting_verification: Arc::new(Mutex::new(HashSet::new())),
             pending_peer_info: Arc::new(Mutex::new(HashMap::new())),
+            address_book,
         };
 
         let command_sender_clone = dht_instance.command_sender.clone();
@@ -373,8 +376,8 @@ impl StorbDHT {
     pub fn spawn_periodic_verifier(&self) {
         let queue_clone = self.peers_awaiting_verification.clone();
         let pending_info_clone = self.pending_peer_info.clone();
-        let peer_verifier_clone = self.peer_verifier.clone();
         let command_sender_clone = self.command_sender.clone();
+        let address_book_clone = self.address_book.clone();
 
         info!("Spawning periodic peer verification task...");
 
@@ -385,11 +388,9 @@ impl StorbDHT {
                 interval.tick().await;
                 debug!("Periodic verification tick.");
 
-                let verifier_ready = peer_verifier_clone.is_ready().await.unwrap_or_else(|e| {
-                    warn!("Peer verifier not ready: {:?}", e);
-                    false
-                });
-                if !verifier_ready {
+                let address_book_reader = address_book_clone.read().await;
+
+                if !address_book_reader.is_empty() {
                     debug!("Peer verifier not ready. Skipping verification.");
                     continue;
                 }
@@ -420,8 +421,10 @@ impl StorbDHT {
                         warn!(peer_id=%peer_id, "No IdentifyInfo found for peer. Skipping verification.");
                         continue;
                     }
-
-                    let verification_result = peer_verifier_clone.verify_peer(peer_id).await;
+                    let peer_verifier = BittensorPeerVerifier {
+                        address_book: address_book_clone.clone(),
+                    };
+                    let verification_result = peer_verifier.verify_peer(peer_id).await;
                     debug!(peer_id=%peer_id, "Verification result: {:?}", verification_result);
                     let command = DhtCommand::ProcessVerificationResult {
                         peer_id,

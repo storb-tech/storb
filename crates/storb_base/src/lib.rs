@@ -219,6 +219,7 @@ impl BaseNeuron {
             bootstrap_nodes,
             libp2p_keypair.into(),
             peer_verifier,
+            address_book.clone(),
         )
         .expect("Failed to create StorbDHT instance");
 
