@@ -12,6 +12,7 @@ use libp2p::kad::{
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
+use subxt::ext::subxt_core::constants::address;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
@@ -29,6 +30,10 @@ pub trait PeerVerifier: Send + Sync {
         &self,
         peer_id: libp2p::identity::PeerId,
     ) -> Result<bool, Box<dyn Error + Send + Sync>>;
+
+    async fn is_ready(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        Ok(true)
+    }
 }
 
 // Public BittensorPeerVerifier implementation
@@ -69,6 +74,12 @@ impl PeerVerifier for BittensorPeerVerifier {
             peer_id
         );
         Ok(false)
+    }
+
+    async fn is_ready(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+        // Check if the address book is ready
+        let neurons_list = self.address_book.read().await;
+        Ok(!neurons_list.is_empty())
     }
 }
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
@@ -373,6 +384,16 @@ impl StorbDHT {
             loop {
                 interval.tick().await;
                 debug!("Periodic verification tick.");
+
+                let verifier_ready = peer_verifier_clone.is_ready().await.unwrap_or_else(|e| {
+                    warn!("Peer verifier not ready: {:?}", e);
+                    false
+                });
+                if !verifier_ready {
+                    debug!("Peer verifier not ready. Skipping verification.");
+                    continue;
+                }
+
                 let peers_to_verify: Vec<_> = {
                     let mut queue_lock = queue_clone.lock().await;
                     queue_lock.drain().collect()
