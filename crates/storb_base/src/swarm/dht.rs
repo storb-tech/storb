@@ -46,7 +46,7 @@ impl PeerVerifier for BittensorPeerVerifier {
 
         // Access the neurons list with read lock
         let neurons_list = self.address_book.read().await;
-        
+
         info!("PeerVerifier Neuron List {:?}", neurons_list);
 
         if neurons_list.is_empty() {
@@ -202,10 +202,9 @@ pub struct StorbDHT {
     pending_verification: Arc<Mutex<HashSet<PeerId>>>,
     /// Peers that are pending verification and have sent Identify info.
     pending_peer_info: Arc<Mutex<HashMap<PeerId, identify::Info>>>,
+    peers_awaiting_verification: Arc<Mutex<HashSet<PeerId>>>,
     /// Peers that have been successfully verified.
     verified_peers: Arc<Mutex<HashSet<PeerId>>>,
-    /// Public keys received via Identify protocol. Needed for verification.
-    known_peers: Arc<Mutex<HashSet<PeerId>>>,
 }
 
 impl StorbDHT {
@@ -345,7 +344,7 @@ impl StorbDHT {
             peer_verifier,
             pending_verification: Arc::new(Mutex::new(HashSet::new())),
             verified_peers: Arc::new(Mutex::new(HashSet::new())),
-            known_peers: Arc::new(Mutex::new(HashSet::new())),
+            peers_awaiting_verification: Arc::new(Mutex::new(HashSet::new())),
             pending_peer_info: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -358,6 +357,64 @@ impl StorbDHT {
             libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
             _ => None,
         })
+    }
+
+    pub fn spawn_periodic_verifier(&self) {
+        let queue_clone = self.peers_awaiting_verification.clone();
+        let pending_info_clone = self.pending_peer_info.clone();
+        let peer_verifier_clone = self.peer_verifier.clone();
+        let command_sender_clone = self.command_sender.clone();
+
+        info!("Spawning periodic peer verification task...");
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            debug!("Periodic peer verification task started");
+            loop {
+                interval.tick().await;
+                debug!("Periodic verification tick.");
+                let peers_to_verify: Vec<_> = {
+                    let mut queue_lock = queue_clone.lock().await;
+                    queue_lock.drain().collect()
+                };
+                if peers_to_verify.is_empty() {
+                    debug!("No peers in verification queue this tick.");
+                    continue;
+                }
+
+                debug!(
+                    "Processing verification batch for {} peers.",
+                    peers_to_verify.len()
+                );
+
+                for peer_id in peers_to_verify {
+                    debug!(peer_id=%peer_id, "Verifying peer...");
+
+                    let identify_info = {
+                        let mut pending_lock = pending_info_clone.lock().await;
+                        pending_lock.remove(&peer_id)
+                    };
+
+                    if identify_info.is_none() {
+                        warn!(peer_id=%peer_id, "No IdentifyInfo found for peer. Skipping verification.");
+                        continue;
+                    }
+
+                    let verification_result = peer_verifier_clone.verify_peer(peer_id).await;
+                    debug!(peer_id=%peer_id, "Verification result: {:?}", verification_result);
+                    let command = DhtCommand::ProcessVerificationResult {
+                        peer_id,
+                        result: verification_result,
+                    };
+
+                    if let Err(e) = command_sender_clone.send(command).await {
+                        error!("Failed to send verification command: {:?}", e);
+                    } else {
+                        debug!(peer_id=%peer_id, "Verification command sent.");
+                    }
+                }
+            }
+        });
     }
 
     /// Processes a Kademlia event and routes query responses accordingly.
@@ -612,9 +669,6 @@ impl StorbDHT {
                             verified.remove(&peer_id);
                             drop(verified);
 
-                            let mut keys = self.known_peers.lock().await;
-                            keys.remove(&peer_id);
-                            drop(keys);
 
                             trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
@@ -657,43 +711,34 @@ impl StorbDHT {
                                                 "Identify::Received"
                                             );
 
-                                            // Store public key
-                                            {
-                                                let mut keys = self.known_peers.lock().await;
-                                                keys.insert(peer_id);
-                                            }
 
                                             // Check if pending verification
                                             let is_pending = {
                                                     let mut pending = pending_verification.lock().await;
-                                                    pending.remove(&peer_id)
+                                                    pending.contains(&peer_id)
                                             };
 
                                             if is_pending {
+                                                // Peer has connected and now sent Identify info. Queue for batch verification.
                                                 trace!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
-                                                let verifier = self.peer_verifier.clone();
-                                                let verified_peers_clone = self.verified_peers.clone();
-                                                let known_peers_clone = self.known_peers.clone();
-                                                let command_sender = self.command_sender.clone();
+
+                                                let pending_peer_info = self.pending_peer_info.clone();
+                                                let queue = self.peers_awaiting_verification.clone();
 
                                                 {
-                                                    let mut pending_peer_info = self.pending_peer_info.lock().await;
-                                                    pending_peer_info.insert(peer_id, info.clone());
+                                                    let mut ppi_lock = pending_peer_info.lock().await;
+                                                    ppi_lock.insert(peer_id, info.clone());
+                                                    trace!(peer_id=%peer_id, "Stored IdentifyInfo.");
                                                 }
 
-                                                tokio::spawn(
-                                                    async move {
-                                                        // Verify the peer
-                                                        let result = verifier.verify_peer(peer_id).await;
-                                                        let cmd = DhtCommand::ProcessVerificationResult {
-                                                            peer_id,
-                                                            result,
-                                                        };
-                                                        if let Err(e) = command_sender.send(cmd).await {
-                                                            warn!(peer_id=%peer_id, "Failed to send verification result: {:?}", e);
-                                                        }
+                                                {
+                                                    let mut queue_lock = queue.lock().await;
+                                                    if queue_lock.insert(peer_id) {
+                                                        trace!(peer_id=%peer_id, "Added peer to verification queue.");
+                                                    } else {
+                                                        trace!(peer_id=%peer_id, "Peer was already in verification queue.");
                                                     }
-                                                );
+                                                }
 
                                             } else {
                                                     // Handle non-pending peer (as before)
@@ -820,10 +865,6 @@ impl StorbDHT {
                                     warn!(peer_id=%peer_id, "Verification result found but no pending peer info found. Ignoring.");
                                     self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                     let _ = self.swarm.disconnect_peer_id(peer_id);
-
-                                        let mut keys = self.known_peers.lock().await;
-                                        keys.remove(&peer_id);
-
                                     continue;
                                 }
                             };
@@ -851,27 +892,16 @@ impl StorbDHT {
                                         }
                                     }
 
-                                    // Add the peer to the known peers list
-                                    let mut keys = self.known_peers.lock().await;
-                                    keys.insert(peer_id);
-
                                 }
                                 Ok(false) => {
                                     warn!(peer_id=%peer_id, "Peer verification failed. Disconnecting.");
                                     self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                     let _ = self.swarm.disconnect_peer_id(peer_id);
-
-                                    let mut keys = self.known_peers.lock().await;
-                                    keys.remove(&peer_id);
-
                                 }
                                 Err(e) => {
                                     warn!(peer_id=%peer_id, "Peer verification error: {:?}", e);
                                     self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                                     let _ = self.swarm.disconnect_peer_id(peer_id);
-
-                                    let mut keys = self.known_peers.lock().await;
-                                    keys.remove(&peer_id);
 
                                 }
                             }

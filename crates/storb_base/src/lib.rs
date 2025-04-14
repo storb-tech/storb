@@ -222,12 +222,13 @@ impl BaseNeuron {
         )
         .expect("Failed to create StorbDHT instance");
 
+        dht_og.spawn_periodic_verifier();
+
         let dht = Arc::new(Mutex::new(dht_og));
 
         let dht_locked = dht.lock().await;
         let peer_id = *dht_locked.swarm.local_peer_id();
         drop(dht_locked);
-
         // Spawn a separate task for processing events
         tokio::spawn(async move {
             loop {
