@@ -171,6 +171,10 @@ pub enum DhtCommand {
         key: RecordKey,
         response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     },
+    ProcessVerificationResult {
+        peer_id: PeerId,
+        result: Result<bool, Box<dyn std::error::Error + Send + Sync>>,
+    },
 }
 
 /// A Distributed Hash Table (DHT) for the Storb network.
@@ -186,12 +190,16 @@ pub struct StorbDHT {
     bootstrap_done_recv: watch::Receiver<bool>,
     /// Mapping of query IDs to their corresponding response channels.
     queries: Arc<Mutex<HashMap<QueryId, QueryChannel>>>,
+    /// Sender for DHT commands.
+    command_sender: mpsc::Sender<DhtCommand>,
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
     bootstrap_nodes: Vec<Multiaddr>,
     peer_verifier: Arc<dyn PeerVerifier>,
     /// Peers that have established a connection but haven't been identified and verified yet.
     pending_verification: Arc<Mutex<HashSet<PeerId>>>,
+    /// Peers that are pending verification and have sent Identify info.
+    pending_peer_info: Arc<Mutex<HashMap<PeerId, identify::Info>>>,
     /// Peers that have been successfully verified.
     verified_peers: Arc<Mutex<HashSet<PeerId>>>,
     /// Public keys received via Identify protocol. Needed for verification.
@@ -324,21 +332,23 @@ impl StorbDHT {
             });
         }
 
-        Ok((
-            Self {
-                swarm,
-                bootstrap_done_send,
-                bootstrap_done_recv,
-                queries: Arc::new(Mutex::new(HashMap::new())),
-                command_receiver,
-                bootstrap_nodes,
-                peer_verifier,
-                pending_verification: Arc::new(Mutex::new(HashSet::new())),
-                verified_peers: Arc::new(Mutex::new(HashSet::new())),
-                known_peers: Arc::new(Mutex::new(HashSet::new())),
-            },
+        let dht_instance = StorbDHT {
+            swarm,
+            bootstrap_done_send,
+            bootstrap_done_recv,
+            queries: Arc::new(Mutex::new(HashMap::new())),
+            command_receiver,
             command_sender,
-        ))
+            bootstrap_nodes,
+            peer_verifier,
+            pending_verification: Arc::new(Mutex::new(HashSet::new())),
+            verified_peers: Arc::new(Mutex::new(HashSet::new())),
+            known_peers: Arc::new(Mutex::new(HashSet::new())),
+            pending_peer_info: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let command_sender_clone = dht_instance.command_sender.clone();
+        Ok((dht_instance, command_sender_clone))
     }
 
     fn extract_peer_info(addr: &Multiaddr) -> Option<PeerId> {
@@ -647,13 +657,13 @@ impl StorbDHT {
                                                 "Identify::Received"
                                             );
 
-                                            // Store public key (as before)
+                                            // Store public key
                                             {
                                                 let mut keys = known_peers.lock().await;
                                                 keys.insert(peer_id);
                                             }
 
-                                            // Check if pending verification (as before)
+                                            // Check if pending verification
                                             let is_pending = {
                                                     let mut pending = pending_verification.lock().await;
                                                     pending.remove(&peer_id)
@@ -664,67 +674,27 @@ impl StorbDHT {
                                                 let verifier = peer_verifier.clone();
                                                 let verified_peers_clone = verified_peers.clone();
                                                 let known_peers_clone = known_peers.clone();
+                                                let command_sender = self.command_sender.clone();
 
-                                                match verifier.verify_peer(peer_id).await {
-                                                    Ok(true) => {
-                                                        // Peer is verified
-                                                        trace!(peer_id=%peer_id, "Peer successfully verified");
-                                                        {
-                                                            let mut verified = verified_peers_clone.lock().await;
-                                                            verified.insert(peer_id);
-                                                        }
-
-                                                        // --- Add valid addresses to Kademlia ---
-                                                        trace!(peer_id=%peer_id, "Adding verified peer's valid addresses to Kademlia.");
-
-                                                        let mut potential_addrs = HashSet::new(); // Use HashSet to avoid duplicates
-                                                        // Add observed address first if potentially valid
-                                                        let observed_addr = info.observed_addr.clone();
-                                                        if is_valid_external_addr(&observed_addr) {
-                                                            potential_addrs.insert(observed_addr);
-                                                        }
-
-                                                        // Add valid listen addresses
-                                                        for addr in info.listen_addrs {
-                                                            if is_valid_external_addr(&addr) {
-                                                                potential_addrs.insert(addr);
-                                                            } else {
-                                                                trace!(peer_id=%peer_id, address=%addr, "Skipping invalid/local listen address for Kademlia.");
-                                                            }
-                                                        }
-
-                                                        if potential_addrs.is_empty() {
-                                                            trace!(peer_id=%peer_id, "No valid external addresses found for verified peer in Identify info.");
-                                                        } else {
-                                                            let kademlia = &mut self.swarm.behaviour_mut().kademlia;
-                                                            for addr in potential_addrs {
-                                                                trace!(peer_id=%peer_id, address=%addr, "Adding address to Kademlia.");
-                                                                kademlia.add_address(&peer_id, addr);
-                                                            }
-                                                        }
-
-                                                    }
-                                                    Ok(false) => {
-                                                        // Peer failed verification - Remove from Kademlia and Disconnect (as before)
-                                                        trace!(peer_id=%peer_id, "Peer failed verification (e.g., not registered). Disconnecting and removing from Kademlia.");
-                                                        self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
-                                                        let _ = self.swarm.disconnect_peer_id(peer_id);
-                                                        {
-                                                            let mut keys = known_peers_clone.lock().await;
-                                                            keys.remove(&peer_id);
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        // Verification error - Remove from Kademlia and Disconnect (as before)
-                                                            trace!(peer_id=%peer_id, error=%e, "Verification check failed. Disconnecting and removing peer from Kademlia.");
-                                                            self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
-                                                            let _ = self.swarm.disconnect_peer_id(peer_id);
-                                                            {
-                                                                let mut keys = known_peers_clone.lock().await;
-                                                                keys.remove(&peer_id);
-                                                            }
-                                                    }
+                                                {
+                                                    let mut pending_peer_info = self.pending_peer_info.lock().await;
+                                                    pending_peer_info.insert(peer_id, info.clone());
                                                 }
+
+                                                tokio::spawn(
+                                                    async move {
+                                                        // Verify the peer
+                                                        let result = verifier.verify_peer(peer_id).await;
+                                                        let cmd = DhtCommand::ProcessVerificationResult {
+                                                            peer_id,
+                                                            result,
+                                                        };
+                                                        if let Err(e) = command_sender.send(cmd).await {
+                                                            warn!(peer_id=%peer_id, "Failed to send verification result: {:?}", e);
+                                                        }
+                                                    }
+                                                );
+
                                             } else {
                                                     // Handle non-pending peer (as before)
                                                     trace!(peer_id=%peer_id, "Received identify info for non-pending peer.");
@@ -754,6 +724,7 @@ impl StorbDHT {
                                                     } else {
                                                         // Not pending and not verified (as before)
                                                         warn!(peer_id=%peer_id, "Received identify info for peer that is neither pending nor verified. Ignoring.");
+                                                        let _ = self.swarm.disconnect_peer_id(peer_id);
                                                     }
                                             }
                                         },
@@ -764,7 +735,7 @@ impl StorbDHT {
                                             trace!("Identify::Pushed to {}: {:?}", peer_id, info);
                                         }
                                         identify::Event::Error { connection_id: _, peer_id, error } => {
-                                            error!("Identify::Error with {}: {:?}", peer_id, error);
+                                            trace!("Identify::Error with {}: {:?}", peer_id, error);
                                         }
                                     }
                                 }
@@ -822,6 +793,89 @@ impl StorbDHT {
                                     error!("Error handling GetProviders command: {:?}", e);
                                 }
                             }
+                        }
+                        DhtCommand::ProcessVerificationResult {peer_id, result} => {
+                            debug!(peer_id=%peer_id, "Processing verification result: {:?}", result);
+
+                            let was_pending = {
+                                let mut pending = self.pending_verification.lock().await;
+                                pending.remove(&peer_id)
+                            };
+
+                            if !was_pending {
+                                warn!(peer_id=%peer_id, "Peer was not pending verification. Ignoring.");
+                                let mut peer_info = self.pending_peer_info.lock().await;
+                                peer_info.remove(&peer_id);
+                                continue;
+                            }
+
+                            let maybe_info = {
+                                let mut pending_peer_info = self.pending_peer_info.lock().await;
+                                pending_peer_info.remove(&peer_id)
+                            };
+
+                            let info = match maybe_info {
+                                Some(info) => info,
+                                None => {
+                                    warn!(peer_id=%peer_id, "Verification result found but no pending peer info found. Ignoring.");
+                                    self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+                                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                                        let mut keys = self.known_peers.lock().await;
+                                        keys.remove(&peer_id);
+
+                                    continue;
+                                }
+                            };
+
+                            match result {
+                                Ok(true) => {
+                                    info!(peer_id=%peer_id, "Peer verified successfully. Adding to Kademlia.");
+                                    let mut verified = self.verified_peers.lock().await;
+                                    verified.insert(peer_id);
+
+                                    let mut potential_addrs = HashSet::new();
+                                    let observed_addr = info.observed_addr.clone();
+                                    if is_valid_external_addr(&observed_addr) {
+                                        potential_addrs.insert(observed_addr);
+                                    }
+                                    for addr in info.listen_addrs {
+                                        if is_valid_external_addr(&addr) {
+                                            potential_addrs.insert(addr);
+                                        }
+                                    }
+                                    if !potential_addrs.is_empty() {
+                                        let kademlia = &mut self.swarm.behaviour_mut().kademlia;
+                                        for addr in potential_addrs {
+                                            kademlia.add_address(&peer_id, addr);
+                                        }
+                                    }
+
+                                    // Add the peer to the known peers list
+                                    let mut keys = self.known_peers.lock().await;
+                                    keys.insert(peer_id);
+
+                                }
+                                Ok(false) => {
+                                    warn!(peer_id=%peer_id, "Peer verification failed. Disconnecting.");
+                                    self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+                                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                                    let mut keys = self.known_peers.lock().await;
+                                    keys.remove(&peer_id);
+
+                                }
+                                Err(e) => {
+                                    warn!(peer_id=%peer_id, "Peer verification error: {:?}", e);
+                                    self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+                                    let _ = self.swarm.disconnect_peer_id(peer_id);
+
+                                    let mut keys = self.known_peers.lock().await;
+                                    keys.remove(&peer_id);
+
+                                }
+                            }
+
                         }
                     }
                 }
