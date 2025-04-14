@@ -46,6 +46,8 @@ impl PeerVerifier for BittensorPeerVerifier {
 
         // Access the neurons list with read lock
         let neurons_list = self.address_book.read().await;
+        
+        info!("PeerVerifier Neuron List {:?}", neurons_list);
 
         if neurons_list.is_empty() {
             warn!("No neurons registered in the address book. Try again later.");
@@ -555,8 +557,6 @@ impl StorbDHT {
         loop {
             let peer_verifier = self.peer_verifier.clone();
             let pending_verification = self.pending_verification.clone();
-            let verified_peers = self.verified_peers.clone();
-            let known_peers = self.known_peers.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
                     if !self.bootstrap_nodes.is_empty() {
@@ -608,11 +608,11 @@ impl StorbDHT {
                             pending.remove(&peer_id);
                             drop(pending); // Release lock
 
-                            let mut verified = verified_peers.lock().await;
+                            let mut verified = self.verified_peers.lock().await;
                             verified.remove(&peer_id);
                             drop(verified);
 
-                            let mut keys = known_peers.lock().await;
+                            let mut keys = self.known_peers.lock().await;
                             keys.remove(&peer_id);
                             drop(keys);
 
@@ -659,7 +659,7 @@ impl StorbDHT {
 
                                             // Store public key
                                             {
-                                                let mut keys = known_peers.lock().await;
+                                                let mut keys = self.known_peers.lock().await;
                                                 keys.insert(peer_id);
                                             }
 
@@ -671,9 +671,9 @@ impl StorbDHT {
 
                                             if is_pending {
                                                 trace!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
-                                                let verifier = peer_verifier.clone();
-                                                let verified_peers_clone = verified_peers.clone();
-                                                let known_peers_clone = known_peers.clone();
+                                                let verifier = self.peer_verifier.clone();
+                                                let verified_peers_clone = self.verified_peers.clone();
+                                                let known_peers_clone = self.known_peers.clone();
                                                 let command_sender = self.command_sender.clone();
 
                                                 {
@@ -699,7 +699,7 @@ impl StorbDHT {
                                                     // Handle non-pending peer (as before)
                                                     trace!(peer_id=%peer_id, "Received identify info for non-pending peer.");
                                                     let is_verified = {
-                                                        let verified = verified_peers.lock().await;
+                                                        let verified = self.verified_peers.lock().await;
                                                         verified.contains(&peer_id)
                                                     };
                                                     if is_verified {

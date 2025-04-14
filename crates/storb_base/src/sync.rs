@@ -191,6 +191,8 @@ impl Synchronizable for BaseNeuron {
                 self.peer_node_uid
                     .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
                 // TODO: error handle?
+                let addr_book = self.address_book.read().await;
+                info!("address book after metagraph sync: {:?}", addr_book)
             }
         }
 
