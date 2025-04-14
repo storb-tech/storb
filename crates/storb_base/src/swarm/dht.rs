@@ -679,9 +679,10 @@ impl StorbDHT {
                             info!("Swarm is listening on {:?}", address);
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, concurrent_dial_errors, established_in} => {
-                            info!(peer_id=%peer_id, connection_id=%connection_id, ?endpoint, num_established, ?established_in, ?concurrent_dial_errors, "Connection established. Adding to pending verification.");
                             let mut pending = pending_verification.lock().await;
                             pending.insert(peer_id);
+                            let verified_peers = self.verified_peers.lock().await;
+                            info!("verified_peers: {:?}", verified_peers);
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             trace!("Connection closed with peer: {:?}", peer_id);
