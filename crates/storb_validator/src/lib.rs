@@ -158,11 +158,14 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Create main router with all routes
     let app = Router::new()
         .merge(protected_routes) // Add protected routes
-        .route("/info", get(node_info))
-        .route_layer(from_fn_with_state(
-            info_api_rate_limit_state,
-            middleware::info_api_rate_limit_middleware,
-        )) // Public route
+        .route(
+            "/info",
+            get(node_info).route_layer(from_fn_with_state(
+                info_api_rate_limit_state.clone(),
+                middleware::info_api_rate_limit_middleware,
+            )),
+        )
+        // Public route
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
