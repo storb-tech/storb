@@ -25,3 +25,5 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Timeout params for upload requests
 pub const MIN_BANDWIDTH: u64 = 10 * 1024; // minimum ~10KiB/s "bandwidth"
+
+pub const DHT_MAX_RETRIES: u64 = 3; // maximum number of retries for DHT queries

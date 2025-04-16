@@ -187,11 +187,6 @@ impl Synchronizable for BaseNeuron {
                         .ok_or("Peer ID did not exist so insertion into address book failed")?,
                     node_info,
                 );
-                info!(
-                    "Added neuron to address book: {:?}",
-                    remote_node_info.peer_id
-                );
-                info!("Address book: {:?}", self.address_book.clone());
                 // update peer id to neuron uid mapping
                 self.peer_node_uid
                     .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
@@ -200,10 +195,6 @@ impl Synchronizable for BaseNeuron {
         }
 
         info!("Done syncing metagraph");
-        info!(
-            "address book after metagraph sync: {:?}",
-            self.address_book.clone()
-        );
 
         Ok(changed_neurons)
     }

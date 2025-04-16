@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use dashmap::DashMap;
 use tokio::sync::mpsc::Sender;
-use tracing::{info, warn};
+use tracing::{debug, trace, warn};
 
 use super::dht::DhtCommand;
 use crate::AddressBook;
@@ -30,7 +30,7 @@ impl PeerVerifier {
         }
     }
 
-    async fn verify_peer(&mut self, peer_id: libp2p::PeerId, info: libp2p::identify::Info) -> bool {
+    async fn verify_peer(&mut self, peer_id: libp2p::PeerId) -> bool {
         // Verify the peer and update the address book
         if self.verified_peers.contains(&peer_id) {
             return true;
@@ -39,16 +39,11 @@ impl PeerVerifier {
         let neurons_list = self.address_book.clone();
         if neurons_list.is_empty() {
             warn!("No neurons registered in the address book. Try again later.");
-            info!(
-                "current pending verifications: {:?}",
-                self.pending_verifications
-            );
-            info!("current address book: {:?}", self.address_book);
             return false;
         }
         if neurons_list.contains_key(&peer_id) {
             // Peer is registered
-            info!(
+            trace!(
                 "Peer {} verified: Hotkey found in registered neurons.",
                 peer_id
             );
@@ -71,10 +66,8 @@ impl PeerVerifier {
                     .map(|r| (r.key().clone(), r.value().clone()))
                     .collect();
                 for (peer_id, info) in pending {
-                    if self.verify_peer(peer_id.clone(), info.clone()).await {
-                        info!("Peer {} verified successfully.", peer_id);
-                        info!("current address book: {:?}", self.address_book);
-                        info!("current verified peers: {:?}", self.verified_peers);
+                    if self.verify_peer(peer_id.clone()).await {
+                        debug!("Peer {} verified successfully.", peer_id);
                         let _ = self
                             .command_sender
                             .send(DhtCommand::ProcessVerificationResult {

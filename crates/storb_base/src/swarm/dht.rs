@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabtensor::api::ethereum::storage::types::pending;
 use dashmap::DashMap;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
@@ -14,12 +13,11 @@ use libp2p::kad::{
 };
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, mdns, ping, Multiaddr, PeerId, SwarmBuilder};
-use subxt::ext::subxt_core::constants::address;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
 use super::{db, models, store::StorbStore};
-use crate::constants::STORB_KAD_PROTOCOL_NAME;
+use crate::constants::{DHT_MAX_RETRIES, STORB_KAD_PROTOCOL_NAME};
 use crate::memory_db::MemoryDb;
 use crate::swarm::peer_verifier;
 use crate::utils::is_valid_external_addr;
@@ -271,7 +269,7 @@ impl StorbDHT {
         if !bootstrap_nodes.is_empty() {
             match swarm.behaviour_mut().kademlia.bootstrap() {
                 Ok(query_id) => {
-                    info!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
+                    debug!("Kademlia bootstrap initiated with QueryId: {:?}", query_id);
                 }
                 Err(e) => {
                     error!("Failed to initiate Kademlia bootstrap: {:?}", e);
@@ -373,7 +371,7 @@ impl StorbDHT {
                     if let Some(QueryChannel::GetRecord(ref mut quorum, ref mut records, _)) =
                         queries.get_mut(&query_id)
                     {
-                        info!("DHT: QUERY REC WITH ID: {}", query_id);
+                        trace!("DHT: QUERY REC WITH ID: {}", query_id);
 
                         if let GetRecordOk::FoundRecord(record) = res {
                             records.push(record);
@@ -391,7 +389,6 @@ impl StorbDHT {
                             if let Some(QueryChannel::GetRecord(_, records, sender)) =
                                 queries.remove(&query_id)
                             {
-                                info!("sent query");
                                 let _ = sender.send(Ok(records));
                             }
                         }
@@ -404,7 +401,7 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::PutRecord(Ok(PutRecordOk { key })) => {
-                    info!(
+                    debug!(
                         "Put record succeeded with key: {:?} and query id: {:?}",
                         key, query_id
                     );
@@ -413,7 +410,7 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::PutRecord(Err(e)) => {
-                    info!(
+                    error!(
                         "ERROR: Put record failed: {:?} and query id: {:?}",
                         e, query_id
                     );
@@ -449,7 +446,7 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::GetProviders(Err(e)) => {
-                    info!("Query failed: {:?}", e);
+                    warn!("Query failed: {:?}", e);
                     if let Some(QueryChannel::GetProviders(_, ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
@@ -461,7 +458,7 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::StartProviding(Err(e)) => {
-                    info!("Start providing failed: {:?}", e);
+                    warn!("Start providing failed: {:?}", e);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Err(e.into()));
                     }
@@ -473,7 +470,7 @@ impl StorbDHT {
 
     fn inject_kad_incoming_query(&mut self, event: kad::Event) {
         if let kad::Event::InboundRequest { request } = event {
-            info!("Incoming request: {:?}", request);
+            trace!("Incoming request: {:?}", request);
         }
     }
 
@@ -538,7 +535,7 @@ impl StorbDHT {
                                 }
                             }
                         } else {
-                            debug!(
+                            trace!(
                                 "Desired number of bootstrap nodes connected ({}); stopping reconnection attempts.",
                                 connected_count
                             );
@@ -551,15 +548,12 @@ impl StorbDHT {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!("Swarm is listening on {:?}", address);
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                        }
+                        SwarmEvent::ConnectionEstablished { .. } => {}
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
                             trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                         }
-                        SwarmEvent::IncomingConnection { .. } => {
-                            trace!("Incoming connection");
-                        }
+                        SwarmEvent::IncomingConnection { .. } => {}
                         SwarmEvent::IncomingConnectionError { error, .. } => {
                             trace!("Incoming connection failed: {:?}", error);
                         }
@@ -627,7 +621,7 @@ impl StorbDHT {
                             serialized_value,
                             response_tx,
                         } => {
-                            info!("Received Put command");
+                            trace!("Received Put command");
                             match self.handle_put(key, serialized_value, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -636,7 +630,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::Get { key, response_tx } => {
-                            info!("Received Get command");
+                            trace!("Received Get command");
                             match self.handle_get(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -645,7 +639,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::StartProviding { key, response_tx } => {
-                            info!("Received StartProviding command");
+                            trace!("Received StartProviding command");
                             match self.handle_start_providing(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -654,7 +648,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::GetProviders { key, response_tx } => {
-                            info!("Received GetProviders command");
+                            trace!("Received GetProviders command");
                             match self.handle_get_providers(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -663,11 +657,11 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::ProcessVerificationResult {peer_id, info, result} => {
-                            debug!(peer_id=%peer_id, "Processing verification result: {:?}", result);
+                            trace!(peer_id=%peer_id, "Processing verification result: {:?}", result);
 
                             match result {
                                 Ok(true) => {
-                                    info!(peer_id=%peer_id, "Peer verified successfully. Adding to Kademlia.");
+                                    info!(peer_id=%peer_id, "Peer verified successfully. Adding to Swarm");
                                     let mut potential_addrs = HashSet::new();
                                     let observed_addr = info.observed_addr.clone();
                                     if is_valid_external_addr(&observed_addr) {
@@ -721,12 +715,36 @@ impl StorbDHT {
             expires: None,
         };
 
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .put_record(record, Quorum::One) // TODO: Change to Quorum::Majority
-            .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
+        let mut attempts = 0;
+        let id;
+        loop {
+            match self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(record.clone(), Quorum::One)
+            {
+                Ok(qid) => {
+                    id = qid;
+                    break;
+                }
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= DHT_MAX_RETRIES {
+                        return Err(format!(
+                            "Failed to store piece entry after {} attempts: {:?}",
+                            attempts, e
+                        )
+                        .into());
+                    }
+                    warn!(
+                        "put_record attempt {} failed: {:?}, retrying...",
+                        attempts, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
 
         let mut queries = self.queries.lock().await;
         queries.insert(id, QueryChannel::PutRecord(response_tx));
@@ -759,13 +777,36 @@ impl StorbDHT {
         response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.wait_for_bootstrap().await?;
-
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .kademlia
-            .start_providing(key)
-            .map_err(|e| format!("Failed to register as a piece provider: {:?}", e))?;
+        let mut attempts = 0;
+        let id;
+        loop {
+            match self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .start_providing(key.clone())
+            {
+                Ok(qid) => {
+                    id = qid;
+                    break;
+                }
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= DHT_MAX_RETRIES {
+                        return Err(format!(
+                            "Failed to register as a piece provider after {} attempts: {:?}",
+                            attempts, e
+                        )
+                        .into());
+                    }
+                    warn!(
+                        "start_providing attempt {} failed: {:?}, retrying...",
+                        attempts, e
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
 
         let mut queries = self.queries.lock().await;
         queries.insert(id, QueryChannel::StartProviding(response_tx));
