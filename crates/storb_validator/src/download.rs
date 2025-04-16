@@ -86,8 +86,7 @@ impl DownloadProcessor {
         for provider in piece_providers {
             // Look up node info from the address book.
             let node_info = local_address_book
-                .read()
-                .await
+                .clone()
                 .get(&provider)
                 .ok_or_else(|| anyhow!("Provider {:?} not found in local address book", provider))?
                 .clone();

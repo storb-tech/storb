@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crabtensor::api::ethereum::storage::types::pending;
+use dashmap::DashMap;
 use libp2p::futures::StreamExt;
 use libp2p::kad::{
     self, AddProviderOk, BootstrapOk, GetProvidersOk, GetRecordOk, PeerRecord, ProgressStep,
@@ -19,69 +21,10 @@ use tracing::{debug, error, info, trace, warn};
 use super::{db, models, store::StorbStore};
 use crate::constants::STORB_KAD_PROTOCOL_NAME;
 use crate::memory_db::MemoryDb;
+use crate::swarm::peer_verifier;
 use crate::utils::is_valid_external_addr;
 use crate::AddressBook;
 
-#[async_trait::async_trait]
-pub trait PeerVerifier: Send + Sync {
-    /// Verifies if the peer identified by the public key is allowed.
-    /// Returns Ok(true) if allowed, Ok(false) if not allowed, Err if the check failed.
-    async fn verify_peer(
-        &self,
-        peer_id: libp2p::identity::PeerId,
-    ) -> Result<bool, Box<dyn Error + Send + Sync>>;
-
-    async fn is_ready(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        Ok(true)
-    }
-}
-
-// Public BittensorPeerVerifier implementation
-pub struct BittensorPeerVerifier {
-    pub address_book: AddressBook,
-}
-
-#[async_trait::async_trait]
-impl PeerVerifier for BittensorPeerVerifier {
-    async fn verify_peer(
-        &self,
-        peer_id: libp2p::identity::PeerId,
-    ) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        info!("Verifying peer {}", peer_id);
-
-        // Access the neurons list with read lock
-        let neurons_list = self.address_book.read().await;
-
-        info!("PeerVerifier Neuron List {:?}", neurons_list);
-
-        if neurons_list.is_empty() {
-            warn!("No neurons registered in the address book. Try again later.");
-            return Ok(false);
-        }
-
-        if neurons_list.contains_key(&peer_id) {
-            // Peer is registered
-            info!(
-                "Peer {} verified: Hotkey found in registered neurons.",
-                peer_id
-            );
-            return Ok(true);
-        }
-
-        // No match found
-        warn!(
-            "Peer {} NOT verified: Hotkey not found in registered neurons.",
-            peer_id
-        );
-        Ok(false)
-    }
-
-    async fn is_ready(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        // Check if the address book is ready
-        let neurons_list = self.address_book.read().await;
-        Ok(!neurons_list.is_empty())
-    }
-}
 /// Network behaviour for Storb, combining Kademlia, mDNS, Identify, and Ping.
 ///
 /// This behaviour aggregates multiple protocols into a single behaviour that can be used
@@ -186,6 +129,7 @@ pub enum DhtCommand {
     },
     ProcessVerificationResult {
         peer_id: PeerId,
+        info: identify::Info,
         result: Result<bool, Box<dyn std::error::Error + Send + Sync>>,
     },
 }
@@ -208,15 +152,9 @@ pub struct StorbDHT {
     /// Channel receiver for DHT commands
     command_receiver: mpsc::Receiver<DhtCommand>,
     bootstrap_nodes: Vec<Multiaddr>,
-    peer_verifier: Arc<dyn PeerVerifier>,
     /// Peers that have established a connection but haven't been identified and verified yet.
-    pending_verification: Arc<Mutex<HashSet<PeerId>>>,
-    /// Peers that are pending verification and have sent Identify info.
-    pending_peer_info: Arc<Mutex<HashMap<PeerId, identify::Info>>>,
-    peers_awaiting_verification: Arc<Mutex<HashSet<PeerId>>>,
-    /// Peers that have been successfully verified.
-    verified_peers: Arc<Mutex<HashSet<PeerId>>>,
     address_book: AddressBook,
+    pending_verification: Arc<DashMap<PeerId, identify::Info>>,
 }
 
 impl StorbDHT {
@@ -236,7 +174,6 @@ impl StorbDHT {
         port: u16,
         bootstrap_peers: Option<Vec<Multiaddr>>,
         local_keypair: identity::Keypair,
-        peer_verifier: Arc<dyn PeerVerifier>,
         address_book: AddressBook,
     ) -> Result<(Self, mpsc::Sender<DhtCommand>), Box<dyn Error>> {
         let (command_sender, command_receiver) = mpsc::channel(32);
@@ -346,6 +283,15 @@ impl StorbDHT {
             });
         }
 
+        let pending_verification = Arc::new(DashMap::<PeerId, identify::Info>::new());
+
+        let peer_verifier = peer_verifier::PeerVerifier::new(
+            address_book.clone(),
+            pending_verification.clone(),
+            command_sender.clone(),
+        );
+        peer_verifier.run();
+
         let dht_instance = StorbDHT {
             swarm,
             bootstrap_done_send,
@@ -354,12 +300,8 @@ impl StorbDHT {
             command_receiver,
             command_sender,
             bootstrap_nodes,
-            peer_verifier,
-            pending_verification: Arc::new(Mutex::new(HashSet::new())),
-            verified_peers: Arc::new(Mutex::new(HashSet::new())),
-            peers_awaiting_verification: Arc::new(Mutex::new(HashSet::new())),
-            pending_peer_info: Arc::new(Mutex::new(HashMap::new())),
             address_book,
+            pending_verification,
         };
 
         let command_sender_clone = dht_instance.command_sender.clone();
@@ -371,74 +313,6 @@ impl StorbDHT {
             libp2p::multiaddr::Protocol::P2p(peer_id) => Some(peer_id),
             _ => None,
         })
-    }
-
-    pub fn spawn_periodic_verifier(&self) {
-        let queue_clone = self.peers_awaiting_verification.clone();
-        let pending_info_clone = self.pending_peer_info.clone();
-        let command_sender_clone = self.command_sender.clone();
-        let address_book_clone = self.address_book.clone();
-
-        info!("Spawning periodic peer verification task...");
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-            debug!("Periodic peer verification task started");
-            loop {
-                interval.tick().await;
-                debug!("Periodic verification tick.");
-
-                let address_book_reader = address_book_clone.read().await;
-
-                if !address_book_reader.is_empty() {
-                    debug!("Peer verifier not ready. Skipping verification.");
-                    continue;
-                }
-
-                let peers_to_verify: Vec<_> = {
-                    let mut queue_lock = queue_clone.lock().await;
-                    queue_lock.drain().collect()
-                };
-                if peers_to_verify.is_empty() {
-                    debug!("No peers in verification queue this tick.");
-                    continue;
-                }
-
-                debug!(
-                    "Processing verification batch for {} peers.",
-                    peers_to_verify.len()
-                );
-
-                for peer_id in peers_to_verify {
-                    debug!(peer_id=%peer_id, "Verifying peer...");
-
-                    let identify_info = {
-                        let mut pending_lock = pending_info_clone.lock().await;
-                        pending_lock.remove(&peer_id)
-                    };
-
-                    if identify_info.is_none() {
-                        warn!(peer_id=%peer_id, "No IdentifyInfo found for peer. Skipping verification.");
-                        continue;
-                    }
-                    let peer_verifier = BittensorPeerVerifier {
-                        address_book: address_book_clone.clone(),
-                    };
-                    let verification_result = peer_verifier.verify_peer(peer_id).await;
-                    debug!(peer_id=%peer_id, "Verification result: {:?}", verification_result);
-                    let command = DhtCommand::ProcessVerificationResult {
-                        peer_id,
-                        result: verification_result,
-                    };
-
-                    if let Err(e) = command_sender_clone.send(command).await {
-                        error!("Failed to send verification command: {:?}", e);
-                    } else {
-                        debug!(peer_id=%peer_id, "Verification command sent.");
-                    }
-                }
-            }
-        });
     }
 
     /// Processes a Kademlia event and routes query responses accordingly.
@@ -636,7 +510,6 @@ impl StorbDHT {
     pub async fn process_events(&mut self) {
         let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
-            let peer_verifier = self.peer_verifier.clone();
             let pending_verification = self.pending_verification.clone();
             tokio::select! {
                 _ = bootstrap_interval.tick() => {
@@ -678,23 +551,9 @@ impl StorbDHT {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             info!("Swarm is listening on {:?}", address);
                         }
-                        SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, num_established, concurrent_dial_errors, established_in} => {
-                            let mut pending = pending_verification.lock().await;
-                            pending.insert(peer_id);
-                            let verified_peers = self.verified_peers.lock().await;
-                            info!("verified_peers: {:?}", verified_peers);
+                        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                         }
                         SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                            trace!("Connection closed with peer: {:?}", peer_id);
-                            let mut pending = pending_verification.lock().await;
-                            pending.remove(&peer_id);
-                            drop(pending); // Release lock
-
-                            let mut verified = self.verified_peers.lock().await;
-                            verified.remove(&peer_id);
-                            drop(verified);
-
-
                             trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
                             self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                         }
@@ -735,68 +594,7 @@ impl StorbDHT {
                                                 protocol_version=?info.protocol_version,
                                                 "Identify::Received"
                                             );
-
-
-                                            // Check if pending verification
-                                            let is_pending = {
-                                                    let mut pending = pending_verification.lock().await;
-                                                    pending.contains(&peer_id)
-                                            };
-
-                                            if is_pending {
-                                                // Peer has connected and now sent Identify info. Queue for batch verification.
-                                                trace!(peer_id=%peer_id, "Peer was pending verification. Starting check...");
-
-                                                let pending_peer_info = self.pending_peer_info.clone();
-                                                let queue = self.peers_awaiting_verification.clone();
-
-                                                {
-                                                    let mut ppi_lock = pending_peer_info.lock().await;
-                                                    ppi_lock.insert(peer_id, info.clone());
-                                                    trace!(peer_id=%peer_id, "Stored IdentifyInfo.");
-                                                }
-
-                                                {
-                                                    let mut queue_lock = queue.lock().await;
-                                                    if queue_lock.insert(peer_id) {
-                                                        trace!(peer_id=%peer_id, "Added peer to verification queue.");
-                                                    } else {
-                                                        trace!(peer_id=%peer_id, "Peer was already in verification queue.");
-                                                    }
-                                                }
-
-                                            } else {
-                                                    // Handle non-pending peer (as before)
-                                                    trace!(peer_id=%peer_id, "Received identify info for non-pending peer.");
-                                                    let is_verified = {
-                                                        let verified = self.verified_peers.lock().await;
-                                                        verified.contains(&peer_id)
-                                                    };
-                                                    if is_verified {
-                                                        // Already verified, update Kademlia addresses
-                                                        trace!(peer_id=%peer_id, "Peer already verified. Ensuring Kademlia addresses are up-to-date.");
-                                                        let mut potential_addrs = HashSet::new();
-                                                        let observed_addr = info.observed_addr.clone();
-                                                        if is_valid_external_addr(&observed_addr) {
-                                                            potential_addrs.insert(observed_addr);
-                                                        }
-                                                        for addr in info.listen_addrs {
-                                                            if is_valid_external_addr(&addr) {
-                                                                potential_addrs.insert(addr);
-                                                            }
-                                                        }
-                                                        if !potential_addrs.is_empty() {
-                                                                let kademlia = &mut self.swarm.behaviour_mut().kademlia;
-                                                            for addr in potential_addrs {
-                                                                kademlia.add_address(&peer_id, addr);
-                                                            }
-                                                        }
-                                                    } else {
-                                                        // Not pending and not verified (as before)
-                                                        warn!(peer_id=%peer_id, "Received identify info for peer that is neither pending nor verified. Ignoring.");
-                                                        let _ = self.swarm.disconnect_peer_id(peer_id);
-                                                    }
-                                            }
+                                            pending_verification.clone().insert(peer_id.clone(), info.clone());
                                         },
                                         identify::Event::Sent { connection_id, peer_id } => {
                                             trace!("Identify::Sent to {}: {:?}", peer_id, connection_id);
@@ -864,42 +662,12 @@ impl StorbDHT {
                                 }
                             }
                         }
-                        DhtCommand::ProcessVerificationResult {peer_id, result} => {
+                        DhtCommand::ProcessVerificationResult {peer_id, info, result} => {
                             debug!(peer_id=%peer_id, "Processing verification result: {:?}", result);
-
-                            let was_pending = {
-                                let mut pending = self.pending_verification.lock().await;
-                                pending.remove(&peer_id)
-                            };
-
-                            if !was_pending {
-                                warn!(peer_id=%peer_id, "Peer was not pending verification. Ignoring.");
-                                let mut peer_info = self.pending_peer_info.lock().await;
-                                peer_info.remove(&peer_id);
-                                continue;
-                            }
-
-                            let maybe_info = {
-                                let mut pending_peer_info = self.pending_peer_info.lock().await;
-                                pending_peer_info.remove(&peer_id)
-                            };
-
-                            let info = match maybe_info {
-                                Some(info) => info,
-                                None => {
-                                    warn!(peer_id=%peer_id, "Verification result found but no pending peer info found. Ignoring.");
-                                    self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
-                                    let _ = self.swarm.disconnect_peer_id(peer_id);
-                                    continue;
-                                }
-                            };
 
                             match result {
                                 Ok(true) => {
                                     info!(peer_id=%peer_id, "Peer verified successfully. Adding to Kademlia.");
-                                    let mut verified = self.verified_peers.lock().await;
-                                    verified.insert(peer_id);
-
                                     let mut potential_addrs = HashSet::new();
                                     let observed_addr = info.observed_addr.clone();
                                     if is_valid_external_addr(&observed_addr) {

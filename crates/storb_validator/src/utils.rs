@@ -25,11 +25,13 @@ pub async fn get_id_quic_uids(
         }
     };
 
-    let address_book = address_book_arc.read().await;
+    let address_book = address_book_arc.clone();
 
     // Filter addresses and get associated UIDs
     let mut quic_addresses_with_uids = Vec::new();
-    for (peer_id, node_info) in address_book.iter() {
+    for entry in address_book.iter() {
+        let peer_id = entry.key();
+        let node_info = entry.value();
         if let Some(quic_addr) = node_info.quic_address.clone() {
             let neuron_guard = validator.neuron.read().await;
             let peer_id_to_uid = neuron_guard.peer_node_uid.clone();

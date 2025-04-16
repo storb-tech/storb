@@ -114,7 +114,7 @@ impl Validator {
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
         // Check if we have any peers before proceeding
-        let peer_count = self.neuron.read().await.address_book.read().await.len();
+        let peer_count = self.neuron.read().await.address_book.len();
         if peer_count == 0 {
             info!("No peers available, skipping synthetic challenges");
             return Ok(());
@@ -164,8 +164,6 @@ impl Validator {
                     .await
                     .address_book
                     .clone()
-                    .read()
-                    .await
                     .get(peer_id)
                     .ok_or("No NodeInfo found for the given miner")?
                     .clone();
@@ -346,8 +344,7 @@ impl Validator {
 
             let mut miner_uids: Vec<u16> = Vec::new();
             for peer_id in piece_providers.clone() {
-                let addr_book_guard = address_book.read().await;
-                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
@@ -356,8 +353,7 @@ impl Validator {
 
             // go through bimap, get QUIC addresses of miners
             for peer_id in piece_providers {
-                let addr_book_guard = address_book.read().await;
-                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;

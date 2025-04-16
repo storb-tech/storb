@@ -436,8 +436,6 @@ async fn consume_bytes(
                     let miner_info = vali_guard
                         .address_book
                         .clone()
-                        .read()
-                        .await
                         .get(peer_id)
                         .ok_or_else(|| {
                             anyhow::anyhow!("Miner info not found for peer ID {}", peer_id)

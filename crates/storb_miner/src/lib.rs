@@ -203,8 +203,6 @@ async fn main(config: MinerConfig) -> Result<()> {
                             let validator_info = if let Some(vali_info) = miner_base_neuron
                                 .address_book
                                 .clone()
-                                .read()
-                                .await
                                 .get(validator_peer_id)
                             {
                                 vali_info.clone()

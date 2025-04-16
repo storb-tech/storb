@@ -181,22 +181,29 @@ impl Synchronizable for BaseNeuron {
                     quic_address: remote_node_info.quic_address,
                     version: remote_node_info.version,
                 };
-                self.address_book.write().await.insert(
+                self.address_book.clone().insert(
                     remote_node_info
                         .peer_id
                         .ok_or("Peer ID did not exist so insertion into address book failed")?,
                     node_info,
                 );
+                info!(
+                    "Added neuron to address book: {:?}",
+                    remote_node_info.peer_id
+                );
+                info!("Address book: {:?}", self.address_book.clone());
                 // update peer id to neuron uid mapping
                 self.peer_node_uid
                     .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
                 // TODO: error handle?
-                let addr_book = self.address_book.read().await;
-                info!("address book after metagraph sync: {:?}", addr_book)
             }
         }
 
         info!("Done syncing metagraph");
+        info!(
+            "address book after metagraph sync: {:?}",
+            self.address_book.clone()
+        );
 
         Ok(changed_neurons)
     }
