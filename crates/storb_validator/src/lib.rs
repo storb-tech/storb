@@ -4,12 +4,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
-use axum::middleware::from_fn;
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
-use middleware::require_api_key;
+use dashmap::DashMap;
+use middleware::{require_api_key, InfoApiRateLimiter};
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
@@ -146,6 +147,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let db_path = config.clone().api_keys_db.clone();
     // Initialize API key manager
     let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
+    let info_api_rate_limit_state: InfoApiRateLimiter = Arc::new(DashMap::new());
 
     // Create protected routes that require API key
     let protected_routes = Router::new()
@@ -156,7 +158,11 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Create main router with all routes
     let app = Router::new()
         .merge(protected_routes) // Add protected routes
-        .route("/info", get(node_info)) // Public route
+        .route("/info", get(node_info))
+        .route_layer(from_fn_with_state(
+            info_api_rate_limit_state,
+            middleware::info_api_rate_limit_middleware,
+        )) // Public route
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
