@@ -5,7 +5,7 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, trace, warn};
 
 use super::dht::DhtCommand;
-use crate::AddressBook;
+use crate::{constants::PEER_VERIFICATION_TIMEOUT, AddressBook};
 
 pub struct PeerVerifier {
     // Fields and methods for the PeerVerifier
@@ -80,7 +80,8 @@ impl PeerVerifier {
                         warn!("Failed to verify peer {}.", peer_id);
                     }
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(PEER_VERIFICATION_TIMEOUT))
+                    .await;
             }
         });
     }

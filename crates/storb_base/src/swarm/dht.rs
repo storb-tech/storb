@@ -151,7 +151,6 @@ pub struct StorbDHT {
     command_receiver: mpsc::Receiver<DhtCommand>,
     bootstrap_nodes: Vec<Multiaddr>,
     /// Peers that have established a connection but haven't been identified and verified yet.
-    address_book: AddressBook,
     pending_verification: Arc<DashMap<PeerId, identify::Info>>,
 }
 
@@ -298,7 +297,6 @@ impl StorbDHT {
             command_receiver,
             command_sender,
             bootstrap_nodes,
-            address_book,
             pending_verification,
         };
 
@@ -664,21 +662,21 @@ impl StorbDHT {
                                     info!(peer_id=%peer_id, "Peer verified successfully. Adding to Swarm");
                                     let mut potential_addrs = HashSet::new();
                                     let observed_addr = info.observed_addr.clone();
-                                    if is_valid_external_addr(&observed_addr) {
-                                        potential_addrs.insert(observed_addr);
-                                    }
+
+
+
                                     for addr in info.listen_addrs {
                                         if is_valid_external_addr(&addr) {
                                             potential_addrs.insert(addr);
                                         }
                                     }
-                                    if !potential_addrs.is_empty() {
-                                        let kademlia = &mut self.swarm.behaviour_mut().kademlia;
+
+                                    let kademlia = &mut self.swarm.behaviour_mut().kademlia;
                                         for addr in potential_addrs {
                                             kademlia.add_address(&peer_id, addr);
                                         }
-                                    }
-
+                                    kademlia.add_address(&peer_id, observed_addr);
+                                    debug!(peer_id=%peer_id, "Added peer to Kademlia routing table.");
                                 }
                                 Ok(false) => {
                                     warn!(peer_id=%peer_id, "Peer verification failed. Disconnecting.");

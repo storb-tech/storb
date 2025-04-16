@@ -56,6 +56,7 @@ struct ValidatorState {
 ///
 /// On success, returns Ok(()).
 /// On failure, returns error with details of the failure.
+
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // TODO: Load or generate server certificate
     // let server_cert = ensure_certificate_exists().await?;
