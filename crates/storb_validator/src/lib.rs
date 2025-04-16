@@ -177,7 +177,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         tokio::net::TcpListener::bind(addr)
             .await
             .context("Failed to bind HTTP server")?,
-        app,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .context("HTTP server failed")?;
