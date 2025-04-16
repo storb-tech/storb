@@ -28,3 +28,12 @@ pub const MIN_BANDWIDTH: u64 = 10 * 1024; // minimum ~10KiB/s "bandwidth"
 
 pub const DHT_MAX_RETRIES: u64 = 3; // maximum number of retries for DHT queries
 pub const PEER_VERIFICATION_TIMEOUT: u64 = 100; // timeout for peer verification in seconds
+
+pub const MAX_PENDING_INCOMING: u32 = 100;
+pub const MAX_PENDING_OUTGOING: u32 = 100;
+pub const MAX_ESTABLISHED_INCOMING: u32 = 200;
+pub const MAX_ESTABLISHED_OUTGOING: u32 = 200;
+pub const MAX_ESTABLISHED_PER_PEER: u32 = 50;
+
+pub const SWARM_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
+pub const SWARM_RATE_LIMIT_REQUEST: usize = 1000; // 1000 messages per minute
