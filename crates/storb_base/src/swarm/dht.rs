@@ -1037,7 +1037,9 @@ impl StorbDHT {
         let (response_tx, response_rx) = oneshot::channel();
 
         let serialized_value = models::serialize_dht_value(&models::DHTValue::Piece(value))?;
-
+        if command_sender.is_closed() {
+            return Err("Command sender is closed".into());
+        };
         match command_sender
             .send(DhtCommand::Put {
                 key,
@@ -1046,8 +1048,13 @@ impl StorbDHT {
             })
             .await
         {
-            Ok(_) => {}
-            Err(e) => return Err(e.into()),
+            Ok(_) => {
+                info!("Put command sent successfully");
+            }
+            Err(e) => {
+                error!("Failed to send Put command: {:?}", e);
+                return Err(e.into());
+            }
         }
 
         match response_rx.await {
