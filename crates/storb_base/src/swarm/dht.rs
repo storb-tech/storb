@@ -804,36 +804,12 @@ impl StorbDHT {
             expires: None,
         };
 
-        let mut attempts = 0;
-        let id;
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .kademlia
-                .put_record(record.clone(), Quorum::One)
-            {
-                Ok(qid) => {
-                    id = qid;
-                    break;
-                }
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= DHT_MAX_RETRIES {
-                        return Err(format!(
-                            "Failed to store piece entry after {} attempts: {:?}",
-                            attempts, e
-                        )
-                        .into());
-                    }
-                    warn!(
-                        "put_record attempt {} failed: {:?}, retrying...",
-                        attempts, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        }
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::One) // TODO: Change to Quorum::Majority
+            .map_err(|e| format!("Failed to store piece entry: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
         queries.insert(id, QueryChannel::PutRecord(response_tx));
@@ -866,36 +842,13 @@ impl StorbDHT {
         response_tx: oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.wait_for_bootstrap().await?;
-        let mut attempts = 0;
-        let id;
-        loop {
-            match self
-                .swarm
-                .behaviour_mut()
-                .kademlia
-                .start_providing(key.clone())
-            {
-                Ok(qid) => {
-                    id = qid;
-                    break;
-                }
-                Err(e) => {
-                    attempts += 1;
-                    if attempts >= DHT_MAX_RETRIES {
-                        return Err(format!(
-                            "Failed to register as a piece provider after {} attempts: {:?}",
-                            attempts, e
-                        )
-                        .into());
-                    }
-                    warn!(
-                        "start_providing attempt {} failed: {:?}, retrying...",
-                        attempts, e
-                    );
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-            }
-        }
+
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .start_providing(key)
+            .map_err(|e| format!("Failed to register as a piece provider: {:?}", e))?;
 
         let mut queries = self.queries.lock().await;
         queries.insert(id, QueryChannel::StartProviding(response_tx));
