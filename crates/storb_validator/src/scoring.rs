@@ -298,7 +298,8 @@ impl ScoringSystem {
                 store_successes = 0,
                 store_attempts = 0,
                 retrieval_successes = 0,
-                retrieval_attempts = 0
+                retrieval_attempts = 0,
+                total_successes = 0
             WHERE miner_uid = ?",
             [uid],
         )?;
