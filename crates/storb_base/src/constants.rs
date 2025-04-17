@@ -24,7 +24,7 @@ pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Timeout params for upload requests
-pub const MIN_BANDWIDTH: u64 = 10 * 1024; // minimum ~10KiB/s "bandwidth"
+pub const MIN_BANDWIDTH: u64 = 200 * 1024; // minimum ~100KiB/s "bandwidth"
 
 pub const DHT_MAX_RETRIES: u64 = 3; // maximum number of retries for DHT queries
 pub const PEER_VERIFICATION_TIMEOUT: u64 = 100; // timeout for peer verification in seconds
@@ -36,4 +36,4 @@ pub const MAX_ESTABLISHED_OUTGOING: u32 = 200;
 pub const MAX_ESTABLISHED_PER_PEER: u32 = 50;
 
 pub const SWARM_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
-pub const SWARM_RATE_LIMIT_REQUEST: usize = 1000; // 1000 messages per minute
+pub const SWARM_RATE_LIMIT_REQUEST: usize = 60; // 60 messages per minute

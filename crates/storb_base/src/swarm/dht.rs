@@ -354,10 +354,10 @@ impl StorbDHT {
 
         if timestamps.len() >= SWARM_RATE_LIMIT_REQUEST {
             warn!(%peer_id, %ip_addr, "Rate limit exceeded for peer");
-            return false;
+            false
         } else {
             timestamps.push_back(now);
-            return true;
+            true
         }
     }
 
@@ -519,13 +519,10 @@ impl StorbDHT {
     fn inject_kad_incoming_query(&mut self, event: kad::Event) {
         if let kad::Event::InboundRequest { request } = event {
             trace!("Incoming request: {:?}", request);
-            match request {
-                kad::InboundRequest::AddProvider { record, .. } => {
-                    // log peer id of the record
-                    trace!("AddProvider request: {:?}", record);
-                    info!("AddProvider request: {:?}", record.unwrap());
-                }
-                _ => {}
+            if let kad::InboundRequest::AddProvider { record, .. } = request {
+                // log peer id of the record
+                trace!("AddProvider request: {:?}", record);
+                info!("AddProvider request: {:?}", record.unwrap());
             }
         }
     }
@@ -583,9 +580,9 @@ impl StorbDHT {
                         }
                         SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                             trace!(peer_id=%peer_id, connection_id=%connection_id, "Connection established with peer.");
-                            let ip_addr = Self::extract_ip(&endpoint.get_remote_address()).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-                            active_connections.insert(connection_id, (peer_id.clone(), ip_addr));
-                            peer_id_to_connection_id.insert(peer_id.clone(), connection_id);
+                            let ip_addr = Self::extract_ip(endpoint.get_remote_address()).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+                            active_connections.insert(connection_id, (peer_id, ip_addr));
+                            peer_id_to_connection_id.insert(peer_id, connection_id);
                         }
                         SwarmEvent::ConnectionClosed { peer_id, connection_id, .. } => {
                             trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
@@ -637,11 +634,8 @@ impl StorbDHT {
                                     StorbEvent::Identify(identify_event) => { // Use the renamed variable
                                         let event = *identify_event;
                                         trace!("Identify event: {:?}", event);
-                                        match event { // Match on the specific identify_event
-                                            identify::Event::Received { peer_id, info, .. } => {
-                                                pending_verification.clone().insert(peer_id.clone(), info.clone());
-                                            }
-                                            _ => {}
+                                        if let identify::Event::Received { peer_id, info, .. } = event {
+                                            pending_verification.clone().insert(peer_id.clone(), info.clone());
                                         }
                                     }
                                     StorbEvent::Ping( .. ) => {}
@@ -754,10 +748,10 @@ impl StorbDHT {
                         match request {
                             kad::InboundRequest::AddProvider { record } => {
                                 if let Some(record) = record {
-                                    let peer_id = record.provider.clone();
+                                    let peer_id = record.provider;
                                     self.peer_id_to_connection_id
                                         .get(&peer_id)
-                                        .map(|conn_ref| conn_ref.value().clone())
+                                        .map(|conn_ref| *conn_ref.value())
                                 } else {
                                     None
                                 }
@@ -766,7 +760,7 @@ impl StorbDHT {
                                 source: _,
                                 connection,
                                 record: _,
-                            } => Some(connection.clone()),
+                            } => Some(*connection),
                             // Add others if discovered
                             _ => None,
                         }
@@ -786,9 +780,8 @@ impl StorbDHT {
             }
             StorbEvent::Ping(ping_event) => {
                 // Ping results usually carry ConnectionId
-                match &**ping_event {
-                    ping::Event { connection, .. } => Some(*connection),
-                }
+                let ping::Event { connection, .. } = &**ping_event;
+                Some(*connection)
             }
         }
         // **IMPORTANT LIMITATION:** Remains the same - if the specific inner event

@@ -3,6 +3,7 @@ use std::net::Ipv4Addr;
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
 use crabtensor::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
 use crabtensor::AccountId;
+use futures::stream::{self, StreamExt};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -132,65 +133,77 @@ impl Synchronizable for BaseNeuron {
 
         self.local_node_info = local_node_info;
 
+        let mut futures = Vec::new();
+
+        // Create futures for all node info requests
         for (neuron_uid, _) in neurons.iter().enumerate() {
             let neuron_info: NeuronInfoLite<AccountId> = neurons[neuron_uid].clone();
-            // NOTE: if we don't run this check we will query ourselves and it will
-            // create a deadlock.
-            if neuron_uid != self.local_node_info.uid.ok_or("Node UID did not exist")? as usize {
-                let neuron_ip = &neuron_info.axon_info.ip;
-                let neuron_port = &neuron_info.axon_info.port;
 
-                // If IP is 0, it means the neuron did not post IP so we can
-                // assume they're non-functional
-                if *neuron_ip == 0 {
-                    warn!(
-                        "Invalid IP for neuron {:?}. Node has never been started",
-                        neuron_info.uid
-                    );
-                    continue;
-                }
+            // Skip self to avoid deadlock
+            if neuron_uid == self.local_node_info.uid.ok_or("Node UID did not exist")? as usize {
+                continue;
+            }
 
-                // Check if its a valid port
-                if *neuron_port == 0 {
-                    error!("Invalid port for neuron: {:?}", neuron_info.uid);
-                    continue;
-                };
+            let neuron_ip = neuron_info.axon_info.ip;
+            let neuron_port = neuron_info.axon_info.port;
 
-                info!(
-                    "Getting peer id from neuron={:?} at ip={:?} and port={:?}",
-                    neuron_info.uid, neuron_ip, neuron_port
+            // Skip invalid IPs/ports
+            if neuron_ip == 0 {
+                warn!(
+                    "Invalid IP for neuron {:?}. Node has never been started",
+                    neuron_info.uid
                 );
-                let ip = Ipv4Addr::from((*neuron_ip & 0xffff_ffff) as u32);
-                let url_raw = format!("http://{}:{}/info", ip, neuron_port);
-                let url = reqwest::Url::parse(&url_raw).expect("Invalid URL");
-                let remote_node_info = match Self::get_remote_node_info(url).await {
-                    Ok(info) => info,
+                continue;
+            }
+
+            if neuron_port == 0 {
+                error!("Invalid port for neuron: {:?}", neuron_info.uid);
+                continue;
+            }
+
+            let ip = Ipv4Addr::from((neuron_ip & 0xffff_ffff) as u32);
+            let url_raw = format!("http://{}:{}/info", ip, neuron_port);
+            let url = reqwest::Url::parse(&url_raw).expect("Invalid URL");
+
+            // Create future for this node's info request
+            let future = async move {
+                match Self::get_remote_node_info(url).await {
+                    Ok(remote_node_info) => Some((neuron_info, remote_node_info)),
                     Err(err) => {
                         warn!(
                             "Failed to get remote node info (it may be offline): {:?}",
                             err
                         );
-                        continue;
+                        None
                     }
-                };
+                }
+            };
 
-                let node_info = NodeInfo {
-                    neuron_info: neuron_info.clone(),
-                    peer_id: remote_node_info.peer_id,
-                    http_address: remote_node_info.http_address,
-                    quic_address: remote_node_info.quic_address,
-                    version: remote_node_info.version,
-                };
-                self.address_book.clone().insert(
-                    remote_node_info
-                        .peer_id
-                        .ok_or("Peer ID did not exist so insertion into address book failed")?,
-                    node_info,
-                );
-                // update peer id to neuron uid mapping
-                self.peer_node_uid
-                    .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
-                // TODO: error handle?
+            futures.push(future);
+        }
+
+        // Execute all futures concurrently and collect results
+        // TODO: make the buffer size constant - NO MAGIC NUMBERS!!!!1!!1!!
+        let stream = stream::iter(futures)
+            .buffer_unordered(32) // Limit to 32 concurrent requests
+            .collect::<Vec<_>>();
+        let results = stream.await;
+
+        // Process results and update address book
+        for result in results.into_iter().flatten() {
+            let (neuron_info, remote_node_info) = result;
+
+            let node_info = NodeInfo {
+                neuron_info: neuron_info.clone(),
+                peer_id: remote_node_info.peer_id,
+                http_address: remote_node_info.http_address,
+                quic_address: remote_node_info.quic_address,
+                version: remote_node_info.version,
+            };
+
+            if let Some(peer_id) = remote_node_info.peer_id {
+                self.address_book.clone().insert(peer_id, node_info);
+                self.peer_node_uid.insert(peer_id, neuron_info.uid);
             }
         }
 

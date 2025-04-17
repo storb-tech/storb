@@ -23,10 +23,10 @@ impl PeerVerifier {
         command_sender: Sender<DhtCommand>,
     ) -> Self {
         PeerVerifier {
-            address_book: address_book,
+            address_book,
             verified_peers: HashSet::new(),
-            pending_verifications: pending_verifications,
-            command_sender: command_sender,
+            pending_verifications,
+            command_sender,
         }
     }
 
@@ -47,12 +47,12 @@ impl PeerVerifier {
                 "Peer {} verified: Hotkey found in registered neurons.",
                 peer_id
             );
-            self.verified_peers.insert(peer_id.clone());
+            self.verified_peers.insert(peer_id);
             self.pending_verifications.remove(&peer_id);
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn run(mut self) {
@@ -63,16 +63,16 @@ impl PeerVerifier {
                 let pending: Vec<(libp2p::PeerId, libp2p::identify::Info)> = self
                     .pending_verifications
                     .iter()
-                    .map(|r| (r.key().clone(), r.value().clone()))
+                    .map(|r| (*r.key(), r.value().clone()))
                     .collect();
                 for (peer_id, info) in pending {
-                    if self.verify_peer(peer_id.clone()).await {
+                    if self.verify_peer(peer_id).await {
                         debug!("Peer {} verified successfully.", peer_id);
                         let _ = self
                             .command_sender
                             .send(DhtCommand::ProcessVerificationResult {
-                                peer_id: peer_id,
-                                info: info,
+                                peer_id,
+                                info,
                                 result: Ok(true),
                             })
                             .await;

@@ -8,6 +8,7 @@ use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;
+use base::LocalNodeInfo;
 use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
@@ -38,6 +39,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
 #[derive(Clone)]
 struct ValidatorState {
     pub validator: Arc<Validator>,
+    pub local_node_info: LocalNodeInfo,
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC,
@@ -168,6 +170,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
             validator: validator.clone(),
+            local_node_info: validator.neuron.read().await.local_node_info.clone(),
         });
 
     // Start server
