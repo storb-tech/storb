@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::net::Ipv4Addr;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
@@ -15,14 +16,13 @@ pub enum SyncError {
     #[error("Failed to get node info: {0}")]
     GetNodeInfoError(String),
 }
-
 pub trait Synchronizable {
     fn sync_metagraph(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<Vec<u16>, Box<dyn std::error::Error>>>;
+    ) -> impl std::future::Future<Output = Result<Vec<u16>, Box<dyn StdError + Send + Sync>>> + Send;
     fn get_remote_node_info(
         addr: reqwest::Url,
-    ) -> impl std::future::Future<Output = Result<LocalNodeInfo, SyncError>>;
+    ) -> impl std::future::Future<Output = Result<LocalNodeInfo, SyncError>> + Send;
 }
 
 // Implementation for BaseNeuron
@@ -67,7 +67,9 @@ impl Synchronizable for BaseNeuron {
     }
 
     /// Synchronise the local metagraph state with chain.
-    async fn sync_metagraph(&mut self) -> Result<Vec<u16>, Box<dyn std::error::Error>> {
+    async fn sync_metagraph(
+        &mut self,
+    ) -> Result<Vec<u16>, Box<dyn StdError + Send + Sync + 'static>> {
         info!("Syncing metagraph at block");
         let current_block = self
             .subtensor

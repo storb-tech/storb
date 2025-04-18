@@ -28,7 +28,14 @@ impl Miner {
     /// Sync the miner with the metagraph.
     pub async fn sync(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         info!("Syncing miner");
-        self.neuron.sync_metagraph().await?;
+        match self.neuron.sync_metagraph().await {
+            Ok(_) => {
+                info!("Sync completed!!!");
+            }
+            Err(e) => {
+                info!("Sync failed: {:?}", e);
+            }
+        }
         info!("Done syncing miner");
 
         Ok(())

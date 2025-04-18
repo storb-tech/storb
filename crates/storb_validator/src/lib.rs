@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,32 +85,74 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         loop {
             interval.tick().await;
             info!("Syncing validator");
-            let uids_to_update = match neuron.write().await.sync_metagraph().await {
-                Ok(res) => res,
-                Err(err) => {
-                    error!("Failed to sync metagraph: {err}");
-                    continue;
-                }
-            };
-            let neuron_count = neuron.read().await.neurons.read().await.len();
-            scoring_system
-                .write()
-                .await
-                .update_scores(neuron_count, uids_to_update)
-                .await;
 
-            let ema_scores = scoring_system.clone().read().await.state.ema_scores.clone();
-
-            match Validator::set_weights(
-                neuron.read().await.clone(),
-                ema_scores,
-                sync_config.clone(),
-            )
+            // Wrap the sync operation in a timeout
+            let SYNC_TIMEOUT = Duration::from_secs(30);
+            match tokio::time::timeout(SYNC_TIMEOUT, async {
+                let start = std::time::Instant::now();
+                let sync_result = neuron.write().await.sync_metagraph().await;
+                (sync_result, start.elapsed())
+            })
             .await
             {
-                Ok(_) => info!("Successfully set weights on chain"),
-                Err(e) => error!("Failed to set weights on chain: {}", e),
-            };
+                Ok((result, duration)) => {
+                    match result {
+                        Ok(uids) => {
+                            info!("Sync completed in {:?}", duration);
+                            let neuron_count = neuron.read().await.neurons.read().await.len();
+                            scoring_system
+                                .write()
+                                .await
+                                .update_scores(neuron_count, uids)
+                                .await;
+
+                            let ema_scores =
+                                scoring_system.clone().read().await.state.ema_scores.clone();
+
+                            match Validator::set_weights(
+                                neuron.read().await.clone(),
+                                ema_scores,
+                                sync_config.clone(),
+                            )
+                            .await
+                            {
+                                Ok(_) => info!("Successfully set weights on chain"),
+                                Err(e) => error!("Failed to set weights on chain: {}", e),
+                            };
+                        }
+                        Err(err) => {
+                            error!("Failed to sync metagraph: {}", err);
+                            // Print stack trace for debugging
+                            error!("Stack trace:\n{:?}", std::backtrace::Backtrace::capture());
+                        }
+                    }
+                }
+                Err(_elapsed) => {
+                    error!(
+                        "Sync operation timed out after {} seconds",
+                        SYNC_TIMEOUT.as_secs_f32()
+                    );
+                    error!(
+                        "Current stack trace:\n{:?}",
+                        std::backtrace::Backtrace::capture()
+                    );
+
+                    // Additional debugging info
+                    let guard = neuron.try_read();
+                    match guard {
+                        Ok(_) => info!("Neuron read lock is available"),
+                        Err(_) => error!("Neuron read lock is held - possible deadlock"),
+                    };
+
+                    let scoring_guard = scoring_system.try_write();
+                    match scoring_guard {
+                        Ok(_) => info!("Scoring system write lock is available"),
+                        Err(_) => error!("Scoring system write lock is held - possible deadlock"),
+                    };
+                    // panic
+                    panic!("Sync operation timed out");
+                }
+            }
 
             info!("Done syncing validator");
         }
