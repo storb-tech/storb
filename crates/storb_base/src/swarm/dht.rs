@@ -133,6 +133,7 @@ pub enum DhtCommand {
         info: identify::Info,
         result: Result<bool, Box<dyn std::error::Error + Send + Sync>>,
     },
+    Heartbeat {},
 }
 
 /// A Distributed Hash Table (DHT) for the Storb network.
@@ -650,6 +651,9 @@ impl StorbDHT {
 
                 Some(command) = self.command_receiver.recv() => {
                     match command {
+                        DhtCommand::Heartbeat {} => {
+                            info!("Received Heartbeat command");
+                        }
                         DhtCommand::Put {
                             key,
                             serialized_value,
