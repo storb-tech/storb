@@ -230,22 +230,8 @@ impl BaseNeuron {
                 let mut dht_locked = dht.lock().await;
                 dht_locked.process_events().await;
                 drop(dht_locked);
-                panic!("Failed to process events");
                 tokio::task::yield_now().await;
-            }
-        });
-
-        let command_sender_clone = command_sender.clone();
-        // send heartbeat to dht command sender
-        tokio::spawn(async move {
-            loop {
-                command_sender_clone
-                    .send(swarm::dht::DhtCommand::Heartbeat {})
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Failed to send heartbeat: {err}");
-                    });
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                panic!("Failed to process storb swarm events");
             }
         });
 

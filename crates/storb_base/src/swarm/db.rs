@@ -174,7 +174,7 @@ impl RocksDBStore {
     ///
     /// The provided key and value are queued for an asynchronous write in the provider CF.
     pub async fn schedule_put_provider(&self, key: &[u8], val: &[u8]) {
-        info!("schedule_put_provider for key: {:?}", &key);
+        trace!("schedule_put_provider for key: {:?}", &key);
         let op = DbOp::Put {
             cf: CfType::Provider,
             key: key.to_vec(),
@@ -204,7 +204,7 @@ impl RocksDBStore {
     pub async fn get(&self, cf: CfType, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         let db = self.db.clone();
         let key = key.to_vec();
-        info!("get: cf={:?}, key={:?}", &cf, &key);
+        trace!("get: cf={:?}, key={:?}", &cf, &key);
         tokio::task::spawn_blocking(move || {
             let cf_handle = cf.handle(&db).map_err(std::io::Error::other)?;
             db.get_cf(cf_handle, &key).map_err(std::io::Error::other)
@@ -253,7 +253,7 @@ impl RocksDBStore {
             let op = match rx.recv().await {
                 Some(op) => op,
                 None => {
-                    info!("DB channel closed, worker exiting");
+                    debug!("DB channel closed, worker exiting");
                     break;
                 }
             };

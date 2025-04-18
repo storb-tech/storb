@@ -133,7 +133,6 @@ pub enum DhtCommand {
         info: identify::Info,
         result: Result<bool, Box<dyn std::error::Error + Send + Sync>>,
     },
-    Heartbeat {},
 }
 
 /// A Distributed Hash Table (DHT) for the Storb network.
@@ -501,7 +500,7 @@ impl StorbDHT {
                     }
                 }
                 QueryResult::StartProviding(Ok(AddProviderOk { key })) => {
-                    info!("Start providing succeeded for {:?}", key);
+                    debug!("Start providing succeeded for {:?}", key);
                     if let Some(QueryChannel::StartProviding(ch)) = queries.remove(&query_id) {
                         let _ = ch.send(Ok(()));
                     }
@@ -648,15 +647,12 @@ impl StorbDHT {
 
                 Some(command) = self.command_receiver.recv() => {
                     match command {
-                        DhtCommand::Heartbeat {} => {
-                            info!("Received Heartbeat command");
-                        }
                         DhtCommand::Put {
                             key,
                             serialized_value,
                             response_tx,
                         } => {
-                            info!("Received Put command");
+                            debug!("Received Put command");
                             match self.handle_put(key, serialized_value, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -665,7 +661,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::Get { key, response_tx } => {
-                            info!("Received Get command");
+                            debug!("Received Get command");
                             match self.handle_get(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -674,7 +670,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::StartProviding { key, response_tx } => {
-                            info!("Received StartProviding command");
+                            debug!("Received StartProviding command");
                             match self.handle_start_providing(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -683,7 +679,7 @@ impl StorbDHT {
                             }
                         }
                         DhtCommand::GetProviders { key, response_tx } => {
-                            info!("Received GetProviders command");
+                            debug!("Received GetProviders command");
                             match self.handle_get_providers(key, response_tx).await {
                                 Ok(_) => {}
                                 Err(e) => {
@@ -1050,7 +1046,7 @@ impl StorbDHT {
             .await
         {
             Ok(_) => {
-                info!("Put command sent successfully");
+                debug!("Put command sent successfully");
             }
             Err(e) => {
                 error!("Failed to send Put command: {:?}", e);
@@ -1117,7 +1113,7 @@ impl StorbDHT {
         piece_key: RecordKey,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (response_tx, response_rx) = oneshot::channel();
-        info!("Starting to provide piece {:?}", &piece_key);
+        debug!("Starting to provide piece {:?}", &piece_key);
         match command_sender
             .send(DhtCommand::StartProviding {
                 key: piece_key.clone(),
@@ -1179,7 +1175,7 @@ impl StorbDHT {
     ///
     /// This internal function blocks until the bootstrap watch channel signals completion.
     async fn wait_for_bootstrap(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        info!("Waiting for bootstrap to complete...");
+        debug!("Waiting for bootstrap to complete...");
         while !*self.bootstrap_done_recv.borrow() {
             trace!("Bootstrap status: waiting for change...");
             trace!(
@@ -1187,7 +1183,7 @@ impl StorbDHT {
                 self.bootstrap_done_recv.changed().await?
             );
         }
-        info!("Bootstrap completed.");
+        debug!("Bootstrap completed.");
         Ok(())
     }
 }
