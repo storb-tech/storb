@@ -519,11 +519,8 @@ impl StorbDHT {
 
     fn inject_kad_incoming_query(&mut self, event: kad::Event) {
         if let kad::Event::InboundRequest { request } = event {
-            trace!("Incoming request: {:?}", request);
             if let kad::InboundRequest::AddProvider { record, .. } = request {
-                // log peer id of the record
                 trace!("AddProvider request: {:?}", record);
-                info!("AddProvider request: {:?}", record.unwrap());
             }
         }
     }
