@@ -124,6 +124,8 @@ impl Synchronizable for BaseNeuron {
             *neurons_guard = neurons.clone();
         }
 
+        drop(original_neurons);
+
         info!("Updated local neurons state");
 
         if local_node_info.uid.is_none() {

@@ -113,8 +113,11 @@ impl Validator {
     pub async fn run_synthetic_challenges(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
-        // Check if we have any peers before proceeding
-        let peer_count = self.neuron.read().await.address_book.len();
+        let peer_count = {
+            let neuron_guard = self.neuron.read().await;
+            neuron_guard.address_book.clone().len()
+        };
+
         if peer_count == 0 {
             info!("No peers available, skipping synthetic challenges");
             return Ok(());
@@ -151,22 +154,30 @@ impl Validator {
             for idx in idxs_to_query {
                 let quic_addr = &quic_addresses[idx];
                 let quic_miner_uid = quic_miner_uids[idx];
-                let db = self.scoring_system.write().await.db.clone();
+                let db = {
+                    let score_gaurd = self.scoring_system.write().await;
+                    score_gaurd.db.clone()
+                };
 
-                let neuron_guard = self.neuron.read().await;
-                let peer_id = neuron_guard
-                    .peer_node_uid
-                    .get_by_right(&quic_miner_uid)
-                    .ok_or("No peer ID found for the miner UID")?;
-                let miner_info = self
-                    .neuron
-                    .read()
-                    .await
-                    .address_book
-                    .clone()
-                    .get(peer_id)
-                    .ok_or("No NodeInfo found for the given miner")?
-                    .clone();
+                let miner_info = {
+                    let neuron_guard = self.neuron.read().await;
+
+                    // Get peer ID from the neuron
+                    let peer_id = neuron_guard
+                        .peer_node_uid
+                        .get_by_right(&quic_miner_uid)
+                        .ok_or("No peer ID found for the miner UID")?;
+
+                    // Get miner info from the address book
+                    let miner_info = neuron_guard
+                        .address_book
+                        .clone()
+                        .get(peer_id)
+                        .ok_or("No NodeInfo found for the given miner")?
+                        .clone();
+
+                    miner_info
+                };
 
                 info!("Challenging miner {quic_miner_uid} with store request");
                 db.conn.lock().await.execute(
@@ -325,9 +336,16 @@ impl Validator {
 
         let mut pieces_checked = 0;
 
-        let neuron_guard = self.neuron.read().await;
-        let dht_sender = neuron_guard.command_sender.clone();
-        let address_book = neuron_guard.address_book.clone();
+        // let neuron_guard = self.neuron.read().await;
+        // let dht_sender = neuron_guard.command_sender.clone();
+        // let address_book = neuron_guard.address_book.clone();
+        let (dht_sender, address_book) = {
+            let neuron_guard = self.neuron.read().await;
+            (
+                neuron_guard.command_sender.clone(),
+                neuron_guard.address_book.clone(),
+            )
+        };
 
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
             let idx = rng.gen_range(0..piece_hashes.len());
@@ -358,7 +376,7 @@ impl Validator {
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
 
-                let db = self.scoring_system.write().await.db.clone();
+                let db = { self.scoring_system.write().await.db.clone() };
                 debug!("Updating retrieval attempts in sqlite db");
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 debug!("Updated");
@@ -497,6 +515,8 @@ impl Validator {
             .tx()
             .sign_and_submit_default(&payload, &neuron.signer)
             .await?;
+
+        drop(neuron);
 
         Ok(())
     }

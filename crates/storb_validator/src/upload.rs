@@ -233,9 +233,9 @@ impl<'a> UploadProcessor<'a> {
         let (piece_hashes, chunk_hashes) = consumer_result??;
 
         // log the chunk hashes as strings
-        info!("Raw Chunk hashes: {:?}", chunk_hashes);
+        debug!("Raw Chunk hashes: {:?}", chunk_hashes);
         let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
-        info!("Chunk hashes: {:?}", chunk_hashes_str);
+        debug!("Chunk hashes: {:?}", chunk_hashes_str);
 
         let chunk_count = chunk_hashes.len() as u64;
 
@@ -497,7 +497,7 @@ async fn consume_bytes(
 
                     // Add piece entry to DHT...
                     let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
-                    info!("UPLOAD PIECE KEY: {:?}", &piece_key);
+                    debug!("UPLOAD PIECE KEY: {:?}", &piece_key);
 
                     let msg = (
                         piece_key.clone(),
@@ -547,7 +547,7 @@ async fn consume_bytes(
         let chunk_hash = chunk_hash_raw.finalize();
 
         let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash.as_bytes());
-        info!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
+        debug!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
 
         let chunk_msg = (
             chunk_key.clone(),

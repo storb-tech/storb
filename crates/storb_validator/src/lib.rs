@@ -85,6 +85,21 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         loop {
             interval.tick().await;
             info!("Syncing validator");
+            let uids_to_update = match neuron.write().await.sync_metagraph().await {
+                Ok(res) => res,
+                Err(err) => {
+                    error!("Failed to sync metagraph: {err}");
+                    continue;
+                }
+            };
+            let neurons = neuron.read().await.neurons.read().await.clone();
+            let neuron_count = neurons.len();
+            drop(neurons);
+            scoring_system
+                .write()
+                .await
+                .update_scores(neuron_count, uids_to_update)
+                .await;
 
             // Wrap the sync operation in a timeout
             let SYNC_TIMEOUT = Duration::from_secs(30);
@@ -234,6 +249,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
 /// Main entry point for the validator service
 async fn main(config: ValidatorConfig) {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("One of the threads panicked {}", info);
+        std::process::abort();
+    }));
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");

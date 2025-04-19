@@ -142,10 +142,10 @@ async fn main(config: MinerConfig) -> Result<()> {
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
-                        info!("New connection from {}", conn.remote_address());
+                        debug!("New connection from {}", conn.remote_address());
 
                         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                            info!("New bidirectional stream opened");
+                            debug!("New bidirectional stream opened");
 
                             // Read the payload size
                             let mut payload_size_buf = [0u8; 8];
@@ -236,7 +236,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 continue;
                             }
                             let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                            info!("Received piece size: {piece_size} bytes");
+                            debug!("Received piece size: {piece_size} bytes");
 
                             // Process the piece
                             let mut buffer = vec![0u8; piece_size];
@@ -275,7 +275,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                             )
                             .await
                             {
-                                Ok(_) => info!(
+                                Ok(_) => debug!(
                                     "Added miner as provider for piece with key {:?}",
                                     piece_key
                                 ),
