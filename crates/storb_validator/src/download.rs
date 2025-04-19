@@ -86,8 +86,7 @@ impl DownloadProcessor {
         for provider in piece_providers {
             // Look up node info from the address book.
             let node_info = local_address_book
-                .read()
-                .await
+                .clone()
                 .get(&provider)
                 .ok_or_else(|| anyhow!("Provider {:?} not found in local address book", provider))?
                 .clone();
@@ -362,7 +361,7 @@ impl DownloadProcessor {
                 "Internal server error".to_string(),
             )
         })?;
-        info!("Tracker hash: {:?}", tracker.infohash);
+        debug!("Tracker hash: {:?}", tracker.infohash);
 
         let chunk_hashes = tracker.chunk_hashes;
 
@@ -377,7 +376,7 @@ impl DownloadProcessor {
         for chunk_hash in chunk_hashes.clone() {
             // convert chunk_hash to a string
             let chunk_key = RecordKey::new(&chunk_hash);
-            info!("RecordKey of chunk hash: {:?}", chunk_key);
+            debug!("RecordKey of chunk hash: {:?}", chunk_key);
 
             let chunk_res =
                 match swarm::dht::StorbDHT::get_chunk_entry(dht_sender.clone(), chunk_key).await {
@@ -401,7 +400,7 @@ impl DownloadProcessor {
                     ));
                 }
             };
-            info!(
+            debug!(
                 "Found chunk hash: {:?} with {:?} pieces",
                 &chunk.chunk_hash,
                 &chunk.piece_hashes.len()
@@ -421,7 +420,7 @@ impl DownloadProcessor {
                 error!("Error producing chunk: {}", e);
             }
 
-            info!("Produced chunk {:?}", chunk_idx);
+            debug!("Produced chunk {:?}", chunk_idx);
         }
 
         let stream =

@@ -17,6 +17,7 @@ bincode.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 crabtensor.workspace = true
+dashmap.workspace = true
 dirs.workspace = true
 ed25519-dalek.workspace = true
 futures.workspace = true

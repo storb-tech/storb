@@ -7,7 +7,7 @@ use libp2p::kad::{ProviderRecord, Record, RecordKey};
 use libp2p::PeerId;
 use lru::LruCache;
 use tokio::runtime::Handle;
-use tracing::info;
+use tracing::{info, trace};
 
 use super::db::{CfType, RocksDBStore};
 use super::record::{StorbProviderRecord, StorbRecord};
@@ -156,7 +156,7 @@ impl RecordStore for StorbStore {
         let wrapper = StorbProviderRecord::from(p.clone());
         let pb = bincode::serialize(&wrapper).expect("serialization failed");
         let db = self.db.clone();
-        info!("Adding provider record for key {:?}", k);
+        trace!("Adding provider record for key {:?}", k);
         tokio::spawn(async move {
             db.schedule_put_provider(&kb, &pb).await;
         });
@@ -178,20 +178,20 @@ impl RecordStore for StorbStore {
             })
             .get(k)
         {
-            tracing::info!(
+            tracing::trace!(
                 "Cache hit for key {:?}: found {} providers",
                 k,
                 providers.len()
             );
             return providers.clone();
         }
-        tracing::info!("Cache miss for key {:?}, checking database", k);
+        tracing::trace!("Cache miss for key {:?}, checking database", k);
 
         let kb = k.as_ref();
 
         // Perform a blocking call to retrieve the provider record from RocksDB
         let db_result = tokio::task::block_in_place(|| {
-            tracing::info!("Creating runtime for database access");
+            tracing::trace!("Creating runtime for database access");
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -203,14 +203,14 @@ impl RecordStore for StorbStore {
 
             rt.block_on(async {
                     // Get the serialized provider record from the database
-                    tracing::info!("Querying database for key {:?}", k);
+                    tracing::trace!("Querying database for key {:?}", k);
                     match self.db.get(CfType::Provider, kb).await {
                         Ok(Some(bytes)) => {
-                            tracing::info!("Found record in database for key {:?}", k);
+                            tracing::trace!("Found record in database for key {:?}", k);
                             match bincode::deserialize::<StorbProviderRecord>(&bytes) {
                                 Ok(wrapper) => {
                                     let provider = ProviderRecord::from(wrapper);
-                                    tracing::info!(
+                                    tracing::trace!(
                                         "Successfully deserialized provider record for key {:?}, provider: {:?}",
                                         k,
                                         provider.provider
@@ -221,7 +221,7 @@ impl RecordStore for StorbStore {
                                         let mut providers = lock.get(k).cloned().unwrap_or_default();
                                         providers.push(provider.clone());
                                         lock.put(k.clone(), providers);
-                                        tracing::info!("Updated cache with provider for key {:?}", k);
+                                        tracing::trace!("Updated cache with provider for key {:?}", k);
                                     }) {
                                         tracing::error!("Failed to acquire cache lock for update in providers(): {}", e);
                                     }

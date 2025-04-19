@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -9,6 +8,7 @@ use crabtensor::axon::{serve_axon_payload, AxonProtocol};
 use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
+use dashmap::DashMap;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
 use memory_db::MemoryDb;
 use subxt::utils::H256;
@@ -29,7 +29,7 @@ pub mod utils;
 pub mod verification;
 pub mod version;
 
-pub type AddressBook = Arc<RwLock<HashMap<PeerId, NodeInfo>>>;
+pub type AddressBook = Arc<DashMap<PeerId, NodeInfo>>;
 
 const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
@@ -207,10 +207,7 @@ impl BaseNeuron {
         }
 
         let neurons_arc = Arc::new(RwLock::new(Vec::new()));
-        let address_book = Arc::new(RwLock::new(HashMap::new()));
-        let peer_verifier = Arc::new(swarm::dht::BittensorPeerVerifier {
-            address_book: address_book.clone(),
-        });
+        let address_book = Arc::new(DashMap::new());
 
         let (dht_og, command_sender) = StorbDHT::new(
             config.dht_dir.clone(),
@@ -218,7 +215,7 @@ impl BaseNeuron {
             config.dht.port,
             bootstrap_nodes,
             libp2p_keypair.into(),
-            peer_verifier,
+            address_book.clone(),
         )
         .expect("Failed to create StorbDHT instance");
 
@@ -227,7 +224,6 @@ impl BaseNeuron {
         let dht_locked = dht.lock().await;
         let peer_id = *dht_locked.swarm.local_peer_id();
         drop(dht_locked);
-
         // Spawn a separate task for processing events
         tokio::spawn(async move {
             loop {
@@ -235,6 +231,7 @@ impl BaseNeuron {
                 dht_locked.process_events().await;
                 drop(dht_locked);
                 tokio::task::yield_now().await;
+                panic!("Failed to process storb swarm events");
             }
         });
 
