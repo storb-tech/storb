@@ -59,27 +59,39 @@ impl PeerVerifier {
         // Starts to verify peers in a separate thread
         tokio::spawn(async move {
             loop {
-                // Check for pending verifications: clone the collection to avoid borrowing issues
-                let pending: Vec<(libp2p::PeerId, libp2p::identify::Info)> = self
-                    .pending_verifications
-                    .iter()
-                    .map(|r| (*r.key(), r.value().clone()))
-                    .collect();
-                for (peer_id, info) in pending {
-                    if self.verify_peer(peer_id).await {
-                        debug!("Peer {} verified successfully.", peer_id);
-                        let _ = self
-                            .command_sender
-                            .send(DhtCommand::ProcessVerificationResult {
-                                peer_id,
-                                info,
-                                result: Ok(true),
-                            })
-                            .await;
-                    } else {
-                        warn!("Failed to verify peer {}.", peer_id);
+                debug!("Verifying peers...");
+
+                let verify_iteration = async {
+                    // Check for pending verifications: clone the collection to avoid borrowing issues
+                    let pending: Vec<(libp2p::PeerId, libp2p::identify::Info)> = self
+                        .pending_verifications
+                        .iter()
+                        .map(|r| (*r.key(), r.value().clone()))
+                        .collect();
+                    for (peer_id, info) in pending {
+                        if self.verify_peer(peer_id).await {
+                            debug!("Peer {} verified successfully.", peer_id);
+                            let _ = self
+                                .command_sender
+                                .send(DhtCommand::ProcessVerificationResult {
+                                    peer_id,
+                                    info,
+                                    result: Ok(true),
+                                })
+                                .await;
+                        } else {
+                            warn!("Failed to verify peer {}.", peer_id);
+                        }
                     }
+                };
+
+                match tokio::time::timeout(tokio::time::Duration::from_secs(100), verify_iteration)
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(_) => panic!("Peer verification iteration exceeded 100 seconds"),
                 }
+
                 tokio::time::sleep(tokio::time::Duration::from_secs(PEER_VERIFICATION_TIMEOUT))
                     .await;
             }

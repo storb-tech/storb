@@ -27,7 +27,7 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MIN_BANDWIDTH: u64 = 20 * 1024; // minimum ~100KiB/s "bandwidth"
 
 pub const DHT_MAX_RETRIES: u64 = 3; // maximum number of retries for DHT queries
-pub const PEER_VERIFICATION_TIMEOUT: u64 = 100; // timeout for peer verification in seconds
+pub const PEER_VERIFICATION_TIMEOUT: u64 = 30; // timeout for peer verification in seconds
 
 pub const MAX_PENDING_INCOMING: u32 = 100;
 pub const MAX_PENDING_OUTGOING: u32 = 100;

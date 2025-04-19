@@ -302,6 +302,8 @@ impl StorbDHT {
             pending_verification.clone(),
             command_sender.clone(),
         );
+
+        debug!("Starting peer verifier");
         peer_verifier.run();
 
         let dht_instance = StorbDHT {

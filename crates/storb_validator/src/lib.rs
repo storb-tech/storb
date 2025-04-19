@@ -1,4 +1,3 @@
-use std::error::Error as StdError;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
