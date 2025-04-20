@@ -231,10 +231,15 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
 /// Main entry point for the validator service
 async fn main(config: ValidatorConfig) {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("One of the threads panicked {}", info);
-        std::process::abort();
-    }));
+    if std::env::var("PANIC_ABORT")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        std::panic::set_hook(Box::new(|info| {
+            eprintln!("One of the threads panicked {}", info);
+            std::process::abort();
+        }));
+    }
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");
