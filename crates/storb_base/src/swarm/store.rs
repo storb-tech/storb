@@ -7,7 +7,7 @@ use libp2p::kad::{ProviderRecord, Record, RecordKey};
 use libp2p::PeerId;
 use lru::LruCache;
 use tokio::runtime::Handle;
-use tracing::{info, trace};
+use tracing::trace;
 
 use super::db::{CfType, RocksDBStore};
 use super::record::{StorbProviderRecord, StorbRecord};

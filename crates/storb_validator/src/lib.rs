@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
-use axum::middleware::{from_fn, from_fn_with_state};
+use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;

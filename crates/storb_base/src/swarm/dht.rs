@@ -17,11 +17,10 @@ use libp2p::swarm::{ConnectionId, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
-use tracing_subscriber::field::debug;
 
 use super::{db, models, store::StorbStore};
 use crate::constants::{
-    DHT_MAX_RETRIES, MAX_ESTABLISHED_INCOMING, MAX_ESTABLISHED_OUTGOING, MAX_ESTABLISHED_PER_PEER,
+    MAX_ESTABLISHED_INCOMING, MAX_ESTABLISHED_OUTGOING, MAX_ESTABLISHED_PER_PEER,
     MAX_PENDING_INCOMING, MAX_PENDING_OUTGOING, STORB_KAD_PROTOCOL_NAME, SWARM_RATE_LIMIT_DURATION,
     SWARM_RATE_LIMIT_REQUEST,
 };
@@ -520,10 +519,11 @@ impl StorbDHT {
     }
 
     fn inject_kad_incoming_query(&mut self, event: kad::Event) {
-        if let kad::Event::InboundRequest { request } = event {
-            if let kad::InboundRequest::AddProvider { record, .. } = request {
-                trace!("AddProvider request: {:?}", record);
-            }
+        if let kad::Event::InboundRequest {
+            request: kad::InboundRequest::AddProvider { record, .. },
+        } = event
+        {
+            trace!("AddProvider request: {:?}", record);
         }
     }
 
@@ -535,8 +535,8 @@ impl StorbDHT {
         let mut bootstrap_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             let pending_verification = self.pending_verification.clone();
-            let mut active_connections = self.active_connections.clone();
-            let mut peer_id_to_connection_id = self.peer_id_to_connection_id.clone();
+            let active_connections = self.active_connections.clone();
+            let peer_id_to_connection_id = self.peer_id_to_connection_id.clone();
 
             tokio::select! {
             _ = bootstrap_interval.tick() => {
@@ -634,7 +634,7 @@ impl StorbDHT {
                                         let event = *identify_event;
                                         trace!("Identify event: {:?}", event);
                                         if let identify::Event::Received { peer_id, info, .. } = event {
-                                            pending_verification.clone().insert(peer_id.clone(), info.clone());
+                                            pending_verification.clone().insert(peer_id, info.clone());
                                         }
                                     }
                                     StorbEvent::Ping( .. ) => {}

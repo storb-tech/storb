@@ -226,13 +226,11 @@ impl BaseNeuron {
         drop(dht_locked);
         // Spawn a separate task for processing events
         tokio::spawn(async move {
-            loop {
-                let mut dht_locked = dht.lock().await;
-                dht_locked.process_events().await;
-                drop(dht_locked);
-                tokio::task::yield_now().await;
-                panic!("Failed to process storb swarm events");
-            }
+            let mut dht_locked = dht.lock().await;
+            dht_locked.process_events().await;
+            drop(dht_locked);
+            tokio::task::yield_now().await;
+            panic!("Failed to process storb swarm events");
         });
 
         let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");

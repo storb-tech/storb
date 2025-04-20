@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, Options, WriteBatch, DB};
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration, Instant};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, trace};
 
 use super::models;
 use super::record::StorbRecord;
