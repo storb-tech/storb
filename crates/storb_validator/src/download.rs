@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -15,12 +16,12 @@ use futures::stream::FuturesUnordered;
 use libp2p::kad::RecordKey;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, trace};
 
 use crate::scoring::ScoringSystem;
 use crate::ValidatorState;
 
-const MPSC_BUFFER_SIZE: usize = 10;
+const MPSC_BUFFER_SIZE: usize = 100;
 // TODO: Put this in config or just base it on hardware threads
 const THREAD_COUNT: usize = 10;
 
@@ -235,6 +236,8 @@ impl DownloadProcessor {
         let (completion_tx, _) = tokio::sync::broadcast::channel::<()>(1);
         let completion_tx = Arc::new(completion_tx);
 
+        let progress = Arc::new(AtomicUsize::new(0));
+
         // Spawn threads
         for _ in 0..THREAD_COUNT {
             let piece_task_rx = Arc::clone(&piece_task_rx);
@@ -305,6 +308,12 @@ impl DownloadProcessor {
         let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
 
         while let Some(piece) = piece_result_rx.recv().await {
+            let current = progress.fetch_add(1, Ordering::SeqCst) + 1;
+            debug!(
+                "Download progress for chunk {}: {}/{}",
+                chunk_info.chunk_idx, current, total_pieces
+            );
+
             // If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
             if unique_pieces.read().await.len() as u64 > chunk_info.k {
