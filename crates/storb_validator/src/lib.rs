@@ -9,7 +9,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;
 use base::LocalNodeInfo;
-use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
+use constants::{SYNTHETIC_CHALLENGE_FREQUENCY, VALIDATOR_SYNC_TIMEOUT};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
 use routes::{download_file, node_info, upload_file};
@@ -85,8 +85,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             interval.tick().await;
             info!("Syncing validator");
             // Wrap the sync operation in a timeout
-            let SYNC_TIMEOUT = Duration::from_secs(30);
-            match tokio::time::timeout(SYNC_TIMEOUT, async {
+            match tokio::time::timeout(VALIDATOR_SYNC_TIMEOUT, async {
                 let start = std::time::Instant::now();
                 let sync_result = neuron.write().await.sync_metagraph().await;
                 (sync_result, start.elapsed())
@@ -128,7 +127,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                 Err(_elapsed) => {
                     error!(
                         "Sync operation timed out after {} seconds",
-                        SYNC_TIMEOUT.as_secs_f32()
+                        VALIDATOR_SYNC_TIMEOUT.as_secs_f32()
                     );
                     error!(
                         "Current stack trace:\n{:?}",

@@ -5,7 +5,10 @@ use tokio::sync::mpsc::Sender;
 use tracing::{debug, trace, warn};
 
 use super::dht::DhtCommand;
-use crate::{constants::PEER_VERIFICATION_TIMEOUT, AddressBook};
+use crate::{
+    constants::{PEER_VERIFICATION_FREQUENCY, PEER_VERIFICATION_TIMEOUT},
+    AddressBook,
+};
 
 pub struct PeerVerifier {
     // Fields and methods for the PeerVerifier
@@ -85,15 +88,18 @@ impl PeerVerifier {
                     }
                 };
 
-                match tokio::time::timeout(tokio::time::Duration::from_secs(100), verify_iteration)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(_) => panic!("Peer verification iteration exceeded 100 seconds"),
+                tokio::select! {
+                    _ = verify_iteration => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(PEER_VERIFICATION_TIMEOUT)) => {
+                        warn!("Peer verification timeout reached");
+                    }
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(PEER_VERIFICATION_TIMEOUT))
+                // Sleep for a bit before the next verification cycle
+                tokio::time::sleep(std::time::Duration::from_secs(PEER_VERIFICATION_FREQUENCY))
                     .await;
+
+                debug!("Peer verification cycle completed.");
             }
         });
     }
