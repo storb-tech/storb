@@ -17,6 +17,7 @@ use libp2p::swarm::{ConnectionId, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{identify, identity, ping, Multiaddr, PeerId, SwarmBuilder};
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::field::debug;
 
 use super::{db, models, store::StorbStore};
 use crate::constants::{
@@ -803,6 +804,11 @@ impl StorbDHT {
             expires: None,
         };
 
+        if !self.is_dht_healthy() {
+            warn!("DHT health check failed, retrying...");
+            self.ensure_dht_health().await?;
+        }
+
         let id = self
             .swarm
             .behaviour_mut()
@@ -1186,6 +1192,35 @@ impl StorbDHT {
             );
         }
         debug!("Bootstrap completed.");
+        Ok(())
+    }
+
+    fn is_dht_healthy(&mut self) -> bool {
+        debug!("Checking DHT health...");
+
+        // check routing table entries
+        let kbuckets = self.swarm.behaviour_mut().kademlia.kbuckets();
+        // get length of the kbuckets (which is an iterator)
+        let routing_table_entries = kbuckets.count();
+        let connected_peers = self.swarm.connected_peers().count();
+        debug!(
+            "Connected peers: {}, Routing table entries: {}",
+            connected_peers, routing_table_entries
+        );
+
+        connected_peers >= 1 && routing_table_entries >= 1
+    }
+
+    async fn ensure_dht_health(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !self.is_dht_healthy() {
+            debug!("DHT appears unhealthy, forcing bootstrap");
+            if let Err(e) = self.swarm.behaviour_mut().kademlia.bootstrap() {
+                error!("Failed to bootstrap: {:?}", e);
+                return Err("Failed to bootstrap DHT".into());
+            }
+            // Wait for bootstrap completion
+            self.wait_for_bootstrap().await?;
+        }
         Ok(())
     }
 }
