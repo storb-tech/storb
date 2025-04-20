@@ -586,7 +586,6 @@ impl StorbDHT {
                         }
                         SwarmEvent::ConnectionClosed { peer_id, connection_id, .. } => {
                             trace!(peer_id=%peer_id, "Removing disconnected peer from Kademlia routing table.");
-                            self.swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
                             active_connections.remove(&connection_id);
                         }
                         SwarmEvent::IncomingConnection { .. } => {}
