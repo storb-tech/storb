@@ -196,7 +196,7 @@ impl Synchronizable for BaseNeuron {
 
         // Execute all futures concurrently and collect results
         let stream = stream::iter(futures)
-            .buffer_unordered(SYNC_BUFFER_SIZE) // Limit to 32 concurrent requests
+            .buffer_unordered(SYNC_BUFFER_SIZE)
             .collect::<Vec<_>>();
         let results = stream.await;
 

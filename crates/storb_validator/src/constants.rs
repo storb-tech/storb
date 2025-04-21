@@ -20,4 +20,4 @@ pub const Z_SCORE: f64 = 1.96;
 pub const Z_SQUARED: f64 = Z_SCORE * Z_SCORE; // Pre-calculated
 
 pub const INFO_API_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
-pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10; // 1000 requests per minute
+pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
