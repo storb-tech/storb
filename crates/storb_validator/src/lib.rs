@@ -91,40 +91,35 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             })
             .await
             {
-                Ok((result, duration)) => {
-                    match result {
-                        Ok(uids) => {
-                            info!("Sync completed in {:?}", duration);
-                            let neuron_guard = neuron.read().await;
-                            let neuron_count = neuron_guard.neurons.read().await.len();
-                            scoring_system
-                                .write()
-                                .await
-                                .update_scores(neuron_count, uids)
-                                .await;
-
-                            let ema_scores =
-                                scoring_system.clone().read().await.state.ema_scores.clone();
-
-                            match Validator::set_weights(
-                                neuron_guard.clone(),
-                                ema_scores,
-                                sync_config.clone(),
-                            )
+                Ok((result, duration)) => match result {
+                    Ok(uids) => {
+                        info!("Sync completed in {:?}", duration);
+                        let neuron_guard = neuron.read().await;
+                        let neuron_count = neuron_guard.neurons.read().await.len();
+                        scoring_system
+                            .write()
                             .await
-                            {
-                                Ok(_) => info!("Successfully set weights on chain"),
-                                Err(e) => error!("Failed to set weights on chain: {}", e),
-                            };
-                        }
-                        Err(err) => {
-                            error!("Failed to sync metagraph: {}", err);
-                            // Print stack trace for debugging
-                            error!("Stack trace:\n{:?}", std::backtrace::Backtrace::capture());
-                        }
+                            .update_scores(neuron_count, uids)
+                            .await;
+
+                        let ema_scores =
+                            scoring_system.clone().read().await.state.ema_scores.clone();
+
+                        match Validator::set_weights(
+                            neuron_guard.clone(),
+                            ema_scores,
+                            sync_config.clone(),
+                        )
+                        .await
+                        {
+                            Ok(_) => info!("Successfully set weights on chain"),
+                            Err(e) => error!("Failed to set weights on chain: {}", e),
+                        };
                     }
-                }
-                // TODO: remove panics before main merge
+                    Err(err) => {
+                        error!("Failed to sync metagraph: {}", err);
+                    }
+                },
                 Err(_elapsed) => {
                     error!(
                         "Sync operation timed out after {} seconds",
@@ -147,11 +142,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                         Ok(_) => info!("Scoring system write lock is available"),
                         Err(_) => error!("Scoring system write lock is held - possible deadlock"),
                     };
-
-                    panic!("Sync operation timed out");
                 }
             }
-
             info!("Done syncing validator");
         }
     });
