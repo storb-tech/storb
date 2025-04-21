@@ -12828,6 +12828,7 @@ dependencies = [
  "blake3",
  "bytes",
  "crabtensor",
+ "dashmap",
  "futures",
  "hex",
  "libp2p",
