@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -15,12 +16,12 @@ use futures::stream::FuturesUnordered;
 use libp2p::kad::RecordKey;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, trace};
 
 use crate::scoring::ScoringSystem;
 use crate::ValidatorState;
 
-const MPSC_BUFFER_SIZE: usize = 10;
+const MPSC_BUFFER_SIZE: usize = 100;
 // TODO: Put this in config or just base it on hardware threads
 const THREAD_COUNT: usize = 10;
 
@@ -74,26 +75,26 @@ impl DownloadProcessor {
 
         let mut requests = FuturesUnordered::new();
 
-        let signer = validator_base_neuron.read().await.signer.clone();
+        let base_neuron_guard = validator_base_neuron.read().await;
+        let signer = base_neuron_guard.signer.clone();
 
-        let vali_uid = validator_base_neuron
-            .read()
-            .await
+        let vali_uid = base_neuron_guard
             .local_node_info
             .uid
             .context("Failed to get UID for validator")?;
+        drop(base_neuron_guard);
 
         for provider in piece_providers {
             // Look up node info from the address book.
             let node_info = local_address_book
-                .read()
-                .await
+                .clone()
                 .get(&provider)
                 .ok_or_else(|| anyhow!("Provider {:?} not found in local address book", provider))?
                 .clone();
 
             let scoring_system = scoring_system.clone();
             let db = scoring_system.write().await.db.clone();
+            drop(scoring_system);
             let signer = Arc::new(signer.clone());
 
             // Each provider query is executed in its own async block.
@@ -236,6 +237,8 @@ impl DownloadProcessor {
         let (completion_tx, _) = tokio::sync::broadcast::channel::<()>(1);
         let completion_tx = Arc::new(completion_tx);
 
+        let progress = Arc::new(AtomicUsize::new(0));
+
         // Spawn threads
         for _ in 0..THREAD_COUNT {
             let piece_task_rx = Arc::clone(&piece_task_rx);
@@ -306,6 +309,12 @@ impl DownloadProcessor {
         let unique_pieces = Arc::new(RwLock::new(HashSet::new()));
 
         while let Some(piece) = piece_result_rx.recv().await {
+            let current = progress.fetch_add(1, Ordering::SeqCst) + 1;
+            debug!(
+                "Download progress for chunk {}: {}/{}",
+                chunk_info.chunk_idx, current, total_pieces
+            );
+
             // If we have the minimum k pieces necessary for reconstructing
             // the chunk then we can exit early
             if unique_pieces.read().await.len() as u64 > chunk_info.k {
@@ -362,12 +371,16 @@ impl DownloadProcessor {
                 "Internal server error".to_string(),
             )
         })?;
-        info!("Tracker hash: {:?}", tracker.infohash);
+        debug!("Tracker hash: {:?}", tracker.infohash);
 
         let chunk_hashes = tracker.chunk_hashes;
 
         let state = self.state.validator.clone();
-        let address_book = state.neuron.read().await.address_book.clone();
+
+        let neuron_guard = state.neuron.read().await;
+        let address_book = neuron_guard.address_book.clone();
+        drop(neuron_guard);
+
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 
@@ -377,7 +390,7 @@ impl DownloadProcessor {
         for chunk_hash in chunk_hashes.clone() {
             // convert chunk_hash to a string
             let chunk_key = RecordKey::new(&chunk_hash);
-            info!("RecordKey of chunk hash: {:?}", chunk_key);
+            debug!("RecordKey of chunk hash: {:?}", chunk_key);
 
             let chunk_res =
                 match swarm::dht::StorbDHT::get_chunk_entry(dht_sender.clone(), chunk_key).await {
@@ -401,7 +414,7 @@ impl DownloadProcessor {
                     ));
                 }
             };
-            info!(
+            debug!(
                 "Found chunk hash: {:?} with {:?} pieces",
                 &chunk.chunk_hash,
                 &chunk.piece_hashes.len()
@@ -421,7 +434,7 @@ impl DownloadProcessor {
                 error!("Error producing chunk: {}", e);
             }
 
-            info!("Produced chunk {:?}", chunk_idx);
+            debug!("Produced chunk {:?}", chunk_idx);
         }
 
         let stream =

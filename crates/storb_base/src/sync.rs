@@ -1,12 +1,14 @@
+use std::error::Error as StdError;
 use std::net::Ipv4Addr;
 
 use crabtensor::api::runtime_apis::neuron_info_runtime_api::NeuronInfoRuntimeApi;
 use crabtensor::api::runtime_types::pallet_subtensor::rpc_info::neuron_info::NeuronInfoLite;
 use crabtensor::AccountId;
+use futures::stream::{self, StreamExt};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::CLIENT_TIMEOUT;
+use crate::constants::{CLIENT_TIMEOUT, SYNC_BUFFER_SIZE};
 use crate::{BaseNeuron, LocalNodeInfo, NodeInfo};
 
 #[derive(Debug, Error)]
@@ -14,14 +16,13 @@ pub enum SyncError {
     #[error("Failed to get node info: {0}")]
     GetNodeInfoError(String),
 }
-
 pub trait Synchronizable {
     fn sync_metagraph(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<Vec<u16>, Box<dyn std::error::Error>>>;
+    ) -> impl std::future::Future<Output = Result<Vec<u16>, Box<dyn StdError + Send + Sync>>> + Send;
     fn get_remote_node_info(
         addr: reqwest::Url,
-    ) -> impl std::future::Future<Output = Result<LocalNodeInfo, SyncError>>;
+    ) -> impl std::future::Future<Output = Result<LocalNodeInfo, SyncError>> + Send;
 }
 
 // Implementation for BaseNeuron
@@ -66,15 +67,22 @@ impl Synchronizable for BaseNeuron {
     }
 
     /// Synchronise the local metagraph state with chain.
-    async fn sync_metagraph(&mut self) -> Result<Vec<u16>, Box<dyn std::error::Error>> {
-        info!("Syncing metagraph at block");
+    async fn sync_metagraph(
+        &mut self,
+    ) -> Result<Vec<u16>, Box<dyn StdError + Send + Sync + 'static>> {
+        info!("Starting sync_metagraph");
+        let start = std::time::Instant::now();
+
+        info!("Getting latest block...");
         let current_block = self
             .subtensor
             .blocks()
             .at_latest()
             .await
             .map_err(|e| format!("Failed to get latest block: {:?}", e))?;
+        info!("Got latest block in {:?}", start.elapsed());
 
+        info!("Getting runtime API...");
         let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
         let mut local_node_info = self.local_node_info.clone();
         // TODO: error out if cant access chain when calling above functions
@@ -121,6 +129,8 @@ impl Synchronizable for BaseNeuron {
             *neurons_guard = neurons.clone();
         }
 
+        drop(original_neurons);
+
         info!("Updated local neurons state");
 
         if local_node_info.uid.is_none() {
@@ -132,68 +142,83 @@ impl Synchronizable for BaseNeuron {
 
         self.local_node_info = local_node_info;
 
+        let mut futures = Vec::new();
+
+        // Create futures for all node info requests
         for (neuron_uid, _) in neurons.iter().enumerate() {
             let neuron_info: NeuronInfoLite<AccountId> = neurons[neuron_uid].clone();
-            // NOTE: if we don't run this check we will query ourselves and it will
-            // create a deadlock.
-            if neuron_uid != self.local_node_info.uid.ok_or("Node UID did not exist")? as usize {
-                let neuron_ip = &neuron_info.axon_info.ip;
-                let neuron_port = &neuron_info.axon_info.port;
 
-                // If IP is 0, it means the neuron did not post IP so we can
-                // assume they're non-functional
-                if *neuron_ip == 0 {
-                    warn!(
-                        "Invalid IP for neuron {:?}. Node has never been started",
-                        neuron_info.uid
-                    );
-                    continue;
-                }
+            // Skip self to avoid deadlock
+            if neuron_uid == self.local_node_info.uid.ok_or("Node UID did not exist")? as usize {
+                continue;
+            }
 
-                // Check if its a valid port
-                if *neuron_port == 0 {
-                    error!("Invalid port for neuron: {:?}", neuron_info.uid);
-                    continue;
-                };
+            let neuron_ip = neuron_info.axon_info.ip;
+            let neuron_port = neuron_info.axon_info.port;
 
-                info!(
-                    "Getting peer id from neuron={:?} at ip={:?} and port={:?}",
-                    neuron_info.uid, neuron_ip, neuron_port
+            // Skip invalid IPs/ports
+            if neuron_ip == 0 {
+                warn!(
+                    "Invalid IP for neuron {:?}. Node has never been started",
+                    neuron_info.uid
                 );
-                let ip = Ipv4Addr::from((*neuron_ip & 0xffff_ffff) as u32);
-                let url_raw = format!("http://{}:{}/info", ip, neuron_port);
-                let url = reqwest::Url::parse(&url_raw).expect("Invalid URL");
-                let remote_node_info = match Self::get_remote_node_info(url).await {
-                    Ok(info) => info,
+                continue;
+            }
+
+            if neuron_port == 0 {
+                error!("Invalid port for neuron: {:?}", neuron_info.uid);
+                continue;
+            }
+
+            let ip = Ipv4Addr::from((neuron_ip & 0xffff_ffff) as u32);
+            let url_raw = format!("http://{}:{}/info", ip, neuron_port);
+            let url = reqwest::Url::parse(&url_raw).map_err(|e| {
+                error!("Failed to parse URL: {:?}", e);
+                SyncError::GetNodeInfoError(format!("Failed to parse URL: {:?}", e))
+            })?;
+
+            // Create future for this node's info request
+            let future = async move {
+                match Self::get_remote_node_info(url).await {
+                    Ok(remote_node_info) => Some((neuron_info, remote_node_info)),
                     Err(err) => {
                         warn!(
                             "Failed to get remote node info (it may be offline): {:?}",
                             err
                         );
-                        continue;
+                        None
                     }
-                };
+                }
+            };
 
-                let node_info = NodeInfo {
-                    neuron_info: neuron_info.clone(),
-                    peer_id: remote_node_info.peer_id,
-                    http_address: remote_node_info.http_address,
-                    quic_address: remote_node_info.quic_address,
-                    version: remote_node_info.version,
-                };
-                self.address_book.write().await.insert(
-                    remote_node_info
-                        .peer_id
-                        .ok_or("Peer ID did not exist so insertion into address book failed")?,
-                    node_info,
-                );
-                // update peer id to neuron uid mapping
-                self.peer_node_uid
-                    .insert(remote_node_info.peer_id.unwrap(), neuron_info.uid);
-                // TODO: error handle?
+            futures.push(future);
+        }
+
+        // Execute all futures concurrently and collect results
+        let stream = stream::iter(futures)
+            .buffer_unordered(SYNC_BUFFER_SIZE)
+            .collect::<Vec<_>>();
+        let results = stream.await;
+
+        // Process results and update address book
+        for result in results.into_iter().flatten() {
+            let (neuron_info, remote_node_info) = result;
+
+            let node_info = NodeInfo {
+                neuron_info: neuron_info.clone(),
+                peer_id: remote_node_info.peer_id,
+                http_address: remote_node_info.http_address,
+                quic_address: remote_node_info.quic_address,
+                version: remote_node_info.version,
+            };
+
+            if let Some(peer_id) = remote_node_info.peer_id {
+                self.address_book.clone().insert(peer_id, node_info);
+                self.peer_node_uid.insert(peer_id, neuron_info.uid);
             }
         }
 
+        info!("Completed sync_metagraph in {:?}", start.elapsed());
         info!("Done syncing metagraph");
 
         Ok(changed_neurons)

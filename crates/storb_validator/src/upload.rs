@@ -50,7 +50,9 @@ pub async fn upload_piece_data(
     // Send piece to miner via QUIC connection
     let (mut send_stream, mut recv_stream) = conn.open_bi().await?;
 
-    let signer = validator_base_neuron.read().await.signer.clone();
+    let base_neuron_guard = validator_base_neuron.read().await;
+    let signer = base_neuron_guard.signer.clone();
+    drop(base_neuron_guard);
 
     let message = VerificationMessage {
         netuid: miner_info.neuron_info.netuid,
@@ -199,16 +201,18 @@ impl<'a> UploadProcessor<'a> {
         // Spawn consumer task
         let miner_uids = self.miner_uids.clone();
         let miner_connections = self.miner_connections.clone();
-        // TODO: all these clones are not the most ideal, perhaps fix?
         let validator = self.state.validator.clone();
-        let dht_sender = validator.neuron.read().await.command_sender.clone();
+        let validator_read_guard = validator.neuron.read().await;
+        let dht_sender = validator_read_guard.command_sender.clone();
         let dht_sender_clone = dht_sender.clone();
 
         // Get MemoryDB from state
-        let scoring_system = self.state.validator.scoring_system.clone();
+        let scoring_system = validator.scoring_system.clone();
 
-        let signer = self.state.validator.neuron.read().await.signer.clone();
+        let signer = validator_read_guard.signer.clone();
+        // Clone the signer to avoid borrowing issues
         let signer_clone = signer.clone();
+        // Cloning again to avoid borrowing issues
         let validator_clone = validator.clone();
         let consumer_handle = tokio::spawn(async move {
             consume_bytes(
@@ -223,6 +227,8 @@ impl<'a> UploadProcessor<'a> {
             .await
         });
 
+        drop(validator_read_guard);
+
         let now = Utc::now();
         let timestamp = now.timestamp();
         let filename: String = "filename".to_string(); // TODO: get filename from params
@@ -233,9 +239,9 @@ impl<'a> UploadProcessor<'a> {
         let (piece_hashes, chunk_hashes) = consumer_result??;
 
         // log the chunk hashes as strings
-        info!("Raw Chunk hashes: {:?}", chunk_hashes);
+        debug!("Raw Chunk hashes: {:?}", chunk_hashes);
         let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
-        info!("Chunk hashes: {:?}", chunk_hashes_str);
+        debug!("Chunk hashes: {:?}", chunk_hashes_str);
 
         let chunk_count = chunk_hashes.len() as u64;
 
@@ -352,15 +358,13 @@ async fn consume_bytes(
     let mut chunk_idx = 0;
     let mut chunk_hashes: Vec<[u8; 32]> = Vec::new();
     let mut piece_hashes: Vec<[u8; 32]> = Vec::new();
-    let validator_id = Compact(
-        validator_base_neuron
-            .clone()
-            .read()
-            .await
-            .local_node_info
-            .uid
-            .context("Failed to get validator UID")?,
-    );
+    let validator_guard = validator_base_neuron.read().await;
+    let vali_uid = validator_guard
+        .local_node_info
+        .uid
+        .context("Failed to get UID for validator")?;
+    let validator_id = Compact(vali_uid);
+    drop(validator_guard);
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
     // and hence determine which miners to use for each piece. we do the following for the time being:
@@ -422,9 +426,11 @@ async fn consume_bytes(
                 let piece_data = piece.clone();
                 let future = tokio::spawn(async move {
                     // Check if this piece was already successfully uploaded
-                    if successful_pieces.read().await.contains(&piece.piece_idx) {
+                    let suc_pieces_read = successful_pieces.read().await;
+                    if suc_pieces_read.contains(&piece.piece_idx) {
                         return Ok(None);
                     }
+                    drop(suc_pieces_read);
 
                     let vali_guard = vali_clone.read().await;
                     let peer_id = vali_guard
@@ -436,14 +442,12 @@ async fn consume_bytes(
                     let miner_info = vali_guard
                         .address_book
                         .clone()
-                        .read()
-                        .await
                         .get(peer_id)
                         .ok_or_else(|| {
                             anyhow::anyhow!("Miner info not found for peer ID {}", peer_id)
                         })?
                         .clone();
-
+                    drop(vali_guard);
                     tokio::select! {
                         upload_result = upload_piece_with_retry(
                             vali_clone.clone(),
@@ -499,7 +503,7 @@ async fn consume_bytes(
 
                     // Add piece entry to DHT...
                     let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
-                    info!("UPLOAD PIECE KEY: {:?}", &piece_key);
+                    debug!("UPLOAD PIECE KEY: {:?}", &piece_key);
 
                     let msg = (
                         piece_key.clone(),
@@ -549,7 +553,7 @@ async fn consume_bytes(
         let chunk_hash = chunk_hash_raw.finalize();
 
         let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash.as_bytes());
-        info!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
+        debug!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
 
         let chunk_msg = (
             chunk_key.clone(),

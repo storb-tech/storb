@@ -17,27 +17,30 @@ pub async fn get_id_quic_uids(
     validator: Arc<Validator>,
 ) -> (Compact<u16>, Vec<Multiaddr>, Vec<u16>) {
     let neuron_guard = validator.neuron.read().await;
-    let address_book_arc = neuron_guard.address_book.clone();
+    let address_book = neuron_guard.address_book.clone();
     let validator_id = match neuron_guard.clone().local_node_info.uid {
         Some(id) => Compact(id),
         None => {
             return (Compact(0), Vec::new(), Vec::new());
         }
     };
-
-    let address_book = address_book_arc.read().await;
+    drop(neuron_guard);
 
     // Filter addresses and get associated UIDs
     let mut quic_addresses_with_uids = Vec::new();
-    for (peer_id, node_info) in address_book.iter() {
+    for entry in address_book.iter() {
+        let peer_id = entry.key();
+        let node_info = entry.value();
         if let Some(quic_addr) = node_info.quic_address.clone() {
             let neuron_guard = validator.neuron.read().await;
             let peer_id_to_uid = neuron_guard.peer_node_uid.clone();
             if let Some(uid) = peer_id_to_uid.get_by_left(peer_id) {
                 quic_addresses_with_uids.push((quic_addr, *uid));
             }
+            drop(neuron_guard);
         }
     }
+    drop(address_book);
     let quic_addresses: Vec<Multiaddr> = quic_addresses_with_uids
         .iter()
         .map(|(addr, _)| addr.clone())

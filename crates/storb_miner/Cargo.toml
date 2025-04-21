@@ -14,6 +14,7 @@ bincode.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 crabtensor.workspace = true
+dashmap.workspace = true
 hex.workspace = true
 futures.workspace = true
 libp2p.workspace = true

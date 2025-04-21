@@ -8,8 +8,10 @@ use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;
-use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
-use middleware::require_api_key;
+use base::LocalNodeInfo;
+use constants::{SYNTHETIC_CHALLENGE_FREQUENCY, VALIDATOR_SYNC_TIMEOUT};
+use dashmap::DashMap;
+use middleware::{require_api_key, InfoApiRateLimiter};
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
@@ -37,6 +39,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
 #[derive(Clone)]
 struct ValidatorState {
     pub validator: Arc<Validator>,
+    pub local_node_info: LocalNodeInfo,
 }
 
 /// QUIC validator server that accepts file uploads, sends files to miner via QUIC,
@@ -80,33 +83,67 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         loop {
             interval.tick().await;
             info!("Syncing validator");
-            let uids_to_update = match neuron.write().await.sync_metagraph().await {
-                Ok(res) => res,
-                Err(err) => {
-                    error!("Failed to sync metagraph: {err}");
-                    continue;
-                }
-            };
-            let neuron_count = neuron.read().await.neurons.read().await.len();
-            scoring_system
-                .write()
-                .await
-                .update_scores(neuron_count, uids_to_update)
-                .await;
-
-            let ema_scores = scoring_system.clone().read().await.state.ema_scores.clone();
-
-            match Validator::set_weights(
-                neuron.read().await.clone(),
-                ema_scores,
-                sync_config.clone(),
-            )
+            // Wrap the sync operation in a timeout
+            match tokio::time::timeout(VALIDATOR_SYNC_TIMEOUT, async {
+                let start = std::time::Instant::now();
+                let sync_result = neuron.write().await.sync_metagraph().await;
+                (sync_result, start.elapsed())
+            })
             .await
             {
-                Ok(_) => info!("Successfully set weights on chain"),
-                Err(e) => error!("Failed to set weights on chain: {}", e),
-            };
+                Ok((result, duration)) => match result {
+                    Ok(uids) => {
+                        info!("Sync completed in {:?}", duration);
+                        let neuron_guard = neuron.read().await;
+                        let neuron_count = neuron_guard.neurons.read().await.len();
+                        scoring_system
+                            .write()
+                            .await
+                            .update_scores(neuron_count, uids)
+                            .await;
 
+                        let ema_scores =
+                            scoring_system.clone().read().await.state.ema_scores.clone();
+
+                        match Validator::set_weights(
+                            neuron_guard.clone(),
+                            ema_scores,
+                            sync_config.clone(),
+                        )
+                        .await
+                        {
+                            Ok(_) => info!("Successfully set weights on chain"),
+                            Err(e) => error!("Failed to set weights on chain: {}", e),
+                        };
+                    }
+                    Err(err) => {
+                        error!("Failed to sync metagraph: {}", err);
+                    }
+                },
+                Err(_elapsed) => {
+                    error!(
+                        "Sync operation timed out after {} seconds",
+                        VALIDATOR_SYNC_TIMEOUT.as_secs_f32()
+                    );
+                    error!(
+                        "Current stack trace:\n{:?}",
+                        std::backtrace::Backtrace::capture()
+                    );
+
+                    // Additional debugging info
+                    let guard = neuron.try_read();
+                    match guard {
+                        Ok(_) => info!("Neuron read lock is available"),
+                        Err(_) => error!("Neuron read lock is held - possible deadlock"),
+                    };
+
+                    let scoring_guard = scoring_system.try_write();
+                    match scoring_guard {
+                        Ok(_) => info!("Scoring system write lock is available"),
+                        Err(_) => error!("Scoring system write lock is held - possible deadlock"),
+                    };
+                }
+            }
             info!("Done syncing validator");
         }
     });
@@ -145,6 +182,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let db_path = config.clone().api_keys_db.clone();
     // Initialize API key manager
     let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
+    let info_api_rate_limit_state: InfoApiRateLimiter = Arc::new(DashMap::new());
 
     // Create protected routes that require API key
     let protected_routes = Router::new()
@@ -155,11 +193,16 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Create main router with all routes
     let app = Router::new()
         .merge(protected_routes) // Add protected routes
-        .route("/info", get(node_info)) // Public route
+        .route(
+            "/info",
+            get(node_info).route_layer(from_fn(middleware::info_api_rate_limit_middleware)),
+        )
+        .layer(Extension(info_api_rate_limit_state))
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(ValidatorState {
             validator: validator.clone(),
+            local_node_info: validator.neuron.read().await.local_node_info.clone(),
         });
 
     // Start server
@@ -170,7 +213,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         tokio::net::TcpListener::bind(addr)
             .await
             .context("Failed to bind HTTP server")?,
-        app,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
     .context("HTTP server failed")?;
@@ -180,6 +223,15 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
 /// Main entry point for the validator service
 async fn main(config: ValidatorConfig) {
+    if std::env::var("PANIC_ABORT")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        std::panic::set_hook(Box::new(|info| {
+            eprintln!("One of the threads panicked {}", info);
+            std::process::abort();
+        }));
+    }
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("Failed to install rustls crypto provider");

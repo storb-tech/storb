@@ -87,8 +87,6 @@ pub async fn handshake(
     let validator_info = miner_base_neuron
         .address_book
         .clone()
-        .read()
-        .await
         .get(validator_peer_id)
         .ok_or_else(|| {
             error!("Error while getting validator info");
@@ -176,8 +174,6 @@ pub async fn get_piece(
     let validator_info = miner_base_neuron
         .address_book
         .clone()
-        .read()
-        .await
         .get(validator_peer_id)
         .ok_or_else(|| {
             error!("Error while getting validator info");

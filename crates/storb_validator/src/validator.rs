@@ -113,14 +113,19 @@ impl Validator {
     pub async fn run_synthetic_challenges(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
-        // Check if we have any peers before proceeding
-        let peer_count = self.neuron.read().await.address_book.read().await.len();
+        let (peer_count, signer) = {
+            let neuron_guard = self.neuron.read().await;
+            (
+                neuron_guard.address_book.clone().len(),
+                self.neuron.read().await.signer.clone(),
+            )
+        };
+
         if peer_count == 0 {
             info!("No peers available, skipping synthetic challenges");
             return Ok(());
         }
 
-        let signer = self.neuron.read().await.signer.clone();
         let mut rng: StdRng = SeedableRng::from_entropy();
         let mut store_latencies = MinerLatencyMap::default();
         let mut retrieval_latencies = MinerLatencyMap::default();
@@ -151,24 +156,28 @@ impl Validator {
             for idx in idxs_to_query {
                 let quic_addr = &quic_addresses[idx];
                 let quic_miner_uid = quic_miner_uids[idx];
-                let db = self.scoring_system.write().await.db.clone();
+                let db = {
+                    let score_guard = self.scoring_system.write().await;
+                    score_guard.db.clone()
+                };
 
-                let neuron_guard = self.neuron.read().await;
-                let peer_id = neuron_guard
-                    .peer_node_uid
-                    .get_by_right(&quic_miner_uid)
-                    .ok_or("No peer ID found for the miner UID")?;
-                let miner_info = self
-                    .neuron
-                    .read()
-                    .await
-                    .address_book
-                    .clone()
-                    .read()
-                    .await
-                    .get(peer_id)
-                    .ok_or("No NodeInfo found for the given miner")?
-                    .clone();
+                let miner_info = {
+                    let neuron_guard = self.neuron.read().await;
+
+                    // Get peer ID from the neuron
+                    let peer_id = neuron_guard
+                        .peer_node_uid
+                        .get_by_right(&quic_miner_uid)
+                        .ok_or("No peer ID found for the miner UID")?;
+
+                    // Get miner info from the address book
+                    neuron_guard
+                        .address_book
+                        .clone()
+                        .get(peer_id)
+                        .ok_or("No NodeInfo found for the given miner")?
+                        .clone()
+                };
 
                 info!("Challenging miner {quic_miner_uid} with store request");
                 db.conn.lock().await.execute(
@@ -252,13 +261,13 @@ impl Validator {
         let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
         // Create chunk DHT value
-        let validator_id = self
-            .neuron
-            .read()
-            .await
-            .local_node_info
-            .uid
-            .ok_or("Failed to get validator UID")?;
+        let validator_id = {
+            let neuron_guard = self.neuron.read().await;
+            neuron_guard
+                .local_node_info
+                .uid
+                .ok_or("Failed to get validator UID")?
+        };
 
         let chunk_msg = (
             chunk_key.clone(),
@@ -291,12 +300,15 @@ impl Validator {
         };
 
         // Put chunk entry in DHT
+
+        let neuron_guard = self.neuron.read().await;
         swarm::dht::StorbDHT::put_chunk_entry(
-            self.neuron.read().await.command_sender.clone(),
+            neuron_guard.command_sender.clone(),
             chunk_key,
             chunk_dht_value,
         )
         .await?;
+        drop(neuron_guard);
 
         // wait a few seconds before running retrieval challenges
         tokio::time::sleep(Duration::from_secs_f64(
@@ -327,9 +339,13 @@ impl Validator {
 
         let mut pieces_checked = 0;
 
-        let neuron_guard = self.neuron.read().await;
-        let dht_sender = neuron_guard.command_sender.clone();
-        let address_book = neuron_guard.address_book.clone();
+        let (dht_sender, address_book) = {
+            let neuron_guard = self.neuron.read().await;
+            (
+                neuron_guard.command_sender.clone(),
+                neuron_guard.address_book.clone(),
+            )
+        };
 
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
             let idx = rng.gen_range(0..piece_hashes.len());
@@ -346,8 +362,7 @@ impl Validator {
 
             let mut miner_uids: Vec<u16> = Vec::new();
             for peer_id in piece_providers.clone() {
-                let addr_book_guard = address_book.read().await;
-                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
@@ -356,13 +371,12 @@ impl Validator {
 
             // go through bimap, get QUIC addresses of miners
             for peer_id in piece_providers {
-                let addr_book_guard = address_book.read().await;
-                let miner_info = addr_book_guard.get(&peer_id).ok_or_else(|| {
+                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
                     anyhow!("Miner info not found in address book for peer {}", peer_id)
                 })?;
                 let miner_uid = miner_info.neuron_info.uid;
 
-                let db = self.scoring_system.write().await.db.clone();
+                let db = { self.scoring_system.write().await.db.clone() };
                 debug!("Updating retrieval attempts in sqlite db");
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 debug!("Updated");
@@ -458,7 +472,7 @@ impl Validator {
 
         let store_avg_latencies = store_latencies.get_all_latencies();
         let retrieval_avg_latencies = retrieval_latencies.get_all_latencies();
-        let moving_average_alpha = self.scoring_system.read().await.moving_average_alpha;
+        let moving_average_alpha = { self.scoring_system.read().await.moving_average_alpha };
 
         // Update scoring system with new latencies using EMA
         self.scoring_system
@@ -501,6 +515,8 @@ impl Validator {
             .tx()
             .sign_and_submit_default(&payload, &neuron.signer)
             .await?;
+
+        drop(neuron);
 
         Ok(())
     }

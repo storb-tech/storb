@@ -4,11 +4,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::middleware::from_fn;
 use axum::routing::{get, post};
+use axum::Extension;
 use base::piece_hash::PieceHash;
 use base::swarm;
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
+use dashmap::DashMap;
+use middleware::InfoApiRateLimiter;
 use miner::{Miner, MinerConfig};
 use quinn::rustls::pki_types::PrivatePkcs8KeyDer;
 use quinn::{Endpoint, ServerConfig, VarInt};
@@ -18,6 +22,8 @@ use tokio::sync::Mutex;
 use tokio::time;
 use tracing::{debug, error, info};
 
+pub mod constants;
+mod middleware;
 pub mod miner;
 mod routes;
 pub mod store;
@@ -100,11 +106,15 @@ async fn main(config: MinerConfig) -> Result<()> {
             .quic_port
             .expect("Could not get quic port")
     );
-
+    let info_api_rate_limit_state: InfoApiRateLimiter = Arc::new(DashMap::new());
     let app = axum::Router::new()
-        .route("/info", get(routes::node_info))
+        .route(
+            "/info",
+            get(routes::node_info).route_layer(from_fn(middleware::info_api_rate_limit_middleware)),
+        )
         .route("/handshake", post(routes::handshake))
         .route("/piece", get(routes::get_piece))
+        .layer(Extension(info_api_rate_limit_state))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
@@ -142,10 +152,10 @@ async fn main(config: MinerConfig) -> Result<()> {
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
-                        info!("New connection from {}", conn.remote_address());
+                        debug!("New connection from {}", conn.remote_address());
 
                         while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                            info!("New bidirectional stream opened");
+                            debug!("New bidirectional stream opened");
 
                             // Read the payload size
                             let mut payload_size_buf = [0u8; 8];
@@ -203,8 +213,6 @@ async fn main(config: MinerConfig) -> Result<()> {
                             let validator_info = if let Some(vali_info) = miner_base_neuron
                                 .address_book
                                 .clone()
-                                .read()
-                                .await
                                 .get(validator_peer_id)
                             {
                                 vali_info.clone()
@@ -238,7 +246,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 continue;
                             }
                             let piece_size = u64::from_be_bytes(piece_size_buf) as usize;
-                            info!("Received piece size: {piece_size} bytes");
+                            debug!("Received piece size: {piece_size} bytes");
 
                             // Process the piece
                             let mut buffer = vec![0u8; piece_size];
@@ -277,7 +285,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                             )
                             .await
                             {
-                                Ok(_) => info!(
+                                Ok(_) => debug!(
                                     "Added miner as provider for piece with key {:?}",
                                     piece_key
                                 ),
