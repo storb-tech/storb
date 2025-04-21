@@ -130,7 +130,7 @@ pub enum DhtCommand {
     },
     ProcessVerificationResult {
         peer_id: PeerId,
-        info: identify::Info,
+        info: Box<identify::Info>,
         result: Result<bool, Box<dyn std::error::Error + Send + Sync>>,
     },
 }
@@ -158,6 +158,7 @@ pub struct StorbDHT {
     swarm_rate_limits: Arc<DashMap<(PeerId, IpAddr), VecDeque<Instant>>>,
     active_connections: Arc<DashMap<ConnectionId, (PeerId, IpAddr)>>,
     peer_id_to_connection_id: Arc<DashMap<PeerId, ConnectionId>>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl StorbDHT {
@@ -296,11 +297,13 @@ impl StorbDHT {
         let swarm_rate_limits = Arc::new(DashMap::<(PeerId, IpAddr), VecDeque<Instant>>::new());
         let active_connections = Arc::new(DashMap::<ConnectionId, (PeerId, IpAddr)>::new());
         let peer_id_to_connection_id = Arc::new(DashMap::<PeerId, ConnectionId>::new());
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let peer_verifier = peer_verifier::PeerVerifier::new(
             address_book.clone(),
             pending_verification.clone(),
             command_sender.clone(),
+            shutdown_rx.clone(),
         );
 
         debug!("Starting peer verifier");
@@ -318,6 +321,7 @@ impl StorbDHT {
             swarm_rate_limits,
             active_connections,
             peer_id_to_connection_id,
+            shutdown_tx,
         };
 
         let command_sender_clone = dht_instance.command_sender.clone();
@@ -620,17 +624,15 @@ impl StorbDHT {
                             }
 
                             if !throttled {
-                                // INNER MATCH ON StorbEvent (or your behaviour enum)
                                 match behaviour_event {
-                                    StorbEvent::Kademlia(kad_event) => { // Use the renamed variable
+                                    StorbEvent::Kademlia(kad_event) => {
                                         let queries_clone = self.queries.clone();
                                         let mut queries = queries_clone.lock().await;
                                         trace!("Kademlia event received: {:?}", kad_event);
-                                        // Pass the owned event if inject_kad_event consumes it, or clone if needed
                                         self.inject_kad_event(*kad_event.clone(), &mut queries).await;
-                                        self.inject_kad_incoming_query(*kad_event); // Pass owned event here if appropriate
+                                        self.inject_kad_incoming_query(*kad_event);
                                     }
-                                    StorbEvent::Identify(identify_event) => { // Use the renamed variable
+                                    StorbEvent::Identify(identify_event) => {
                                         let event = *identify_event;
                                         trace!("Identify event: {:?}", event);
                                         if let identify::Event::Received { peer_id, info, .. } = event {
@@ -735,9 +737,7 @@ impl StorbDHT {
 
     /// Attempts to extract the ConnectionId from a StorbEvent.
     /// This is needed for linking the event back to a (PeerId, IpAddr).
-    /// Note: Relies on underlying behaviour events exposing ConnectionId, which is not guaranteed for all events.
     fn get_connection_id_for_behaviour_event(&self, event: &StorbEvent) -> Option<ConnectionId> {
-        // Adapt the previous Kad-specific helper
         match event {
             StorbEvent::Kademlia(kad_event) => {
                 // Check specific Kademlia event types known to carry ConnectionId
@@ -760,32 +760,24 @@ impl StorbDHT {
                                 connection,
                                 record: _,
                             } => Some(*connection),
-                            // Add others if discovered
                             _ => None,
                         }
                     }
-                    // Add others if discovered
                     _ => None,
                 }
             }
-            StorbEvent::Identify(id_event) => {
-                // Identify events usually have ConnectionId
-                match &**id_event {
-                    identify::Event::Received { connection_id, .. } => Some(*connection_id),
-                    identify::Event::Sent { connection_id, .. } => Some(*connection_id),
-                    identify::Event::Pushed { connection_id, .. } => Some(*connection_id),
-                    identify::Event::Error { connection_id, .. } => Some(*connection_id),
-                }
-            }
+            StorbEvent::Identify(id_event) => match &**id_event {
+                identify::Event::Received { connection_id, .. } => Some(*connection_id),
+                identify::Event::Sent { connection_id, .. } => Some(*connection_id),
+                identify::Event::Pushed { connection_id, .. } => Some(*connection_id),
+                identify::Event::Error { connection_id, .. } => Some(*connection_id),
+            },
             StorbEvent::Ping(ping_event) => {
                 // Ping results usually carry ConnectionId
                 let ping::Event { connection, .. } = &**ping_event;
                 Some(*connection)
             }
         }
-        // **IMPORTANT LIMITATION:** Remains the same - if the specific inner event
-        // (e.g., a Kademlia InboundRequest) doesn't expose ConnectionId at this level,
-        // the rate limit check for that specific event instance might be skipped.
     }
 
     async fn handle_put(
@@ -1230,6 +1222,7 @@ impl Drop for StorbDHT {
     /// This implementation disconnects all connected peers to ensure a graceful shutdown.
     fn drop(&mut self) {
         debug!("Dropping StorbDHT connections");
+        let _ = self.shutdown_tx.send(true);
         let peers: Vec<PeerId> = self.swarm.connected_peers().copied().collect();
         for (idx, conn) in peers.iter().enumerate() {
             trace!("Dropping connection {:?} to {:?}", idx, conn);

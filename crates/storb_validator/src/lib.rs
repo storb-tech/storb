@@ -59,7 +59,6 @@ struct ValidatorState {
 ///
 /// On success, returns Ok(()).
 /// On failure, returns error with details of the failure.
-
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // TODO: Load or generate server certificate
     // let server_cert = ensure_certificate_exists().await?;
@@ -96,7 +95,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                     match result {
                         Ok(uids) => {
                             info!("Sync completed in {:?}", duration);
-                            let neuron_count = neuron.read().await.neurons.read().await.len();
+                            let neuron_guard = neuron.read().await;
+                            let neuron_count = neuron_guard.neurons.read().await.len();
                             scoring_system
                                 .write()
                                 .await
@@ -107,7 +107,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                                 scoring_system.clone().read().await.state.ema_scores.clone();
 
                             match Validator::set_weights(
-                                neuron.read().await.clone(),
+                                neuron_guard.clone(),
                                 ema_scores,
                                 sync_config.clone(),
                             )
@@ -124,6 +124,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                         }
                     }
                 }
+                // TODO: remove panics before main merge
                 Err(_elapsed) => {
                     error!(
                         "Sync operation timed out after {} seconds",
@@ -146,7 +147,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                         Ok(_) => info!("Scoring system write lock is available"),
                         Err(_) => error!("Scoring system write lock is held - possible deadlock"),
                     };
-                    // panic
+
                     panic!("Sync operation timed out");
                 }
             }

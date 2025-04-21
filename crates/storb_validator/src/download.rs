@@ -75,14 +75,14 @@ impl DownloadProcessor {
 
         let mut requests = FuturesUnordered::new();
 
-        let signer = validator_base_neuron.read().await.signer.clone();
+        let base_neuron_guard = validator_base_neuron.read().await;
+        let signer = base_neuron_guard.signer.clone();
 
-        let vali_uid = validator_base_neuron
-            .read()
-            .await
+        let vali_uid = base_neuron_guard
             .local_node_info
             .uid
             .context("Failed to get UID for validator")?;
+        drop(base_neuron_guard);
 
         for provider in piece_providers {
             // Look up node info from the address book.
@@ -94,6 +94,7 @@ impl DownloadProcessor {
 
             let scoring_system = scoring_system.clone();
             let db = scoring_system.write().await.db.clone();
+            drop(scoring_system);
             let signer = Arc::new(signer.clone());
 
             // Each provider query is executed in its own async block.
@@ -375,7 +376,11 @@ impl DownloadProcessor {
         let chunk_hashes = tracker.chunk_hashes;
 
         let state = self.state.validator.clone();
-        let address_book = state.neuron.read().await.address_book.clone();
+
+        let neuron_guard = state.neuron.read().await;
+        let address_book = neuron_guard.address_book.clone();
+        drop(neuron_guard);
+
         let dht_sender = self.dht_sender.clone();
         let (chunk_tx, chunk_rx) = mpsc::channel::<Vec<u8>>(MPSC_BUFFER_SIZE);
 

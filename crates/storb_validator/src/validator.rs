@@ -113,9 +113,12 @@ impl Validator {
     pub async fn run_synthetic_challenges(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + std::marker::Send + Sync>> {
-        let peer_count = {
+        let (peer_count, signer) = {
             let neuron_guard = self.neuron.read().await;
-            neuron_guard.address_book.clone().len()
+            (
+                neuron_guard.address_book.clone().len(),
+                self.neuron.read().await.signer.clone(),
+            )
         };
 
         if peer_count == 0 {
@@ -123,7 +126,6 @@ impl Validator {
             return Ok(());
         }
 
-        let signer = self.neuron.read().await.signer.clone();
         let mut rng: StdRng = SeedableRng::from_entropy();
         let mut store_latencies = MinerLatencyMap::default();
         let mut retrieval_latencies = MinerLatencyMap::default();
@@ -155,8 +157,8 @@ impl Validator {
                 let quic_addr = &quic_addresses[idx];
                 let quic_miner_uid = quic_miner_uids[idx];
                 let db = {
-                    let score_gaurd = self.scoring_system.write().await;
-                    score_gaurd.db.clone()
+                    let score_guard = self.scoring_system.write().await;
+                    score_guard.db.clone()
                 };
 
                 let miner_info = {
@@ -169,14 +171,12 @@ impl Validator {
                         .ok_or("No peer ID found for the miner UID")?;
 
                     // Get miner info from the address book
-                    let miner_info = neuron_guard
+                    neuron_guard
                         .address_book
                         .clone()
                         .get(peer_id)
                         .ok_or("No NodeInfo found for the given miner")?
-                        .clone();
-
-                    miner_info
+                        .clone()
                 };
 
                 info!("Challenging miner {quic_miner_uid} with store request");
@@ -261,13 +261,13 @@ impl Validator {
         let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
         // Create chunk DHT value
-        let validator_id = self
-            .neuron
-            .read()
-            .await
-            .local_node_info
-            .uid
-            .ok_or("Failed to get validator UID")?;
+        let validator_id = {
+            let neuron_guard = self.neuron.read().await;
+            neuron_guard
+                .local_node_info
+                .uid
+                .ok_or("Failed to get validator UID")?
+        };
 
         let chunk_msg = (
             chunk_key.clone(),
@@ -300,12 +300,15 @@ impl Validator {
         };
 
         // Put chunk entry in DHT
+
+        let neuron_guard = self.neuron.read().await;
         swarm::dht::StorbDHT::put_chunk_entry(
-            self.neuron.read().await.command_sender.clone(),
+            neuron_guard.command_sender.clone(),
             chunk_key,
             chunk_dht_value,
         )
         .await?;
+        drop(neuron_guard);
 
         // wait a few seconds before running retrieval challenges
         tokio::time::sleep(Duration::from_secs_f64(
@@ -336,9 +339,6 @@ impl Validator {
 
         let mut pieces_checked = 0;
 
-        // let neuron_guard = self.neuron.read().await;
-        // let dht_sender = neuron_guard.command_sender.clone();
-        // let address_book = neuron_guard.address_book.clone();
         let (dht_sender, address_book) = {
             let neuron_guard = self.neuron.read().await;
             (
@@ -472,7 +472,7 @@ impl Validator {
 
         let store_avg_latencies = store_latencies.get_all_latencies();
         let retrieval_avg_latencies = retrieval_latencies.get_all_latencies();
-        let moving_average_alpha = self.scoring_system.read().await.moving_average_alpha;
+        let moving_average_alpha = { self.scoring_system.read().await.moving_average_alpha };
 
         // Update scoring system with new latencies using EMA
         self.scoring_system

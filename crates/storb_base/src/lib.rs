@@ -230,7 +230,6 @@ impl BaseNeuron {
             dht_locked.process_events().await;
             drop(dht_locked);
             tokio::task::yield_now().await;
-            panic!("Failed to process storb swarm events");
         });
 
         let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");
