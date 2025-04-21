@@ -8,7 +8,7 @@ use futures::stream::{self, StreamExt};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::CLIENT_TIMEOUT;
+use crate::constants::{CLIENT_TIMEOUT, SYNC_BUFFER_SIZE};
 use crate::{BaseNeuron, LocalNodeInfo, NodeInfo};
 
 #[derive(Debug, Error)]
@@ -172,7 +172,10 @@ impl Synchronizable for BaseNeuron {
 
             let ip = Ipv4Addr::from((neuron_ip & 0xffff_ffff) as u32);
             let url_raw = format!("http://{}:{}/info", ip, neuron_port);
-            let url = reqwest::Url::parse(&url_raw).expect("Invalid URL");
+            let url = reqwest::Url::parse(&url_raw).map_err(|e| {
+                error!("Failed to parse URL: {:?}", e);
+                SyncError::GetNodeInfoError(format!("Failed to parse URL: {:?}", e))
+            })?;
 
             // Create future for this node's info request
             let future = async move {
@@ -192,9 +195,8 @@ impl Synchronizable for BaseNeuron {
         }
 
         // Execute all futures concurrently and collect results
-        // TODO: make the buffer size constant - NO MAGIC NUMBERS!!!!1!!1!!
         let stream = stream::iter(futures)
-            .buffer_unordered(32) // Limit to 32 concurrent requests
+            .buffer_unordered(SYNC_BUFFER_SIZE) // Limit to 32 concurrent requests
             .collect::<Vec<_>>();
         let results = stream.await;
 

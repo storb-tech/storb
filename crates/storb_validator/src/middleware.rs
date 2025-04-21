@@ -105,14 +105,14 @@ pub async fn info_api_rate_limit_middleware(
     let timestamps: &mut VecDeque<Instant> = entry.value_mut();
 
     while let Some(ts) = timestamps.front() {
-        if *ts < limit_start_time {
-            timestamps.pop_front();
-        } else {
+        if *ts >= limit_start_time {
             break;
         }
+        timestamps.pop_front();
     }
 
     if timestamps.len() >= INFO_API_RATE_LIMIT_MAX_REQUESTS {
+        drop(entry);
         warn!("Rate limit exceeded for IP: {}", ip);
         Err(StatusCode::TOO_MANY_REQUESTS)
     } else {

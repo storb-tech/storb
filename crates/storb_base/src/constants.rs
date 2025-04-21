@@ -29,11 +29,13 @@ pub const MIN_BANDWIDTH: u64 = 20 * 1024; // minimum "bandwidth"
 pub const PEER_VERIFICATION_TIMEOUT: u64 = 30; // timeout for peer verification in seconds
 pub const PEER_VERIFICATION_FREQUENCY: u64 = 30; // frequency of peer verification in seconds
 
-pub const MAX_PENDING_INCOMING: u32 = 100;
-pub const MAX_PENDING_OUTGOING: u32 = 100;
-pub const MAX_ESTABLISHED_INCOMING: u32 = 200;
-pub const MAX_ESTABLISHED_OUTGOING: u32 = 200;
-pub const MAX_ESTABLISHED_PER_PEER: u32 = 50;
+pub const DHT_MAX_PENDING_INCOMING: u32 = 100;
+pub const DHT_MAX_PENDING_OUTGOING: u32 = 100;
+pub const DHT_MAX_ESTABLISHED_INCOMING: u32 = 200;
+pub const DHT_MAX_ESTABLISHED_OUTGOING: u32 = 200;
+pub const DHT_MAX_ESTABLISHED_PER_PEER: u32 = 50;
 
 pub const SWARM_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
 pub const SWARM_RATE_LIMIT_REQUEST: usize = 1000; // 1000 messages per minute
+
+pub const SYNC_BUFFER_SIZE: usize = 32;

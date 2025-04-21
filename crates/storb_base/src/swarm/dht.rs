@@ -20,9 +20,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::{db, models, store::StorbStore};
 use crate::constants::{
-    MAX_ESTABLISHED_INCOMING, MAX_ESTABLISHED_OUTGOING, MAX_ESTABLISHED_PER_PEER,
-    MAX_PENDING_INCOMING, MAX_PENDING_OUTGOING, STORB_KAD_PROTOCOL_NAME, SWARM_RATE_LIMIT_DURATION,
-    SWARM_RATE_LIMIT_REQUEST,
+    DHT_MAX_ESTABLISHED_INCOMING, DHT_MAX_ESTABLISHED_OUTGOING, DHT_MAX_ESTABLISHED_PER_PEER,
+    DHT_MAX_PENDING_INCOMING, DHT_MAX_PENDING_OUTGOING, STORB_KAD_PROTOCOL_NAME,
+    SWARM_RATE_LIMIT_DURATION, SWARM_RATE_LIMIT_REQUEST,
 };
 use crate::memory_db::MemoryDb;
 use crate::swarm::peer_verifier;
@@ -220,11 +220,11 @@ impl StorbDHT {
         let ping = ping::Behaviour::new(ping::Config::default());
         let limits = libp2p::connection_limits::Behaviour::new(
             ConnectionLimits::default()
-                .with_max_pending_incoming(Some(MAX_PENDING_INCOMING))
-                .with_max_pending_outgoing(Some(MAX_PENDING_OUTGOING))
-                .with_max_established_incoming(Some(MAX_ESTABLISHED_INCOMING))
-                .with_max_established_outgoing(Some(MAX_ESTABLISHED_OUTGOING))
-                .with_max_established_per_peer(Some(MAX_ESTABLISHED_PER_PEER)),
+                .with_max_pending_incoming(Some(DHT_MAX_PENDING_INCOMING))
+                .with_max_pending_outgoing(Some(DHT_MAX_PENDING_OUTGOING))
+                .with_max_established_incoming(Some(DHT_MAX_ESTABLISHED_INCOMING))
+                .with_max_established_outgoing(Some(DHT_MAX_ESTABLISHED_OUTGOING))
+                .with_max_established_per_peer(Some(DHT_MAX_ESTABLISHED_PER_PEER)),
         );
         // Build the combined behaviour.
         let behaviour = StorbBehaviour {
@@ -351,11 +351,10 @@ impl StorbDHT {
         let timestamps = entry.value_mut();
 
         while let Some(ts) = timestamps.front() {
-            if *ts < limit_start_time {
-                timestamps.pop_front();
-            } else {
+            if *ts >= limit_start_time {
                 break;
             }
+            timestamps.pop_front();
         }
 
         if timestamps.len() >= SWARM_RATE_LIMIT_REQUEST {

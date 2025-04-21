@@ -205,7 +205,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             "/info",
             get(node_info).route_layer(from_fn(middleware::info_api_rate_limit_middleware)),
         )
-        // Public route
         .layer(Extension(info_api_rate_limit_state))
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
