@@ -112,9 +112,9 @@ async fn main(config: MinerConfig) -> Result<()> {
             "/info",
             get(routes::node_info).route_layer(from_fn(middleware::info_api_rate_limit_middleware)),
         )
+        .layer(Extension(info_api_rate_limit_state))
         .route("/handshake", post(routes::handshake))
         .route("/piece", get(routes::get_piece))
-        .layer(Extension(info_api_rate_limit_state))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
@@ -126,7 +126,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                 .await
                 .context("Failed to bind HTTP server")
                 .unwrap(),
-            app,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .context("HTTP server failed")
