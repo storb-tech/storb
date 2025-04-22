@@ -236,6 +236,12 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             String,
             &settings.dht_dir
         ))?,
+        neurons_dir: expanduser(get_config_value!(
+            args,
+            "neurons_dir",
+            String,
+            &settings.neurons_dir
+        ))?,
         pem_file: expanduser(get_config_value!(
             args,
             "pem_file",

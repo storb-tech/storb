@@ -18,6 +18,7 @@ min_stake_threshold = 1000
 
 db_file = "storb_data/database.db"
 dht_dir = "storb_data/dht-db.storb-local"
+neurons_dir = "storb_data/neurons.state"
 pem_file = "storb_data/storb.pem"
 
 [subtensor]
