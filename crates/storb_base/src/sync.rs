@@ -93,7 +93,8 @@ impl Synchronizable for BaseNeuron {
 
         // TODO: error out if cant access chain when calling above function
         let neurons: Vec<NeuronInfoLite<AccountId>> = runtime_api.call(neurons_payload).await?;
-        let original_neurons: Vec<NeuronInfoLite<AccountId>> = self.neurons.read().await.clone();
+
+        let original_neurons = self.neurons.read().await.clone();
 
         info!("Got neurons from metagraph");
 
@@ -132,6 +133,11 @@ impl Synchronizable for BaseNeuron {
         drop(original_neurons);
 
         info!("Updated local neurons state");
+
+        // After updating neurons state, save to disk
+        info!("Saving neurons state to disk");
+        Self::save_neurons_state_to_disk(&self.config.neurons_dir, &self.neurons.read().await)?;
+        info!("Saved neurons state to disk");
 
         if local_node_info.uid.is_none() {
             // Find our local node uid or crash the program

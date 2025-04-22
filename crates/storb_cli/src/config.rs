@@ -81,6 +81,7 @@ pub struct Settings {
 
     pub db_file: String,
     pub dht_dir: String,
+    pub neurons_dir: String,
     pub pem_file: String,
 
     pub subtensor: Subtensor,

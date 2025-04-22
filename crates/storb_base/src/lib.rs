@@ -1,3 +1,4 @@
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use crabtensor::AccountId;
 use dashmap::DashMap;
 use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
 use memory_db::MemoryDb;
+use serde::ser::StdError;
 use subxt::utils::H256;
 use tokio::sync::RwLock;
 use tokio::sync::{mpsc, Mutex};
@@ -91,6 +93,7 @@ pub struct BaseNeuronConfig {
 
     pub db_file: PathBuf,
     pub dht_dir: PathBuf,
+    pub neurons_dir: PathBuf,
     pub pem_file: PathBuf,
 
     pub subtensor: SubtensorConfig,
@@ -206,7 +209,16 @@ impl BaseNeuron {
             panic!("Bootstrap is enabled, but no bootstrap nodes were provided. Please specify at least one bootstrap node in the settings.toml.");
         }
 
-        let neurons_arc = Arc::new(RwLock::new(Vec::new()));
+        // try and load the neurons from disk - load state
+        let neurons_arc =
+            if let Ok(loaded_neurons) = Self::load_neurons_state_from_disk(&config.neurons_dir) {
+                info!("Loaded {} neurons from saved state", loaded_neurons.len());
+                Arc::new(RwLock::new(loaded_neurons))
+            } else {
+                info!("No saved neuron state found, starting fresh");
+                Arc::new(RwLock::new(Vec::new()))
+            };
+
         let address_book = Arc::new(DashMap::new());
 
         let (dht_og, command_sender) = StorbDHT::new(
@@ -296,7 +308,7 @@ impl BaseNeuron {
             config.dht.port,
             peer_id.to_string()
         );
-        Ok(neuron.clone())
+        Ok(neuron)
     }
 
     /// Get info of a neuron (node) from a list of neurons that matches the account ID.
@@ -328,6 +340,31 @@ impl BaseNeuron {
                 "Neuron is not registered".to_string(),
             )),
         }
+    }
+
+    pub fn save_neurons_state_to_disk(
+        neurons_dir: &PathBuf,
+        neurons: &[NeuronInfoLite<AccountId>],
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        let buf = bincode::serialize(&neurons)
+            .map_err(|e| format!("Failed to serialize neurons: {}", e))?;
+
+        fs::write(neurons_dir, buf)
+            .map_err(|e| format!("Failed to write neurons state: {}", e).into())
+    }
+
+    pub fn load_neurons_state_from_disk(
+        neurons_dir: &PathBuf,
+    ) -> Result<Vec<NeuronInfoLite<AccountId>>, Box<dyn StdError + Send + Sync>> {
+        if !neurons_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let buf =
+            fs::read(neurons_dir).map_err(|e| format!("Failed to read neurons state: {}", e))?;
+
+        bincode::deserialize(&buf)
+            .map_err(|e| format!("Failed to deserialize neurons: {}", e).into())
     }
 }
 
@@ -376,6 +413,7 @@ mod tests {
             min_stake_threshold: 0,
             db_file: "./test.db".into(),
             dht_dir: "./test_dht".into(),
+            neurons_dir: "./test_neurons".into(),
             pem_file: "cert.pem".into(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
