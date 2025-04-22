@@ -616,6 +616,19 @@ async fn upload_piece_with_retry(
     scoring_system: Arc<RwLock<ScoringSystem>>,
     miner_uid: u16,
 ) -> Result<[u8; 32]> {
+    // Track request
+    if let Err(e) = scoring_system
+        .write()
+        .await
+        .increment_request_counter(miner_uid as usize)
+        .await
+    {
+        error!(
+            "Failed to increment request counter for miner {}: {}",
+            miner_uid, e
+        );
+    }
+
     let piece_hash = *blake3::hash(&piece.data).as_bytes();
     let upload_result =
         upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;

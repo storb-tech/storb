@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{Z_SCORE, Z_SQUARED};
+use crate::constants::{MIN_REQUESTS_FOR_SCORE, STATS_RESET_THRESHOLD, Z_SCORE, Z_SQUARED};
 
 // Add these error types at the top of the file
 #[derive(Debug, Error)]
@@ -46,6 +46,10 @@ pub struct ScoreState {
     pub store_latency_scores: Array1<f64>,
     /// Combination of retrieve and store scores.
     pub final_latency_scores: Array1<f64>,
+    /// Previous EMA scores before reset, used as baseline
+    pub previous_scores: Array1<f64>,
+    /// Request counters per miner
+    pub request_counters: Array1<u32>,
 }
 
 impl ScoreState {
@@ -255,6 +259,8 @@ impl ScoringSystem {
             retrieve_latency_scores: array![],
             store_latency_scores: array![],
             final_latency_scores: array![],
+            previous_scores: array![],
+            request_counters: array![],
         };
 
         let mut scoring_system = Self {
@@ -307,6 +313,29 @@ impl ScoringSystem {
         Ok(())
     }
 
+    /// Used to increment request counter when miner is sent a request. Return true if stats were reset.
+    pub async fn increment_request_counter(&mut self, uid: usize) -> Result<bool> {
+        if uid >= self.state.request_counters.len() {
+            return Ok(false);
+        }
+
+        self.state.request_counters[uid] += 1;
+
+        // Check if we should reset stats
+        if self.state.request_counters[uid] >= STATS_RESET_THRESHOLD {
+            // Store current score before reset
+            self.state.previous_scores[uid] = self.state.ema_scores[uid];
+
+            // Reset database stats
+            self.reset_miner_stats(uid).await?;
+            self.state.request_counters[uid] = 0;
+
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     /// Update scores for each of the miners.
     pub async fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
         let extend_array = |old: &Array1<f64>, new_size: usize| -> Array1<f64> {
@@ -329,6 +358,10 @@ impl ScoringSystem {
                 extend_array(&state.store_latency_scores, neuron_count);
             let mut new_final_latency_scores =
                 extend_array(&state.final_latency_scores, neuron_count);
+            let mut new_previous_scores = extend_array(&state.previous_scores, neuron_count);
+            let mut new_request_counters =
+                extend_array(&state.request_counters.mapv(|x| x as f64), neuron_count)
+                    .mapv(|x| x as u32);
 
             // Initialize new UIDs and reset scores for updated UIDs
             for uid in uids_to_update.iter() {
@@ -337,6 +370,8 @@ impl ScoringSystem {
                 new_retrieve_latency_scores[uid] = 0.0;
                 new_store_latency_scores[uid] = 0.0;
                 new_final_latency_scores[uid] = 0.0;
+                new_previous_scores[uid] = 0.0;
+                new_request_counters[uid] = 0;
 
                 // Reset database stats
                 if let Err(e) = self.reset_miner_stats(uid).await {
@@ -348,6 +383,8 @@ impl ScoringSystem {
             self.state.retrieve_latency_scores = new_retrieve_latency_scores;
             self.state.store_latency_scores = new_store_latency_scores;
             self.state.final_latency_scores = new_final_latency_scores;
+            self.state.previous_scores = new_previous_scores;
+            self.state.request_counters = new_request_counters;
         } else {
             // If we don't need to extend arrays, just reset scores for updated UIDs
             for uid in uids_to_update.iter() {
@@ -356,6 +393,8 @@ impl ScoringSystem {
                 self.state.retrieve_latency_scores[uid] = 0.0;
                 self.state.store_latency_scores[uid] = 0.0;
                 self.state.final_latency_scores[uid] = 0.0;
+                self.state.previous_scores[uid] = 0.0;
+                self.state.request_counters[uid] = 0;
 
                 // Reset database stats
                 if let Err(e) = self.reset_miner_stats(uid).await {
@@ -403,12 +442,25 @@ impl ScoringSystem {
                 )
                 .unwrap();
 
-            // Calculate LCB for store and retrieval rates
-            let store_lcb = calculate_wilson_lcb(store_successes, store_attempts);
-            let retrieval_lcb = calculate_wilson_lcb(retrieval_successes, retrieval_attempts);
+            let total_attempts = store_attempts + retrieval_attempts;
 
-            // Combine the LCB scores
-            response_rate_scores[miner_uid] = 0.5 * store_lcb + 0.5 * retrieval_lcb;
+            // Get the previous score before the mutable borrow
+            let previous_score = state.previous_scores[miner_uid];
+
+            if total_attempts < MIN_REQUESTS_FOR_SCORE as f64 {
+                // Use previous score for new/recently reset miners
+                response_rate_scores[miner_uid] = previous_score;
+            } else {
+                // Calculate new Wilson score
+                let store_lcb = calculate_wilson_lcb(store_successes, store_attempts);
+                let retrieval_lcb = calculate_wilson_lcb(retrieval_successes, retrieval_attempts);
+
+                // Combine with historical performance
+                let current_score = 0.5 * store_lcb + 0.5 * retrieval_lcb;
+
+                // Weight current performance more heavily
+                response_rate_scores[miner_uid] = 0.7 * current_score + 0.3 * previous_score;
+            }
         }
 
         // zero out nans in response rate scores

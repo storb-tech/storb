@@ -21,3 +21,6 @@ pub const Z_SQUARED: f64 = Z_SCORE * Z_SCORE; // Pre-calculated
 
 pub const INFO_API_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
 pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
+
+pub const STATS_RESET_THRESHOLD: u32 = 2500;
+pub const MIN_REQUESTS_FOR_SCORE: u32 = 50; // Minimum requests before using new Wilson score
