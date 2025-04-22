@@ -313,7 +313,7 @@ impl ScoringSystem {
         Ok(())
     }
 
-    // Add method to track requests and handle resets
+    /// Used to increment request counter when miner is sent a request. Return true if stats were reset.
     pub async fn increment_request_counter(&mut self, uid: usize) -> Result<bool> {
         if uid >= self.state.request_counters.len() {
             return Ok(false);
