@@ -126,7 +126,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                 .await
                 .context("Failed to bind HTTP server")
                 .unwrap(),
-            app,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .await
         .context("HTTP server failed")
