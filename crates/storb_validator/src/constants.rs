@@ -11,6 +11,7 @@ pub const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this
 pub const SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE: f64 = 3.0;
 pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synthetic data in bytes
 pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
+pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 10; // maximum number of miners to challenge
 
 pub const VALIDATOR_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 

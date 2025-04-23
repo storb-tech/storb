@@ -31,8 +31,8 @@ use tokio::task;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{
-    MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
-    SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
+    MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHALLENGE_MINER_NUM, MAX_SYNTH_CHUNK_SIZE,
+    MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
@@ -154,7 +154,8 @@ impl Validator {
             let vali_arc = Arc::new(self.clone());
             let (_, quic_addresses, quic_miner_uids) = get_id_quic_uids(vali_arc.clone()).await;
 
-            let num_miners_to_query = std::cmp::min(10, quic_miner_uids.len());
+            let num_miners_to_query =
+                std::cmp::min(MAX_SYNTH_CHALLENGE_MINER_NUM, quic_miner_uids.len());
             let idxs_to_query: Vec<usize> =
                 (0..quic_miner_uids.len()).choose_multiple(&mut rng, num_miners_to_query);
 
