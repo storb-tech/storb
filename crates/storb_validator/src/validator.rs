@@ -7,15 +7,18 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use base::constants::CLIENT_TIMEOUT;
-use base::piece::encode_chunk;
+use base::piece::{encode_chunk, Piece};
 use base::swarm::models::ChunkDHTValue;
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
 use crabtensor::sign::sign_message;
+use crabtensor::wallet::Signer;
 use crabtensor::weights::set_weights_payload;
 use crabtensor::weights::NormalizedWeight;
+use futures::stream::{FuturesUnordered, StreamExt};
 use libp2p::kad::RecordKey;
+use libp2p::Multiaddr;
 use ndarray::Array1;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
@@ -24,16 +27,26 @@ use reqwest::StatusCode;
 use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, trace};
+use tokio::task;
+use tracing::{debug, error, info, warn};
 
 use crate::constants::{
-    MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHUNK_SIZE, MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT,
-    SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
+    MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHALLENGE_MINER_NUM, MAX_SYNTH_CHUNK_SIZE,
+    MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
-use crate::upload::upload_piece_data;
+use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
+
+#[derive(Debug)]
+struct ChallengeResult {
+    miner_uid: u16,
+    latency: f64,
+    bytes_len: usize,
+    success: bool,
+    error: Option<String>, // Add error field to track failure reasons
+}
 
 #[derive(Default)]
 struct LatencyStats {
@@ -141,109 +154,104 @@ impl Validator {
 
         let encoded = encode_chunk(&synthetic_chunk, 0);
 
+        let mut store_futures = FuturesUnordered::new();
+
         for piece in encoded.pieces.clone() {
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
 
-            // TODO: if we cannot get quic connections of certain miners should we should punish them?
             let vali_arc = Arc::new(self.clone());
             let (_, quic_addresses, quic_miner_uids) = get_id_quic_uids(vali_arc.clone()).await;
 
-            let num_miners_to_query = std::cmp::min(10, quic_miner_uids.len()); // TODO: use a constant
+            let num_miners_to_query =
+                std::cmp::min(MAX_SYNTH_CHALLENGE_MINER_NUM, quic_miner_uids.len());
             let idxs_to_query: Vec<usize> =
                 (0..quic_miner_uids.len()).choose_multiple(&mut rng, num_miners_to_query);
 
             for idx in idxs_to_query {
-                let quic_addr = &quic_addresses[idx];
+                let quic_addr = quic_addresses[idx].clone();
                 let quic_miner_uid = quic_miner_uids[idx];
-                let db = {
-                    let score_guard = self.scoring_system.write().await;
-                    score_guard.db.clone()
-                };
 
-                let miner_info = {
-                    let neuron_guard = self.neuron.read().await;
+                let neuron_guard = self.neuron.read().await;
+                let peer_id = neuron_guard
+                    .peer_node_uid
+                    .get_by_right(&quic_miner_uid)
+                    .ok_or("No peer ID found for the miner UID")?;
 
-                    // Get peer ID from the neuron
-                    let peer_id = neuron_guard
-                        .peer_node_uid
-                        .get_by_right(&quic_miner_uid)
-                        .ok_or("No peer ID found for the miner UID")?;
+                let miner_info = neuron_guard
+                    .address_book
+                    .clone()
+                    .get(peer_id)
+                    .ok_or("No NodeInfo found for the given miner")?
+                    .clone();
+                drop(neuron_guard);
 
-                    // Get miner info from the address book
-                    neuron_guard
-                        .address_book
-                        .clone()
-                        .get(peer_id)
-                        .ok_or("No NodeInfo found for the given miner")?
-                        .clone()
-                };
+                let validator = self.clone();
+                let piece_hash_copy = piece_hash.to_owned();
 
-                info!("Challenging miner {quic_miner_uid} with store request");
-                db.conn.lock().await.execute(
-                    "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
-                    [quic_miner_uid],
-                )?;
+                let piece_clone = piece.clone();
+                store_futures.push(task::spawn(async move {
+                    validator
+                        .run_store_challenge(
+                            quic_miner_uid,
+                            quic_addr,
+                            piece_clone,
+                            piece_hash_copy,
+                            miner_info,
+                        )
+                        .await
+                }));
+            }
+        }
 
-                let client =
-                    make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
-                        .map_err(|e| anyhow!(e.to_string()))?;
-                let socket_addr = multiaddr_to_socketaddr(quic_addr)
-                .context("Could not get SocketAddr from Multiaddr. Ensure that the Multiaddr is not missing any components")?;
+        while let Some(result) = store_futures.next().await {
+            match result {
+                Ok(Ok(challenge_result)) => {
+                    let db = self.scoring_system.write().await.db.clone();
 
-                let (_, quic_conn) = match create_quic_client(&client, socket_addr).await {
-                    Ok(connection) => (socket_addr, connection),
-                    Err(e) => {
-                        error!("Failed to establish connection with {}: {}", socket_addr, e);
-                        continue; // TODO: punish miner
+                    // Update attempts count
+                    if let Err(e) = db.conn.lock().await.execute(
+                        "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
+                        [challenge_result.miner_uid],
+                    ) {
+                        error!("Failed to update store attempts: {}", e);
                     }
-                };
 
-                let start_time = Instant::now();
+                    if challenge_result.success {
+                        info!(
+                            "Store challenge succeeded for miner {}",
+                            challenge_result.miner_uid
+                        );
+                        // Update success count
+                        if let Err(e) = db.conn.lock().await.execute(
+                            "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
+                            [challenge_result.miner_uid],
+                        ) {
+                            error!("Failed to update store successes: {}", e);
+                        }
 
-                let hash_vec = match upload_piece_data(
-                    self.neuron.clone(),
-                    miner_info,
-                    &quic_conn,
-                    piece.data.clone(),
-                )
-                .await
-                {
-                    Ok(hash) => hash,
-                    Err(_) => {
-                        error!("Timed out trying to upload piece data to miner {quic_miner_uid}");
-                        vec![]
+                        store_latencies.record_latency(
+                            challenge_result.miner_uid,
+                            challenge_result.latency,
+                            challenge_result.bytes_len,
+                        );
+                    } else {
+                        error!(
+                            "Store challenge failed for miner {}: {}",
+                            challenge_result.miner_uid,
+                            challenge_result
+                                .error
+                                .unwrap_or_else(|| "Unknown error".to_string())
+                        );
+                        store_latencies.record_latency(
+                            challenge_result.miner_uid,
+                            SYNTH_CHALLENGE_TIMEOUT,
+                            challenge_result.bytes_len,
+                        );
                     }
-                };
-
-                let latency = start_time.elapsed().as_secs_f64();
-                let hash = hash_vec.as_bytes_ref();
-
-                info!("Received hash: {:?}", hash);
-                info!("Expected hash: {:?}", piece_hash);
-
-                if hash != piece_hash {
-                    error!("Hash mismatch for piece from miner {quic_miner_uid}");
-                    store_latencies.record_latency(
-                        quic_miner_uid,
-                        SYNTH_CHALLENGE_TIMEOUT,
-                        piece.data.len(),
-                    );
-                    continue;
-                } else {
-                    info!("Received hash for piece from miner {quic_miner_uid}");
-                    // Increase store successes
-                    db.conn.lock().await.execute(
-                    "UPDATE miner_stats SET store_successes = store_successes + 1 WHERE miner_uid = ?",
-                    [quic_miner_uid],
-                    )?;
-                    // Increase total successes
-                    db.conn.lock().await.execute(
-                    "UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = ?",
-                    [quic_miner_uid],
-                    )?;
-                    store_latencies.record_latency(quic_miner_uid, latency, piece.data.len());
                 }
+                Ok(Err(e)) => error!("Store challenge error: {}", e),
+                Err(e) => error!("Store challenge task error: {}", e),
             }
         }
 
@@ -347,6 +355,8 @@ impl Validator {
             )
         };
 
+        let mut retrieval_futures = FuturesUnordered::new();
+
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
             let idx = rng.gen_range(0..piece_hashes.len());
 
@@ -357,117 +367,91 @@ impl Validator {
                 swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_key.clone()).await?;
 
             if piece_providers.is_empty() {
-                return Err(anyhow!("No providers found for piece {:?}", piece_key).into());
+                // return Err(anyhow!("No providers found for piece {:?}", piece_key).into());
+                warn!("No providers found for piece {:?}", piece_key);
+                pieces_checked += 1;
+                continue;
             }
-
-            let mut miner_uids: Vec<u16> = Vec::new();
-            for peer_id in piece_providers.clone() {
-                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
-                    anyhow!("Miner info not found in address book for peer {}", peer_id)
-                })?;
-                let miner_uid = miner_info.neuron_info.uid;
-                miner_uids.push(miner_uid);
-            }
-
             // go through bimap, get QUIC addresses of miners
             for peer_id in piece_providers {
-                let miner_info = address_book.get(&peer_id).ok_or_else(|| {
-                    anyhow!("Miner info not found in address book for peer {}", peer_id)
-                })?;
+                let miner_info = if let Some(miner_info) = address_book.get(&peer_id) {
+                    miner_info.clone()
+                } else {
+                    warn!("Miner info not found in address book for peer {}", peer_id);
+                    continue;
+                };
                 let miner_uid = miner_info.neuron_info.uid;
 
-                let db = { self.scoring_system.write().await.db.clone() };
-                debug!("Updating retrieval attempts in sqlite db");
-                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
-                debug!("Updated");
+                let miner_info_clone = miner_info.clone();
+                let signer_clone = signer.clone();
 
-                let message = VerificationMessage {
-                    netuid: self.config.neuron_config.netuid,
-                    miner: KeyRegistrationInfo {
-                        uid: miner_uid,
-                        account_id: miner_info.neuron_info.hotkey.clone(),
-                    },
-                    validator: KeyRegistrationInfo {
-                        uid: validator_id,
-                        account_id: signer.account_id().clone(),
-                    },
-                };
-                let signature = sign_message(&signer, &message);
-                let payload = HandshakePayload { signature, message };
-                let payload_bytes = bincode::serialize(&payload)?;
-
-                let req_client = reqwest::Client::builder()
-                    .timeout(CLIENT_TIMEOUT)
-                    .build()
-                    .context("Failed to build reqwest client")?;
-
-                let url = miner_info
-                    .http_address
-                    .as_ref()
-                    .and_then(base::utils::multiaddr_to_socketaddr)
-                    .map(|socket_addr| {
-                        format!(
-                            "http://{}:{}/piece?piecehash={}&handshake={}",
-                            socket_addr.ip(),
-                            socket_addr.port(),
-                            hex::encode(piece_hash),
-                            hex::encode(payload_bytes)
+                // TODO: is cloning here the best way to do this?
+                let validator = self.clone();
+                retrieval_futures.push(task::spawn(async move {
+                    validator
+                        .run_retrieval_challenge(
+                            miner_uid,
+                            piece_hash,
+                            miner_info_clone,
+                            signer_clone,
+                            validator_id,
                         )
-                    })
-                    .ok_or_else(|| anyhow!("Invalid HTTP address in node_info"))?;
-
-                let start_time = Instant::now();
-                let node_response = tokio::time::timeout(
-                    Duration::from_secs_f64(SYNTH_CHALLENGE_TIMEOUT),
-                    req_client.get(&url).send(),
-                )
-                .await?
-                .context("Failed to query node")?;
-
-                let latency = start_time.elapsed().as_secs_f64();
-
-                trace!("Node response from {:?}: {:?}", peer_id, node_response);
-
-                let response_status = node_response.status();
-                let body_bytes = node_response
-                    .bytes()
-                    .await
-                    .context("Failed to read response body")?;
-                let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
-                    .context("Failed to deserialise piece response")?;
-
-                // Check status of response
-                if response_status != StatusCode::OK {
-                    let err_msg = bincode::deserialize::<String>(&piece_data[..])?;
-                    error!(
-                        "Response returned with status code {}: {}",
-                        response_status, err_msg
-                    );
-                    continue;
-                }
-
-                // Verify the integrity of the piece_data using Blake3.
-                let computed_hash = blake3::hash(&piece_data);
-                let valid_hash = computed_hash.as_bytes() == &piece_hash;
-
-                if valid_hash {
-                    retrieval_latencies.record_latency(miner_uid, latency, piece_data.len());
-                } else {
-                    error!("Hash mismatch for provider {:?}", peer_id);
-                    retrieval_latencies.record_latency(
-                        miner_uid,
-                        SYNTH_CHALLENGE_TIMEOUT,
-                        piece_data.len(),
-                    );
-                    continue;
-                }
-
-                // Update the scoring system with the successful retrieval.
-                db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
-                db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
+                        .await
+                }));
             }
 
             pieces_checked += 1;
+        }
+
+        while let Some(result) = retrieval_futures.next().await {
+            match result {
+                Ok(Ok(challenge_result)) => {
+                    let db = self.scoring_system.write().await.db.clone();
+
+                    // Update attempts count
+                    if let Err(e) = db.conn.lock().await.execute(
+                        "UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = ?",
+                        [challenge_result.miner_uid],
+                    ) {
+                        error!("Failed to update retrieval attempts: {}", e);
+                    }
+
+                    if challenge_result.success {
+                        info!(
+                            "Retrieval challenge succeeded for miner {}",
+                            challenge_result.miner_uid
+                        );
+                        // Update success count
+                        if let Err(e) = db.conn.lock().await.execute(
+                            "UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
+                            [challenge_result.miner_uid],
+                        ) {
+                            error!("Failed to update retrieval successes: {}", e);
+                        }
+
+                        retrieval_latencies.record_latency(
+                            challenge_result.miner_uid,
+                            challenge_result.latency,
+                            challenge_result.bytes_len,
+                        );
+                    } else {
+                        error!(
+                            "Retrieval challenge failed for miner {}: {}",
+                            challenge_result.miner_uid,
+                            challenge_result
+                                .error
+                                .unwrap_or_else(|| "Unknown error".to_string())
+                        );
+                        retrieval_latencies.record_latency(
+                            challenge_result.miner_uid,
+                            SYNTH_CHALLENGE_TIMEOUT,
+                            challenge_result.bytes_len,
+                        );
+                    }
+                }
+                Ok(Err(e)) => error!("Retrieval challenge error: {}", e),
+                Err(e) => error!("Retrieval challenge task error: {}", e),
+            }
         }
 
         let store_avg_latencies = store_latencies.get_all_latencies();
@@ -519,5 +503,231 @@ impl Validator {
         drop(neuron);
 
         Ok(())
+    }
+
+    async fn run_store_challenge(
+        &self,
+        miner_uid: u16,
+        quic_addr: Multiaddr,
+        piece: Piece,
+        piece_hash: [u8; 32],
+        miner_info: base::NodeInfo,
+    ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
+        let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+            .map_err(|e| anyhow!("Failed to create client endpoint: {}", e))?;
+
+        let socket_addr =
+            multiaddr_to_socketaddr(&quic_addr).ok_or_else(|| anyhow!("Invalid QUIC address"))?;
+
+        let start_time = Instant::now();
+
+        let quic_conn = match create_quic_client(&client, socket_addr).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some(format!("QUIC connection failed: {}", e)),
+                })
+            }
+        };
+
+        let piece_len = piece.data.len();
+        let scoring_clone = self.scoring_system.clone();
+
+        let hash = match upload_piece_to_miner(
+            self.neuron.clone(),
+            miner_info,
+            &quic_conn,
+            piece,
+            scoring_clone,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: piece_len,
+                    success: false,
+                    error: Some(format!("Upload failed: {}", e)),
+                })
+            }
+        };
+
+        let latency = start_time.elapsed().as_secs_f64();
+        let success = hash.as_bytes_ref() == piece_hash;
+
+        Ok(ChallengeResult {
+            miner_uid,
+            latency: if success {
+                latency
+            } else {
+                SYNTH_CHALLENGE_TIMEOUT
+            },
+            bytes_len: piece_len,
+            success,
+            error: if !success {
+                Some("Hash mismatch".to_string())
+            } else {
+                None
+            },
+        })
+    }
+
+    async fn run_retrieval_challenge(
+        &self,
+        miner_uid: u16,
+        piece_hash: [u8; 32],
+        miner_info: base::NodeInfo,
+        signer: Signer,
+        validator_id: u16,
+    ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
+        let message = VerificationMessage {
+            netuid: self.config.neuron_config.netuid,
+            miner: KeyRegistrationInfo {
+                uid: miner_uid,
+                account_id: miner_info.neuron_info.hotkey.clone(),
+            },
+            validator: KeyRegistrationInfo {
+                uid: validator_id,
+                account_id: signer.account_id().clone(),
+            },
+        };
+
+        let signature = sign_message(&signer, &message);
+        let payload = HandshakePayload { signature, message };
+        let payload_bytes = match bincode::serialize(&payload) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some(format!("Serialization failed: {}", e)),
+                })
+            }
+        };
+
+        let url = match miner_info
+            .http_address
+            .as_ref()
+            .and_then(base::utils::multiaddr_to_socketaddr)
+            .map(|socket_addr| {
+                format!(
+                    "http://{}:{}/piece?piecehash={}&handshake={}",
+                    socket_addr.ip(),
+                    socket_addr.port(),
+                    hex::encode(piece_hash),
+                    hex::encode(payload_bytes)
+                )
+            }) {
+            Some(url) => url,
+            None => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some("Invalid HTTP address".to_string()),
+                })
+            }
+        };
+
+        let req_client = reqwest::Client::builder()
+            .timeout(CLIENT_TIMEOUT)
+            .build()
+            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+
+        let start_time = Instant::now();
+
+        // Handle all possible failure points in the request chain
+        let response = match tokio::time::timeout(
+            Duration::from_secs_f64(SYNTH_CHALLENGE_TIMEOUT),
+            req_client.get(&url).send(),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some(format!("HTTP request failed: {}", e)),
+                })
+            }
+            Err(_) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some("Request timed out".to_string()),
+                })
+            }
+        };
+
+        let latency = start_time.elapsed().as_secs_f64();
+
+        if response.status() != StatusCode::OK {
+            return Ok(ChallengeResult {
+                miner_uid,
+                latency: SYNTH_CHALLENGE_TIMEOUT,
+                bytes_len: 0,
+                success: false,
+                error: Some(format!("Bad status code: {}", response.status())),
+            });
+        }
+
+        let body_bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some(format!("Failed to read response body: {}", e)),
+                })
+            }
+        };
+
+        let piece_data = match base::piece::deserialise_piece_response(&body_bytes, &piece_hash) {
+            Ok(data) => data,
+            Err(e) => {
+                return Ok(ChallengeResult {
+                    miner_uid,
+                    latency: SYNTH_CHALLENGE_TIMEOUT,
+                    bytes_len: 0,
+                    success: false,
+                    error: Some(format!("Failed to deserialize piece: {}", e)),
+                })
+            }
+        };
+
+        let computed_hash = blake3::hash(&piece_data);
+        let success = *computed_hash.as_bytes() == piece_hash;
+
+        Ok(ChallengeResult {
+            miner_uid,
+            latency: if success {
+                latency
+            } else {
+                SYNTH_CHALLENGE_TIMEOUT
+            },
+            bytes_len: piece_data.len(),
+            success,
+            error: if !success {
+                Some("Hash verification failed".to_string())
+            } else {
+                None
+            },
+        })
     }
 }
