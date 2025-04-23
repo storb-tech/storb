@@ -606,7 +606,7 @@ async fn consume_bytes(
     Ok((piece_hashes, chunk_hashes))
 }
 
-// Add this helper function
+/// Upload a piece to a miner and verify the upload by checking the hash, then update the miner's stats
 pub async fn upload_piece_to_miner(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     miner_info: NodeInfo,

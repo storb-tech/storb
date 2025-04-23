@@ -39,6 +39,15 @@ use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSyst
 use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
+#[derive(Debug)]
+struct ChallengeResult {
+    miner_uid: u16,
+    latency: f64,
+    bytes_len: usize,
+    success: bool,
+    error: Option<String>, // Add error field to track failure reasons
+}
+
 #[derive(Default)]
 struct LatencyStats {
     weighted_latency: f64,
@@ -721,13 +730,4 @@ impl Validator {
             },
         })
     }
-}
-
-#[derive(Debug)]
-struct ChallengeResult {
-    miner_uid: u16,
-    latency: f64,
-    bytes_len: usize,
-    success: bool,
-    error: Option<String>, // Add error field to track failure reasons
 }
