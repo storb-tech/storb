@@ -449,13 +449,12 @@ async fn consume_bytes(
                         .clone();
                     drop(vali_guard);
                     tokio::select! {
-                        upload_result = upload_piece_with_retry(
+                        upload_result = upload_piece_to_miner(
                             vali_clone.clone(),
                             miner_info,
                             &conn,
                             piece_data.clone(),
                             scoring_clone,
-                            miner_uid,
                         ) => {
                             match upload_result {
                                 Ok(piece_hash) => {
@@ -608,14 +607,14 @@ async fn consume_bytes(
 }
 
 // Add this helper function
-async fn upload_piece_with_retry(
+pub async fn upload_piece_to_miner(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     miner_info: NodeInfo,
     conn: &Connection,
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
-    miner_uid: u16,
 ) -> Result<[u8; 32]> {
+    let miner_uid = miner_info.neuron_info.uid;
     // Track request
     if let Err(e) = scoring_system
         .write()
