@@ -1,0 +1,27 @@
+services:
+  storb:
+    image: ghcr.io/storb-tech/storb:latest
+    environment:
+      - NODE_TYPE="validator"
+      # Ports
+      - API_PORT=6969
+      - QUIC_PORT=6970
+      - DHT_PORT=6942
+      # Paths
+      - WALLET_PATH=~/.bittensor/wallets
+    ports:
+      - "80:80"
+      - "443:443"
+      - ${API_PORT}:${API_PORT}
+      - ${QUIC_PORT}:${QUIC_PORT}
+      - ${DHT_PORT}:${DHT_PORT}
+    volumes:
+      - ./:/home/appuser/storb
+      - ${WALLET_PATH}:/home/appuser/.bittensor/wallets
+    restart: unless-stopped
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --include-restarting --interval 60 --label-enable
+    restart: unless-stopped

@@ -46,6 +46,16 @@ sqlx migrate run --database-url "sqlite://storb_data/database.db"
         --post-ip
     ```
 
+#### Using Docker and Watchtower
+
+Make sure that you have first cloned this repository and filled out the `settings.toml` file with the necessary parameters. You will also need to specify environment variables for `API_PORT`, `QUIC_PORT`, and `DHT_PORT` if they differ from the defaults for port forwarding in the Docker container.
+
+Then, run the following:
+
+```bash
+docker compose up -f config/validator.docker-compose.yaml -d
+```
+
 ### API Access
 
 Validators can serve as gateways to the subnet, thereby letting users upload and download files to and from miners. We provide a cli tool to help manage api access.

@@ -1,33 +1,34 @@
-FROM rust:latest AS builder
+FROM ubuntu:24.04 AS builder
 
-# Install required build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang libclang-dev pkg-config libudev-dev libssl-dev librocksdb-dev ca-certificates  && \
+    ca-certificates clang curl libclang-dev libssl-dev libudev-dev librocksdb-dev  pkg-config && \
     rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    . $HOME/.cargo/env && \
+    rustup install nightly && \
+    rustup default nightly
 
 WORKDIR /app
 
 COPY . .
 
-RUN cargo build --release 
+RUN . $HOME/.cargo/env && \
+    ROCKSDB_LIB_DIR=/usr/lib/x86_64-linux-gnu cargo build --release
 
-# Runtime Stage: Minimal Debian image
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:24.04 AS runtime
 
 # Install necessary runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libudev-dev libssl-dev librocksdb-dev ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    ca-certificates librocksdb-dev libssl-dev libudev-dev pkg-config
 
-# Create non-root user and set up home directory
-RUN useradd -m -u 1000 appuser
-WORKDIR /home/appuser
+WORKDIR /home/appuser/storb
 
-# Copy the built binary from the builder stage
 COPY --from=builder /app/target/release/storb ./storb
-RUN chown -R appuser:appuser /home/appuser
 
-USER appuser
+ENV RUST_LOG="info,libp2p=info"
+ENV NODE_TYPE=""
 
-# Set the command to run the application
-CMD ["/home/appuser/storb"]
+VOLUME ["/home/appuser/storb" "/home/appuser/.bittensor/wallets"]
+
+CMD ["/home/appuser/storb", "${NODE_TYPE}"]
