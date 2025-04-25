@@ -22,13 +22,13 @@ FROM ubuntu:24.04 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates librocksdb-dev libssl-dev libudev-dev pkg-config
 
-WORKDIR /home/appuser/storb
-
-COPY --from=builder /app/target/release/storb ./storb
+COPY --from=builder /app/target/release/storb /usr/local/bin/storb
 
 ENV RUST_LOG="info,libp2p=info"
 ENV NODE_TYPE=""
 
-VOLUME ["/home/appuser/storb" "/home/appuser/.bittensor/wallets"]
+VOLUME ["/app", "/root/.bittensor/wallets"]
 
-CMD ["/home/appuser/storb", "${NODE_TYPE}"]
+WORKDIR /app
+
+CMD ["sh", "-c", "/usr/local/bin/storb ${NODE_TYPE}"]

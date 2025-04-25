@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub struct Subtensor {
     pub network: String,
     pub address: String,
+    #[serde(default)]
     pub insecure: bool,
 }
 
@@ -22,7 +23,9 @@ pub struct Neuron {
 #[derive(Debug, Deserialize)]
 pub struct Dht {
     pub port: u16,
+    #[serde(default)]
     pub no_bootstrap: bool,
+    #[serde(default)]
     pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
