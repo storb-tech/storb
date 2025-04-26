@@ -43,6 +43,14 @@ hex = "0.4.3"
 libp2p = { version = "0.55.0", features = ["full", "serde"] }
 lru = "0.13.0"
 ndarray = { version = "0.16.1", features = ["serde"] }
+opentelemetry = { version = "0.29.1", default-features = false, features = [
+    "trace",
+] }
+opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
+    "trace",
+] }
+opentelemetry-otlp = "0.29.0"
+opentelemetry-appender-tracing = "0.29.1"
 quinn = "0.11.2"
 rand = "0.8.5"
 rcgen = { version = "0.13.2", features = ["crypto", "pem", "ring"] }

@@ -77,6 +77,10 @@ pub struct Settings {
     pub wallet_name: String,
     pub hotkey_name: String,
 
+    pub otel_api_key: String,
+    pub otel_endpoint: String,
+    pub otel_service_name: String,
+
     pub mock: bool,
 
     pub load_old_nodes: bool,

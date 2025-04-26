@@ -69,6 +69,24 @@ pub fn common_args() -> Vec<Arg> {
             .help("Hotkey associated with the wallet")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("otel_api_key")
+            .long("otel-api-key")
+            .value_name("key")
+            .help("API key for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
+        Arg::new("otel_endpoint")
+            .long("otel-endpoint")
+            .value_name("endpoint")
+            .help("Endpoint for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
+        Arg::new("otel_service_name")
+            .long("otel-service-name")
+            .value_name("name")
+            .help("Service name for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
         Arg::new("mock")
             .long("mock")
             .help("Mock for testing")

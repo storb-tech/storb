@@ -1,5 +1,7 @@
 use std::io::stderr;
 
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::prelude::*;
@@ -16,7 +18,10 @@ macro_rules! fatal {
 }
 
 /// Initialise the global logger
-pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
+pub fn new(
+    log_level: &str,
+    otel_layer: OpenTelemetryTracingBridge<SdkLoggerProvider, SdkLogger>,
+) -> (WorkerGuard, WorkerGuard) {
     match log_level {
         "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR" => {}
         _ => {
@@ -49,7 +54,8 @@ pub fn new(log_level: &str) -> (WorkerGuard, WorkerGuard) {
                 .with_writer(non_blocking_file)
                 .with_line_number(true)
                 .with_ansi(false),
-        );
+        )
+        .with(otel_layer);
 
     tracing::subscriber::set_global_default(logger).expect("Failed to initialise logger");
 

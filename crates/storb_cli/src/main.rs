@@ -1,7 +1,13 @@
+#![allow(clippy::uninlined_format_args)]
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::Command;
 use constants::{ABOUT, BIN_NAME, NAME, VERSION};
 use expanduser::expanduser;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, Protocol, WithExportConfig, WithHttpConfig};
+use opentelemetry_sdk::{logs::SdkLoggerProvider, Resource};
 use tracing::info;
 
 mod cli;
@@ -71,7 +77,74 @@ pub fn main() -> Result<()> {
         None => &settings.log_level,
     };
 
-    let _guards = log::new(log_level.as_str());
+    let otel_api_key_args = match matches.try_get_one::<String>("otel_api_key") {
+        Ok(key) => key,
+        Err(error) => {
+            fatal!("Error while parsing otel_api_key flag: {error}");
+        }
+    };
+    let otel_api_key = match otel_api_key_args {
+        Some(key) => key,
+        None => &settings.otel_api_key,
+    };
+
+    let otel_endpoint_args = match matches.try_get_one::<String>("otel_endpoint") {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            fatal!("Error while parsing oltp_endpoint flag: {error}");
+        }
+    };
+    let otel_endpoint = match otel_endpoint_args {
+        Some(endpoint) => endpoint,
+        None => &settings.otel_endpoint,
+    };
+
+    let otel_service_name_args = match matches.try_get_one::<String>("otel_service_name") {
+        Ok(name) => name,
+        Err(error) => {
+            fatal!("Error while parsing otel_service_name flag: {error}");
+        }
+    };
+    let otel_service_name = match otel_service_name_args {
+        Some(name) => name.clone(),
+        None => settings.otel_service_name.clone(),
+    };
+
+    let otel_layer = if otel_api_key.trim().is_empty() {
+        info!("No OTEL API key provided; skipping telemetry");
+        // Build a no-export provider so nothing is sent
+        let provider = SdkLoggerProvider::builder().build();
+        OpenTelemetryTracingBridge::new(&provider)
+    } else {
+        info!("OTEL API key provided; enabling telemetry");
+        let mut otel_headers: HashMap<String, String> = HashMap::new();
+        otel_headers.insert("X-Api-Key".to_string(), otel_api_key.to_string());
+        let url: String = otel_endpoint.to_owned() + "logs";
+
+        let identifier_resource = Resource::builder()
+            .with_attribute(opentelemetry::KeyValue::new(
+                "service.name",
+                otel_service_name,
+            ))
+            .build();
+
+        let otel_exporters = LogExporter::builder()
+            .with_http()
+            .with_endpoint(url)
+            .with_protocol(Protocol::HttpBinary)
+            .with_headers(otel_headers)
+            .build()
+            .expect("Failed to create OTEL log expoter");
+
+        let otel_provider = SdkLoggerProvider::builder()
+            .with_batch_exporter(otel_exporters)
+            .with_resource(identifier_resource)
+            .build();
+
+        OpenTelemetryTracingBridge::new(&otel_provider)
+    };
+
+    let _guards = log::new(log_level.as_str(), otel_layer);
     info!("Initialised logger with log level {log_level}");
 
     match matches.subcommand() {
