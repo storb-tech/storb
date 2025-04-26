@@ -1,7 +1,7 @@
 version = "0.1.2"
 log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 
-netuid = 0
+netuid = 26             # Testnet is 269
 external_ip = "0.0.0.0"
 api_port = 6969
 quic_port = 6970

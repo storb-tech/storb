@@ -173,29 +173,12 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             &settings.subtensor.address
         )
         .to_string(),
-        insecure: *get_config_value!(
-            args,
-            "subtensor.insecure",
-            bool,
-            &settings.subtensor.insecure
-        ),
+        insecure: args.get_flag("subtensor.insecure") || settings.subtensor.insecure,
     };
-
-    let neuron_config = NeuronConfig {
-        sync_frequency: *get_config_value!(
-            args,
-            "neuron.sync_frequency",
-            u64,
-            &settings.neuron.sync_frequency
-        ),
-    };
-
-    let no_bootstrap =
-        *get_config_value!(args, "dht.no_bootstrap", bool, settings.dht.no_bootstrap);
 
     let dht_config = DhtConfig {
         port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
-        no_bootstrap,
+        no_bootstrap: args.get_flag("dht.no_bootstrap") || settings.dht.no_bootstrap,
         bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
 
@@ -249,7 +232,14 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             &settings.pem_file
         ))?,
         subtensor: subtensor_config,
-        neuron: neuron_config,
+        neuron: NeuronConfig {
+            sync_frequency: *get_config_value!(
+                args,
+                "neuron.sync_frequency",
+                u64,
+                &settings.neuron.sync_frequency
+            ),
+        },
         dht: dht_config,
     })
 }

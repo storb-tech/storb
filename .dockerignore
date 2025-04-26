@@ -1,0 +1,27 @@
+.DS_Store
+.config/
+.direnv
+.sqlx
+.vscode
+result/
+target/
+
+# Cap'n Proto
+*_capnp.rs
+
+# Storb
+*.db
+*.storb-local
+*.storb-state
+logs/
+object_store/
+settings.toml
+!settings.toml.example
+storb_data/
+
+# Testing
+test_dir_*
+
+# Certificates
+*.der
+*.pem
