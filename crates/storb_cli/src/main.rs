@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 use anyhow::Result;
 use clap::Command;
 use constants::{ABOUT, BIN_NAME, NAME, VERSION};

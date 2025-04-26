@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 use std::error::Error;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
