@@ -19,6 +19,8 @@ services:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
     working_dir: /app
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
   watchtower:
     image: containrrr/watchtower
     volumes:
