@@ -1,4 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

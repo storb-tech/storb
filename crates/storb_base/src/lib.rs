@@ -1,4 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
 use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
