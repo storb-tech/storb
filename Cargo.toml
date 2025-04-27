@@ -19,7 +19,7 @@ storb_miner = { version = "*", path = "crates/storb_miner" }
 storb_validator = { version = "*", path = "crates/storb_validator" }
 
 # Crabtensor
-crabtensor = { git = "https://github.com/storb-tech/crabtensor.git", version = "0.5.2"}
+crabtensor = { git = "https://github.com/storb-tech/crabtensor.git", version = "0.5.2" }
 sp-runtime = "=39.0.2"
 subxt = "=0.38.0"
 
@@ -70,6 +70,8 @@ utoipa = "5"
 uuid = "1.12.1"
 zfec-rs = { git = "https://github.com/thornleywalker/zfec-rs.git", rev = "3f3a3720def2294dc62e65f614862f1a7ddd3187" }
 
+[workspace.lints.clippy]
+uninlined_format_args = "allow"
 
 [profile.release]
 codegen-units = 1

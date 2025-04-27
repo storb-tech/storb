@@ -4,9 +4,6 @@ version.workspace = true
 description.workspace = true
 edition.workspace = true
 
-# [lints]
-# workspace = true
-
 [[bin]]
 name = "storb"
 path = "src/main.rs"
@@ -33,3 +30,6 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 zfec-rs.workspace = true
+
+[lints]
+workspace = true
