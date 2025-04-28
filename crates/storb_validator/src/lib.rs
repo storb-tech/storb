@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,10 +10,14 @@ use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base::sync::Synchronizable;
-use base::LocalNodeInfo;
+use base::{LocalNodeInfo, NeuronError};
 use constants::{SYNTHETIC_CHALLENGE_FREQUENCY, VALIDATOR_SYNC_TIMEOUT};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
+use opentelemetry::global;
+use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::Resource;
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
@@ -60,9 +66,6 @@ struct ValidatorState {
 /// On success, returns Ok(()).
 /// On failure, returns error with details of the failure.
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
-    // TODO: Load or generate server certificate
-    // let server_cert = ensure_certificate_exists().await?;
-
     let validator = Arc::new(Validator::new(config.clone()).await?);
 
     let neuron = validator.neuron.clone();
@@ -73,6 +76,39 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
 
     let sync_config = config.clone();
+
+    let identifier_resource = Resource::builder()
+        .with_attribute(opentelemetry::KeyValue::new(
+            "service.name",
+            config.otel_service_name,
+        ))
+        .build();
+    let mut otel_headers: HashMap<String, String> = HashMap::new();
+    otel_headers.insert("Otel-Api-Key".to_string(), config.otel_api_key.clone());
+    let url = config.otel_endpoint.clone() + "metrics";
+    let metrics_exporter = MetricExporter::builder()
+        .with_http()
+        .with_endpoint(url)
+        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
+        .with_headers(otel_headers)
+        .build()
+        .map_err(|e| {
+            NeuronError::ConfigError(format!("Failed to build OTEL MetricExporter: {:?}", e))
+        })?;
+
+    let metrics_provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(metrics_exporter)
+        .with_resource(identifier_resource)
+        .build();
+
+    global::set_meter_provider(metrics_provider.clone());
+
+    let meter = global::meter("validator::metrics");
+    let weights_counter = meter
+        .f64_counter("miner.weight")
+        .with_description("Current weight per miner")
+        .with_unit("score")
+        .build();
 
     tokio::spawn(async move {
         let local_validator = validator_for_sync;
@@ -109,6 +145,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                             neuron_guard.clone(),
                             ema_scores,
                             sync_config.clone(),
+                            weights_counter.clone(),
                         )
                         .await
                         {
@@ -179,7 +216,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
-    let db_path = config.clone().api_keys_db.clone();
+    let db_path = config.api_keys_db.clone();
     // Initialize API key manager
     let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
     let info_api_rate_limit_state: InfoApiRateLimiter = Arc::new(DashMap::new());
@@ -206,7 +243,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         });
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.clone().neuron_config.api_port));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(

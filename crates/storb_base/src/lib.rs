@@ -86,6 +86,10 @@ pub struct BaseNeuronConfig {
     pub wallet_name: String,
     pub hotkey_name: String,
 
+    pub otel_api_key: String,
+    pub otel_endpoint: String,
+    pub otel_service_name: String,
+
     pub mock: bool,
 
     pub load_old_nodes: bool,
@@ -428,6 +432,9 @@ mod tests {
                 no_bootstrap: true,
                 bootstrap_nodes: None,
             },
+            otel_api_key: "".to_string(),
+            otel_endpoint: "".to_string(),
+            otel_service_name: "".to_string(),
         }
     }
 

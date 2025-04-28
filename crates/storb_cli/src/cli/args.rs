@@ -69,6 +69,24 @@ pub fn common_args() -> Vec<Arg> {
             .help("Hotkey associated with the wallet")
             .action(ArgAction::Set)
             .global(true),
+        Arg::new("otel_api_key")
+            .long("otel-api-key")
+            .value_name("key")
+            .help("API key for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
+        Arg::new("otel_endpoint")
+            .long("otel-endpoint")
+            .value_name("endpoint")
+            .help("Endpoint for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
+        Arg::new("otel_service_name")
+            .long("otel-service-name")
+            .value_name("name")
+            .help("Service name for OpenTelemetry")
+            .action(ArgAction::Set)
+            .global(true),
         Arg::new("mock")
             .long("mock")
             .help("Mock for testing")
@@ -177,7 +195,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
     };
 
     let dht_config = DhtConfig {
-        port: *get_config_value!(args, "dht.port", u16, &settings.dht.port),
+        port: *get_config_value!(args, "dht.port", u16, settings.dht.port),
         no_bootstrap: args.get_flag("dht.no_bootstrap") || settings.dht.no_bootstrap,
         bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
@@ -241,5 +259,16 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             ),
         },
         dht: dht_config,
+        otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key)
+            .to_string(),
+        otel_endpoint: get_config_value!(args, "otel_endpoint", String, &settings.otel_endpoint)
+            .to_string(),
+        otel_service_name: get_config_value!(
+            args,
+            "otel_service_name",
+            String,
+            &settings.otel_service_name
+        )
+        .to_string(),
     })
 }
