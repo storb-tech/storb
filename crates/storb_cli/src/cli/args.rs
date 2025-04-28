@@ -173,8 +173,8 @@ pub fn common_args() -> Vec<Arg> {
 }
 
 pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseNeuronConfig> {
-    let api_port = get_config_value!(args, "api_port", u16, settings.api_port);
-    let quic_port = get_config_value!(args, "quic_port", u16, settings.quic_port);
+    let api_port = *get_config_value!(args, "api_port", u16, settings.api_port);
+    let quic_port = *get_config_value!(args, "quic_port", u16, settings.quic_port);
 
     let subtensor_config = SubtensorConfig {
         network: get_config_value!(
@@ -195,14 +195,14 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
     };
 
     let dht_config = DhtConfig {
-        port: get_config_value!(args, "dht.port", u16, &settings.dht.port),
+        port: *get_config_value!(args, "dht.port", u16, settings.dht.port),
         no_bootstrap: args.get_flag("dht.no_bootstrap") || settings.dht.no_bootstrap,
         bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
 
     Ok(BaseNeuronConfig {
         version: Version::from_str(&settings.version)?,
-        netuid: get_config_value!(args, "netuid", u16, settings.netuid),
+        netuid: *get_config_value!(args, "netuid", u16, settings.netuid),
         wallet_path: expanduser(get_config_value!(
             args,
             "wallet_path",
@@ -216,10 +216,10 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
         external_ip: get_config_value!(args, "external_ip", String, &settings.external_ip).clone(),
         api_port,
         quic_port: Some(quic_port), // TODO: surely there's a better way to do this
-        post_ip: get_config_value!(args, "post_ip", bool, &settings.post_ip),
-        mock: get_config_value!(args, "mock", bool, &settings.mock),
-        load_old_nodes: get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),
-        min_stake_threshold: get_config_value!(
+        post_ip: *get_config_value!(args, "post_ip", bool, &settings.post_ip),
+        mock: *get_config_value!(args, "mock", bool, &settings.mock),
+        load_old_nodes: *get_config_value!(args, "load_old_nodes", bool, &settings.load_old_nodes),
+        min_stake_threshold: *get_config_value!(
             args,
             "min_stake_threshold",
             u64,
@@ -251,7 +251,7 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
         ))?,
         subtensor: subtensor_config,
         neuron: NeuronConfig {
-            sync_frequency: get_config_value!(
+            sync_frequency: *get_config_value!(
                 args,
                 "neuron.sync_frequency",
                 u64,

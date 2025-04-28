@@ -81,7 +81,7 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
     let validator_config = ValidatorConfig {
         scores_state_file,
-        moving_average_alpha: get_config_value!(
+        moving_average_alpha: *get_config_value!(
             args,
             "neuron.moving_average_alpha",
             f64,
@@ -89,14 +89,17 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
         ),
         neuron_config,
         api_keys_db,
-        otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key),
-        otel_endpoint: get_config_value!(args, "otel_endpoint", String, &settings.otel_endpoint),
+        otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key)
+            .to_string(),
+        otel_endpoint: get_config_value!(args, "otel_endpoint", String, &settings.otel_endpoint)
+            .to_string(),
         otel_service_name: get_config_value!(
             args,
             "otel_service_name",
             String,
             &settings.otel_service_name
-        ),
+        )
+        .to_string(),
     };
 
     storb_validator::run(validator_config);
