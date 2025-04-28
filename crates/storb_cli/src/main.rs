@@ -118,7 +118,7 @@ pub fn main() -> Result<()> {
     } else {
         info!("OTEL API key provided; enabling telemetry");
         let mut otel_headers: HashMap<String, String> = HashMap::new();
-        otel_headers.insert("Otel-Api-Key".to_string(), otel_api_key.to_string());
+        otel_headers.insert("X-Api-Key".to_string(), otel_api_key.to_string());
         let url: String = otel_endpoint.to_owned() + "logs";
 
         let identifier_resource = Resource::builder()
