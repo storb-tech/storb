@@ -124,11 +124,7 @@ pub fn main() -> Result<()> {
         let identifier_resource = Resource::builder()
             .with_attribute(opentelemetry::KeyValue::new(
                 "service.name",
-                otel_service_name,
-            ))
-            .with_attribute(opentelemetry::KeyValue::new(
-                "service.version",
-                VERSION.to_string(),
+                otel_service_name + " - v" + VERSION,
             ))
             .build();
 
