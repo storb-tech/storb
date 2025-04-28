@@ -243,7 +243,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         });
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port.clone()));
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.neuron_config.api_port));
     info!("Validator HTTP server listening on {}", addr);
 
     axum::serve(
