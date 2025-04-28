@@ -84,7 +84,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         ))
         .build();
     let mut otel_headers: HashMap<String, String> = HashMap::new();
-    otel_headers.insert("Otel-Api-Key".to_string(), config.otel_api_key.clone());
+    otel_headers.insert("X-Api-Key".to_string(), config.otel_api_key.clone());
     let url = config.otel_endpoint.clone() + "metrics";
     let metrics_exporter = MetricExporter::builder()
         .with_http()
