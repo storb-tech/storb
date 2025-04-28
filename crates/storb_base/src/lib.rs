@@ -385,7 +385,7 @@ mod tests {
         let wallet_name = "test_wallet";
         let hotkey_name = "test_hotkey";
 
-        let wallet_path: PathBuf = temp_dir.join(wallet_name).join("hotkeys");
+        let wallet_path = temp_dir.join(wallet_name).join("hotkeys");
         create_dir_all(&wallet_path).unwrap();
 
         let hotkey_file = wallet_path.join(hotkey_name);
