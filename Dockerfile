@@ -24,7 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/storb /usr/local/bin/storb
 
-ENV RUST_LOG="info,libp2p=info"
+ENV RUST_LOG="info,libp2p=info,opentelemetry-http=info,opentelemetry-otlp=info,hyper_util=info"
+
 ENV NODE_TYPE=""
 
 VOLUME ["/app", "/root/.bittensor/wallets"]
