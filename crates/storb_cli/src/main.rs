@@ -126,6 +126,10 @@ pub fn main() -> Result<()> {
                 "service.name",
                 otel_service_name,
             ))
+            .with_attribute(opentelemetry::KeyValue::new(
+                "service.version",
+                VERSION.to_string(),
+            ))
             .build();
 
         let otel_exporters = LogExporter::builder()
