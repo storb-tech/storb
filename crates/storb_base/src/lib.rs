@@ -86,6 +86,10 @@ pub struct BaseNeuronConfig {
     pub wallet_name: String,
     pub hotkey_name: String,
 
+    pub otel_api_key: String,
+    pub otel_endpoint: String,
+    pub otel_service_name: String,
+
     pub mock: bool,
 
     pub load_old_nodes: bool,
@@ -381,7 +385,7 @@ mod tests {
         let wallet_name = "test_wallet";
         let hotkey_name = "test_hotkey";
 
-        let wallet_path = temp_dir.join(wallet_name).join("hotkeys");
+        let wallet_path: PathBuf = temp_dir.join(wallet_name).join("hotkeys");
         create_dir_all(&wallet_path).unwrap();
 
         let hotkey_file = wallet_path.join(hotkey_name);
@@ -428,6 +432,9 @@ mod tests {
                 no_bootstrap: true,
                 bootstrap_nodes: None,
             },
+            otel_api_key: "".to_string(),
+            otel_endpoint: "".to_string(),
+            otel_service_name: "".to_string(),
         }
     }
 

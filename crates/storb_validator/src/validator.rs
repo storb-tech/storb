@@ -87,6 +87,9 @@ pub struct ValidatorConfig {
     pub moving_average_alpha: f64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
+    pub otel_api_key: String,
+    pub otel_service_name: String,
+    pub otel_endpoint: String,
 }
 
 /// The Storb validator.
@@ -162,7 +165,6 @@ impl Validator {
 
             let vali_arc = Arc::new(self.clone());
             let (_, quic_addresses, quic_miner_uids) = get_id_quic_uids(vali_arc.clone()).await;
-
             let num_miners_to_query =
                 std::cmp::min(MAX_SYNTH_CHALLENGE_MINER_NUM, quic_miner_uids.len());
             let idxs_to_query: Vec<usize> =
@@ -478,10 +480,10 @@ impl Validator {
         neuron: BaseNeuron,
         scores: Array1<f64>,
         config: ValidatorConfig,
+        weights_counter: opentelemetry::metrics::Counter<f64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let normed_scores = normalize_min_max(&scores);
         debug!("weights: {:?}", normed_scores);
-
         // Convert normalized scores to Vec<NormalizedWeight>
         let weights: Vec<NormalizedWeight> = normed_scores
             .iter()
@@ -492,6 +494,12 @@ impl Validator {
             })
             .collect();
 
+        for weight in &weights {
+            weights_counter.add(
+                weight.weight as f64,
+                &[opentelemetry::KeyValue::new("miner_uid", weight.uid as i64)],
+            );
+        }
         let payload = set_weights_payload(config.neuron_config.netuid, weights, 1);
 
         neuron

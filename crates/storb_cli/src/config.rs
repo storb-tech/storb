@@ -126,11 +126,11 @@ impl Settings {
 macro_rules! get_config_value {
     ($args:expr, $arg_name:expr, $arg_type:ty, $settings:expr) => {
         match $args.try_get_one::<$arg_type>($arg_name) {
-            Ok(Some(value)) => value,
-            Ok(None) => &$settings,
+            Ok(Some(value)) => value.clone(),
+            Ok(None) => $settings.clone(),
             Err(err) => {
                 tracing::warn!("Failed to load CLI config, loading default settings. Error: {err}");
-                &$settings
+                $settings.clone()
             }
         }
     };
