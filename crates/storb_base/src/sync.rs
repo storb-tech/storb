@@ -72,10 +72,14 @@ impl Synchronizable for BaseNeuron {
     ) -> Result<Vec<u16>, Box<dyn StdError + Send + Sync + 'static>> {
         info!("Starting sync_metagraph");
         let start = std::time::Instant::now();
+        let subtensor = Self::get_subtensor_connection(
+            self.config.subtensor.insecure,
+            &self.config.subtensor.address,
+        )
+        .await?;
 
         info!("Getting latest block...");
-        let current_block = self
-            .subtensor
+        let current_block = subtensor
             .blocks()
             .at_latest()
             .await
@@ -83,7 +87,7 @@ impl Synchronizable for BaseNeuron {
         info!("Got latest block in {:?}", start.elapsed());
 
         info!("Getting runtime API...");
-        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
+        let runtime_api = subtensor.runtime_api().at(current_block.reference());
         let mut local_node_info = self.local_node_info.clone();
         // TODO: error out if cant access chain when calling above functions
 

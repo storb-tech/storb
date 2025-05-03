@@ -140,12 +140,11 @@ pub struct BaseNeuron {
     pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
     pub local_node_info: LocalNodeInfo,
-    pub subtensor: Subtensor,
 }
 
 // TODO: add a function for loading neuron state? (see TODO(420))
 impl BaseNeuron {
-    async fn get_subtensor_connection(
+    pub async fn get_subtensor_connection(
         insecure: bool,
         url: &String,
     ) -> Result<Subtensor, NeuronError> {
@@ -164,10 +163,6 @@ impl BaseNeuron {
         config: BaseNeuronConfig,
         mem_db: Option<Arc<MemoryDb>>,
     ) -> Result<Self, NeuronError> {
-        let subtensor =
-            Self::get_subtensor_connection(config.subtensor.insecure, &config.subtensor.address)
-                .await?;
-
         let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
@@ -270,7 +265,6 @@ impl BaseNeuron {
             neurons: neurons_arc,
             address_book: address_book.clone(),
             peer_node_uid: bimap::BiMap::new(),
-            subtensor,
             signer,
             local_node_info,
         };
@@ -287,8 +281,13 @@ impl BaseNeuron {
             info!("Serving axon as: {}", address);
 
             let payload = serve_axon_payload(config.netuid, address, AxonProtocol::Udp);
-            neuron
-                .subtensor
+
+            let subtensor = Self::get_subtensor_connection(
+                config.subtensor.insecure,
+                &config.subtensor.address,
+            )
+            .await?;
+            subtensor
                 .tx()
                 .sign_and_submit_default(&payload, &neuron.signer)
                 .await
@@ -325,8 +324,13 @@ impl BaseNeuron {
 
     /// Check whether the neuron is registered in the subnet or not.
     pub async fn check_registration(&self) -> Result<(), NeuronError> {
-        let current_block = self.subtensor.blocks().at_latest().await.unwrap();
-        let runtime_api = self.subtensor.runtime_api().at(current_block.reference());
+        let subtensor = Self::get_subtensor_connection(
+            self.config.subtensor.insecure,
+            &self.config.subtensor.address,
+        )
+        .await?;
+        let current_block = subtensor.blocks().at_latest().await.unwrap();
+        let runtime_api = subtensor.runtime_api().at(current_block.reference());
 
         // TODO: is there a nicer way to pass self to NeuronInfoRuntimeApi?
         let neurons_payload =
