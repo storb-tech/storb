@@ -502,8 +502,12 @@ impl Validator {
         }
         let payload = set_weights_payload(config.neuron_config.netuid, weights, 1);
 
-        neuron
-            .subtensor
+        let subtensor = BaseNeuron::get_subtensor_connection(
+            neuron.config.subtensor.insecure,
+            &neuron.config.subtensor.address,
+        )
+        .await?;
+        subtensor
             .tx()
             .sign_and_submit_default(&payload, &neuron.signer)
             .await?;
