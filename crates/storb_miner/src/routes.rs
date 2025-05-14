@@ -77,17 +77,11 @@ pub async fn handshake(
         .await
         .neuron
         .clone();
-    let validator_peer_id = miner_base_neuron
-        .peer_node_uid
-        .get_by_right(&payload.message.validator.uid)
-        .ok_or_else(|| {
-            error!("Could not get validator peer ID");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+
     let validator_info = miner_base_neuron
         .address_book
         .clone()
-        .get(validator_peer_id)
+        .get(&Some(payload.message.validator.uid.clone()))
         .ok_or_else(|| {
             error!("Error while getting validator info");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -161,20 +155,11 @@ pub async fn get_piece(
         .await
         .neuron
         .clone();
-    let validator_peer_id = miner_base_neuron
-        .peer_node_uid
-        .get_by_right(&payload.message.validator.uid)
-        .ok_or_else(|| {
-            error!("Could not get validator peer ID");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                bincode::serialize("An internal server error occurred").unwrap_or_default(),
-            )
-        })?;
+
     let validator_info = miner_base_neuron
         .address_book
         .clone()
-        .get(validator_peer_id)
+        .get(&Some(payload.message.validator.uid.clone()))
         .ok_or_else(|| {
             error!("Error while getting validator info");
             (
