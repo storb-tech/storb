@@ -216,16 +216,13 @@ impl Synchronizable for BaseNeuron {
 
             let node_info = NodeInfo {
                 neuron_info: neuron_info.clone(),
-                peer_id: remote_node_info.peer_id,
                 http_address: remote_node_info.http_address,
                 quic_address: remote_node_info.quic_address,
                 version: remote_node_info.version,
             };
 
-            if let Some(peer_id) = remote_node_info.peer_id {
-                self.address_book.clone().insert(peer_id, node_info);
-                self.peer_node_uid.insert(peer_id, neuron_info.uid);
-            }
+            self.address_book
+                .insert(Some(neuron_info.uid), node_info.clone());
         }
 
         info!("Completed sync_metagraph in {:?}", start.elapsed());
