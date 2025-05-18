@@ -8,7 +8,7 @@ use futures::stream::{self, StreamExt};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{CLIENT_TIMEOUT, SYNC_BUFFER_SIZE};
+use crate::constants::{INFO_REQ_TIMEOUT, SYNC_BUFFER_SIZE};
 use crate::{BaseNeuron, LocalNodeInfo, NodeInfo};
 
 #[derive(Debug, Error)]
@@ -30,14 +30,14 @@ impl Synchronizable for BaseNeuron {
     async fn get_remote_node_info(addr: reqwest::Url) -> Result<LocalNodeInfo, SyncError> {
         debug!("Requesting node info from: {}", addr.to_string());
         let req_client = reqwest::Client::builder()
-            .timeout(CLIENT_TIMEOUT)
+            .timeout(INFO_REQ_TIMEOUT)
             .build()
             .map_err(|e| {
                 error!("Failed to build HTTP client: {:?}", e);
                 SyncError::GetNodeInfoError(format!("Could not build HTTP client: {e}"))
             })?;
 
-        let response = tokio::time::timeout(CLIENT_TIMEOUT, req_client.get(addr.clone()).send())
+        let response = tokio::time::timeout(INFO_REQ_TIMEOUT, req_client.get(addr.clone()).send())
             .await
             .map_err(|e| {
                 error!("Request timed out for {}: {:?}", addr, e);

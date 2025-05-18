@@ -159,6 +159,18 @@ impl DownloadProcessor {
                     .bytes()
                     .await
                     .context("Failed to read response body")?;
+                debug!(
+                    "Raw body preview from provider {:?}: {:?}",
+                    provider,
+                    // show first few as readable bytes
+                    &body_bytes[..std::cmp::min(100, body_bytes.len())]
+                );
+                debug!(
+                    "Utf8 body preview from provider {:?}: {:?}",
+                    provider,
+                    // show first few as readable bytes
+                    String::from_utf8_lossy(&body_bytes[..std::cmp::min(100, body_bytes.len())])
+                );
                 let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
                     .context("Failed to deserialise piece response")?;
 

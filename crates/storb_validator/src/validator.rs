@@ -6,8 +6,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context};
-use base::constants::CLIENT_TIMEOUT;
-use base::piece::{encode_chunk, Piece};
+use base::constants::MIN_BANDWIDTH;
+use base::piece::{encode_chunk, piece_length, Piece};
 use base::swarm::models::ChunkDHTValue;
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
@@ -389,11 +389,13 @@ impl Validator {
 
                 // TODO: is cloning here the best way to do this?
                 let validator = self.clone();
+                let piece_size = piece_length(chunk_entry.chunk_size, None, None);
                 retrieval_futures.push(task::spawn(async move {
                     validator
                         .run_retrieval_challenge(
                             miner_uid,
                             piece_hash,
+                            piece_size,
                             miner_info_clone,
                             signer_clone,
                             validator_id,
@@ -594,6 +596,7 @@ impl Validator {
         &self,
         miner_uid: u16,
         piece_hash: [u8; 32],
+        piece_size: u64,
         miner_info: base::NodeInfo,
         signer: Signer,
         validator_id: u16,
@@ -650,37 +653,32 @@ impl Validator {
             }
         };
 
+        let min_bandwidth = MIN_BANDWIDTH as f64;
+        let timeout_duration = Duration::from_secs_f64(piece_size as f64 / min_bandwidth);
+
         let req_client = reqwest::Client::builder()
-            .timeout(CLIENT_TIMEOUT)
+            .timeout(timeout_duration)
             .build()
             .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))?;
+
+        // log timeout
+        debug!(
+            "Timeout duration for retrieval challenge: {} milliseconds",
+            timeout_duration.as_millis()
+        );
 
         let start_time = Instant::now();
 
         // Handle all possible failure points in the request chain
-        let response = match tokio::time::timeout(
-            Duration::from_secs_f64(SYNTH_CHALLENGE_TIMEOUT),
-            req_client.get(&url).send(),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
+        let response = match req_client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
                 return Ok(ChallengeResult {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
                     success: false,
-                    error: Some(format!("HTTP request failed: {}", e)),
-                })
-            }
-            Err(_) => {
-                return Ok(ChallengeResult {
-                    miner_uid,
-                    latency: SYNTH_CHALLENGE_TIMEOUT,
-                    bytes_len: 0,
-                    success: false,
-                    error: Some("Request timed out".to_string()),
+                    error: Some(format!("Request failed: {}", e)),
                 })
             }
         };
