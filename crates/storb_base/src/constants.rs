@@ -20,8 +20,8 @@ pub const DHT_QUERY_TIMEOUT: u64 = 3;
 /// Buffer size for the DHT database's MPSC channel.
 pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 
-/// Timeout for node HTTP requests.
-pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Timeout for HTTP requests to /info endpoint.
+pub const INFO_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Timeout params for upload requests
 pub const MIN_BANDWIDTH: u64 = 20 * 1024; // minimum "bandwidth"
