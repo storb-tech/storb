@@ -4,6 +4,11 @@
 CREATE INDEX IF NOT EXISTS idx_chunks_by_hash     ON chunks(chunk_hash);
 CREATE INDEX IF NOT EXISTS idx_pieces_by_hash     ON pieces(piece_hash);
 CREATE INDEX IF NOT EXISTS idx_pieces_validator   ON pieces(validator_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_pieces_by_chunk ON chunk_pieces(chunk_hash);
+CREATE INDEX IF NOT EXISTS idx_tracker_chunks_by_infohash ON tracker_chunks(infohash);
+CREATE INDEX IF NOT EXISTS idx_piece_repair_by_piece ON piece_repair_history(piece_hash);
+CREATE INDEX IF NOT EXISTS idx_chunk_challenge_by_chunk ON chunk_challenge_history(chunk_hash);
+
 
 -- infohashes
 CREATE TABLE IF NOT EXISTS infohashes (
