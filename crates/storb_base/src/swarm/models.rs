@@ -12,14 +12,12 @@ use crate::piece::PieceType;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkValue {
     pub chunk_hash: [u8; 32],
-    pub piece_hashes: Vec<[u8; 32]>,
     pub chunk_idx: u64,
     pub k: u64,
     pub m: u64,
     pub chunk_size: u64,
     pub padlen: u64,
     pub original_chunk_size: u64,
-    pub challenge_history: [u8; 32],
 }
 
 /// Represents a tracker entry
