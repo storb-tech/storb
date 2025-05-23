@@ -15,23 +15,21 @@ use memory_db::MemoryDb;
 use serde::ser::StdError;
 use subxt::utils::H256;
 use tokio::sync::RwLock;
-use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
 
-use crate::swarm::dht::StorbDHT;
 use crate::version::Version;
 
 pub mod constants;
 pub mod memory_db;
 pub mod piece;
 pub mod piece_hash;
-pub mod swarm;
 pub mod sync;
 pub mod utils;
 pub mod verification;
 pub mod version;
 
-pub type AddressBook = Arc<DashMap<PeerId, NodeInfo>>;
+// Node UID : NodeInfo
+pub type AddressBook = Arc<DashMap<Option<u16>, NodeInfo>>;
 
 const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
@@ -96,7 +94,6 @@ pub struct BaseNeuronConfig {
     pub min_stake_threshold: u64,
 
     pub db_file: PathBuf,
-    pub dht_dir: PathBuf,
     pub neurons_dir: PathBuf,
     pub pem_file: PathBuf,
 
@@ -110,7 +107,6 @@ pub struct BaseNeuronConfig {
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub neuron_info: NeuronInfoLite<AccountId>,
-    pub peer_id: Option<PeerId>,
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,
@@ -124,7 +120,6 @@ pub enum NodeKey {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalNodeInfo {
     pub uid: Option<u16>,
-    pub peer_id: Option<PeerId>,
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,
@@ -137,7 +132,6 @@ pub struct BaseNeuron {
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
     pub address_book: AddressBook,
     pub peer_node_uid: bimap::BiMap<PeerId, u16>,
-    pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
     pub local_node_info: LocalNodeInfo,
 }
@@ -177,37 +171,6 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
-        let mut ed_keypair = ed25519_dalek::SigningKey::from_bytes(&seed).to_keypair_bytes();
-        let libp2p_keypair =
-            match libp2p::identity::ed25519::Keypair::try_from_bytes(&mut ed_keypair) {
-                Ok(keypair) => keypair,
-                Err(_) => {
-                    return Err(NeuronError::ConfigError(
-                        "Failed to create ed25519 keypair from bytes".to_string(),
-                    ));
-                }
-            };
-
-        let mut bootstrap_nodes: Option<Vec<Multiaddr>> = None;
-
-        if !config.dht.no_bootstrap {
-            bootstrap_nodes = config.dht.bootstrap_nodes.clone();
-        }
-
-        // log no bootstrap and bootstrap nodes
-        if config.dht.no_bootstrap {
-            info!("Bootstrap is disabled, no bootstrap nodes will be used.");
-            // log bootstrap nodes
-            if let Some(nodes) = &bootstrap_nodes {
-                info!("Bootstrap nodes: {:?}", nodes);
-            }
-        }
-
-        if !config.dht.no_bootstrap && bootstrap_nodes.as_ref().map_or(0, |nodes| nodes.len()) == 0
-        {
-            panic!("Bootstrap is enabled, but no bootstrap nodes were provided. Please specify at least one bootstrap node in the settings.toml.");
-        }
-
         // try and load the neurons from disk - load state
         let neurons_arc =
             if let Ok(loaded_neurons) = Self::load_neurons_state_from_disk(&config.neurons_dir) {
@@ -220,29 +183,6 @@ impl BaseNeuron {
 
         let address_book = Arc::new(DashMap::new());
 
-        let (dht_og, command_sender) = StorbDHT::new(
-            config.dht_dir.clone(),
-            mem_db,
-            config.dht.port,
-            bootstrap_nodes,
-            libp2p_keypair.into(),
-            address_book.clone(),
-        )
-        .expect("Failed to create StorbDHT instance");
-
-        let dht = Arc::new(Mutex::new(dht_og));
-
-        let dht_locked = dht.lock().await;
-        let peer_id = *dht_locked.swarm.local_peer_id();
-        drop(dht_locked);
-        // Spawn a separate task for processing events
-        tokio::spawn(async move {
-            let mut dht_locked = dht.lock().await;
-            dht_locked.process_events().await;
-            drop(dht_locked);
-            tokio::task::yield_now().await;
-        });
-
         let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");
 
         let local_http_address = Some(multiaddr!(Ip4(external_ip), Tcp(config.api_port)));
@@ -253,7 +193,6 @@ impl BaseNeuron {
 
         let local_node_info = LocalNodeInfo {
             uid: None,
-            peer_id: Some(peer_id),
             http_address: local_http_address,
             quic_address: local_quic_address,
             version: config.version.clone(),
@@ -261,7 +200,6 @@ impl BaseNeuron {
 
         let neuron = BaseNeuron {
             config: config.clone(),
-            command_sender,
             neurons: neurons_arc,
             address_book: address_book.clone(),
             peer_node_uid: bimap::BiMap::new(),
@@ -305,12 +243,6 @@ impl BaseNeuron {
             info!("Successfully served axon!");
         }
 
-        info!(
-            "My peer address: /ip4/{:?}/udp/{:?}/quic-v1/p2p/{}",
-            external_ip,
-            config.dht.port,
-            peer_id.to_string()
-        );
         Ok(neuron)
     }
 

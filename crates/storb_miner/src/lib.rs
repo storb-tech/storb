@@ -8,7 +8,6 @@ use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::Extension;
 use base::piece_hash::PieceHash;
-use base::swarm;
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
 use dashmap::DashMap;
@@ -133,19 +132,8 @@ async fn main(config: MinerConfig) -> Result<()> {
         .unwrap();
     });
 
-    let dht_sender = state
-        .lock()
-        .await
-        .miner
-        .lock()
-        .await
-        .neuron
-        .command_sender
-        .clone();
-
     let quic_server = tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
-            let dht_sender_clone = dht_sender.clone();
             let object_store_clone = state.lock().await.object_store.lock().await.clone();
             let state_clone = state.clone();
 
@@ -201,19 +189,11 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 .await
                                 .neuron
                                 .clone();
-                            let validator_peer_id = if let Some(peer_id) = miner_base_neuron
-                                .peer_node_uid
-                                .get_by_right(&signature_payload.message.validator.uid)
-                            {
-                                peer_id
-                            } else {
-                                error!("Could not get validator peer ID");
-                                continue;
-                            };
+
                             let validator_info = if let Some(vali_info) = miner_base_neuron
                                 .address_book
                                 .clone()
-                                .get(validator_peer_id)
+                                .get(&Some(signature_payload.message.validator.uid))
                             {
                                 vali_info.clone()
                             } else {
@@ -275,24 +255,6 @@ async fn main(config: MinerConfig) -> Result<()> {
 
                             let hash_raw = blake3::hash(&piece);
                             let hash: String = hash_raw.to_hex().to_string();
-                            let piece_key = libp2p::kad::RecordKey::new(&hash_raw.as_bytes());
-
-                            // Add miner as a provider for the piece
-
-                            match swarm::dht::StorbDHT::start_providing_piece(
-                                dht_sender_clone.clone(),
-                                piece_key.clone(),
-                            )
-                            .await
-                            {
-                                Ok(_) => debug!(
-                                    "Added miner as provider for piece with key {:?}",
-                                    piece_key
-                                ),
-                                Err(e) => {
-                                    error!("Failed to add miner as provider for piece: {}", e)
-                                }
-                            }
 
                             if let Err(e) = send.write_all(hash_raw.as_bytes()).await {
                                 error!("Failed to send hash: {}", e);
