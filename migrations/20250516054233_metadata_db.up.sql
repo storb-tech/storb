@@ -5,8 +5,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_by_hash     ON chunks(chunk_hash);
 CREATE INDEX IF NOT EXISTS idx_pieces_by_hash     ON pieces(piece_hash);
 CREATE INDEX IF NOT EXISTS idx_pieces_validator   ON pieces(validator_id);
 
--- Trackers
-CREATE TABLE IF NOT EXISTS trackers (
+-- infohashes
+CREATE TABLE IF NOT EXISTS infohashes (
   infohash            BLOB      PRIMARY KEY,
   length              INTEGER   NOT NULL,
   chunk_size          INTEGER   NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 -- Chunk‑tracker mapping 
 CREATE TABLE IF NOT EXISTS tracker_chunks (
-  infohash   BLOB    NOT NULL  REFERENCES trackers(infohash),
+  infohash   BLOB    NOT NULL  REFERENCES infohashes(infohash),
   chunk_idx  INTEGER NOT NULL,
   chunk_hash BLOB    NOT NULL  REFERENCES chunks(chunk_hash),
   PRIMARY KEY (infohash, chunk_idx)
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS chunk_challenge_history (
   validator_id       INTEGER   NOT NULL,
   miners_challenged  TEXT      NOT NULL,
   miners_successful  TEXT      NOT NULL,
-  pieces_repair      BLOB      REFERENCES piece_repair_history(piece_repair_hash),
+  piece_repair_hash      BLOB      REFERENCES piece_repair_history(piece_repair_hash),
   timestamp          DATETIME  NOT NULL,
   signature          TEXT      NOT NULL
 );
