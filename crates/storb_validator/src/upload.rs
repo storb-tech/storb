@@ -7,7 +7,6 @@ use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length};
-use base::swarm::{self, dht::DhtCommand, models};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{BaseNeuron, NodeInfo};
 use chrono::Utc;
@@ -203,8 +202,6 @@ impl<'a> UploadProcessor<'a> {
         let miner_connections = self.miner_connections.clone();
         let validator = self.state.validator.clone();
         let validator_read_guard = validator.neuron.read().await;
-        let dht_sender = validator_read_guard.command_sender.clone();
-        let dht_sender_clone = dht_sender.clone();
 
         // Get MemoryDB from state
         let scoring_system = validator.scoring_system.clone();
@@ -221,7 +218,6 @@ impl<'a> UploadProcessor<'a> {
                 rx,
                 miner_uids,
                 miner_connections,
-                dht_sender_clone,
                 signer_clone,
             )
             .await
@@ -288,9 +284,7 @@ impl<'a> UploadProcessor<'a> {
             signature: tracker_sig,
         };
 
-        swarm::dht::StorbDHT::put_tracker_entry(dht_sender, tracker_key, tracker_dht_value)
-            .await
-            .expect("Failed to put tracker entry into DHT"); // TODO: handle error
+        // Put tracker entry into local database
         debug!("Inserted tracker entry with infohash {infohash}");
 
         Ok(infohash)
@@ -410,6 +404,7 @@ async fn consume_bytes(
                 let connection_idx = attempt * encoded.pieces.len() + piece_idx;
                 // NOTE: This will wrap around if there are more attempts than connections
                 // This is not ideal, but it will work for now
+                // Rishi: A round-robin approach might be suitable here
                 let miner_idx = connection_idx % miner_connections.len();
 
                 let piece = piece.clone();
@@ -433,18 +428,16 @@ async fn consume_bytes(
                     drop(suc_pieces_read);
 
                     let vali_guard = vali_clone.read().await;
-                    let peer_id = vali_guard
-                        .peer_node_uid
-                        .get_by_right(&miner_uid)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Peer ID not found for miner UID {}", miner_uid)
-                        })?;
+
                     let miner_info = vali_guard
                         .address_book
                         .clone()
-                        .get(peer_id)
+                        .get(&Some(miner_uid.clone()))
                         .ok_or_else(|| {
-                            anyhow::anyhow!("Miner info not found for peer ID {}", peer_id)
+                            anyhow::anyhow!(
+                                "Miner info not found for miner with UID: {}",
+                                &miner_uid
+                            )
                         })?
                         .clone();
                     drop(vali_guard);
@@ -515,14 +508,14 @@ async fn consume_bytes(
                         Ok(bytes) => bytes,
                         Err(err) => {
                             error!("Failed to serialize msg: {:?}", err);
-                            continue; // Skip to the next iteration on error
+                            continue;
                         }
                     };
                     let signature = sign_message(&signer, msg_bytes);
                     let piece_size = piece.data.len() as u64;
                     // Get netuid from validator state
                     let value = models::PieceDHTValue {
-                        piece_hash: piece_key.clone(),
+                        piece_hash,
                         validator_id,
                         chunk_idx,
                         piece_idx,
@@ -531,9 +524,7 @@ async fn consume_bytes(
                         signature,
                     };
 
-                    swarm::dht::StorbDHT::put_piece_entry(dht_sender.clone(), piece_key, value)
-                        .await
-                        .expect("Failed to put piece entry in DHT"); // TODO: handle error
+                    // Put piece entry into local database
                 }
                 Ok(Ok(None)) => {
                     // Upload was skipped or cancelled - no action needed
@@ -589,13 +580,7 @@ async fn consume_bytes(
             signature: chunk_sig,
         };
 
-        swarm::dht::StorbDHT::put_chunk_entry(
-            dht_sender.clone(),
-            chunk_key.clone(),
-            chunk_dht_value,
-        )
-        .await
-        .expect("Failed to put chunk entry into DHT"); // TODO: handle error
+        // Put chunk entry into local database
         debug!("Distributed pieces for chunk with hash {:?}", chunk_key);
 
         chunk_hashes.push(*chunk_hash.as_bytes());
