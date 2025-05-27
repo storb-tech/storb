@@ -87,7 +87,6 @@ pub struct Settings {
     pub min_stake_threshold: u64,
 
     pub db_file: String,
-    pub dht_dir: String,
     pub neurons_dir: String,
     pub pem_file: String,
 

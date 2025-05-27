@@ -116,12 +116,6 @@ pub fn common_args() -> Vec<Arg> {
             .help("Path to the database file")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("dht_dir")
-            .long("dht-dir")
-            .value_name("path")
-            .help("Path to the DHT RocksDB folder")
-            .action(ArgAction::Set)
-            .global(true),
         Arg::new("pem_file")
             .long("pem-file")
             .value_name("path")
@@ -230,12 +224,6 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             "db_file",
             String,
             &settings.db_file
-        ))?,
-        dht_dir: expanduser(get_config_value!(
-            args,
-            "dht_dir",
-            String,
-            &settings.dht_dir
         ))?,
         neurons_dir: expanduser(get_config_value!(
             args,

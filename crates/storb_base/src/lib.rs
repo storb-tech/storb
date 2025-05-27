@@ -19,10 +19,12 @@ use tracing::{error, info};
 
 use crate::version::Version;
 
+// TODO: rename this from swarm to something else
 pub mod constants;
 pub mod memory_db;
 pub mod piece;
 pub mod piece_hash;
+pub mod swarm;
 pub mod sync;
 pub mod utils;
 pub mod verification;
@@ -153,10 +155,7 @@ impl BaseNeuron {
             .map_err(|e| NeuronError::SubtensorError(e.to_string()))
     }
 
-    pub async fn new(
-        config: BaseNeuronConfig,
-        mem_db: Option<Arc<MemoryDb>>,
-    ) -> Result<Self, NeuronError> {
+    pub async fn new(config: BaseNeuronConfig) -> Result<Self, NeuronError> {
         let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
@@ -352,7 +351,6 @@ mod tests {
             load_old_nodes: false,
             min_stake_threshold: 0,
             db_file: "./test.db".into(),
-            dht_dir: "./test_dht".into(),
             neurons_dir: "./test_neurons".into(),
             pem_file: "cert.pem".into(),
             subtensor: SubtensorConfig {
