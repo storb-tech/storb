@@ -1,10 +1,39 @@
 use chrono::{DateTime, Utc};
 use crabtensor::sign::KeypairSignature;
+use rusqlite::{
+    types::{FromSql, FromSqlResult, ToSqlOutput},
+    ToSql,
+};
 use serde::{Deserialize, Serialize};
 use subxt::ext::codec::Compact;
-use thiserror::Error;
 
 use crate::piece::PieceType;
+
+// Newtype wrapper for DateTime<Utc>
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct SqlDateTime(pub DateTime<Utc>);
+
+impl FromSql for SqlDateTime {
+    // from datetime to sql datetime, to the nanosecond
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        let timestamp = i64::column_result(value)?;
+        Option::from(DateTime::<Utc>::from_timestamp_nanos(timestamp))
+            .map(SqlDateTime)
+            .ok_or(rusqlite::types::FromSqlError::InvalidType)
+    }
+}
+
+impl ToSql for SqlDateTime {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        let timestamp =
+            self.0
+                .timestamp_nanos_opt()
+                .ok_or(rusqlite::Error::ToSqlConversionFailure(
+                    "Failed to convert DateTime to i64".into(),
+                ))?;
+        Ok(ToSqlOutput::from(timestamp))
+    }
+}
 
 /// Represents a chunk entry
 ///
