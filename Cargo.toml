@@ -52,6 +52,8 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
 opentelemetry-otlp = "0.29.0"
 opentelemetry-appender-tracing = "0.29.1"
 quinn = "0.11.2"
+r2d2 = "0.8"
+r2d2_sqlite = "0.28"
 rand = "0.8.5"
 rcgen = { version = "0.13.2", features = ["crypto", "pem", "ring"] }
 reqwest = { version = "0.12.12", features = ["json"] }

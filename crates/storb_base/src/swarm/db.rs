@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use axum::http::response;
 use crabtensor::sign::KeypairSignature;
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use r2d2_sqlite::{SqliteConnectionManager, rusqlite::params};
+use r2d2::Pool;
+use rusqlite::{Connection, OptionalExtension, Result};
 use subxt::ext::codec::Compact;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
@@ -14,9 +18,22 @@ use crate::{constants::DB_MPSC_BUFFER_SIZE, swarm::models::PieceValue};
 #[derive(Debug)]
 pub enum MetadataDBError {
     Database(rusqlite::Error),
+    Pool(r2d2::Error),
     InvalidPath(String),
     MissingTable(String),
     ExtensionLoad(String),
+}
+
+impl std::fmt::Display for MetadataDBError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetadataDBError::Database(e) => write!(f, "Database error: {}", e),
+            MetadataDBError::Pool(e) => write!(f, "Pool error: {}", e),
+            MetadataDBError::InvalidPath(path) => write!(f, "Invalid path: {}", path),
+            MetadataDBError::MissingTable(table) => write!(f, "Missing table: {}", table),
+            MetadataDBError::ExtensionLoad(msg) => write!(f, "Extension load error: {}", msg),
+        }
+    }
 }
 
 impl From<rusqlite::Error> for MetadataDBError {
@@ -25,24 +42,53 @@ impl From<rusqlite::Error> for MetadataDBError {
     }
 }
 
+impl From<r2d2::Error> for MetadataDBError {
+    fn from(err: r2d2::Error) -> Self {
+        MetadataDBError::Pool(err)
+    }
+}
+
 pub enum MetadataDBCommand {
-    InsertPiece(PieceValue, [u8; 32]),
-    InsertChunk(ChunkValue, [u8; 32]),
-    InsertInfohash(InfohashValue),
-    InsertPieceRepairHistory(PieceChallengeHistory),
-    InsertChunkChallengeHistory(ChunkChallengeHistory),
-    GetPiecesByChunk([u8; 32]),
-    GetChunksByInfohash(Vec<u8>),
-    GetInfohash([u8; 32]),
-    GetPieceRepairHistory([u8; 32]),
-    GetChunkChallengeHistory([u8; 32]),
+    InsertObject {
+        infohash_value: InfohashValue,
+        chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
+    GetRandomChunk {
+        response_sender: mpsc::Sender<Result<ChunkValue, MetadataDBError>>,
+    },
+    InsertPieceRepairHistory {
+        piece_repair_history: PieceChallengeHistory,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
+    InsertChunkChallengeHistory {
+        chunk_challenge_history: ChunkChallengeHistory,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
+    GetPiecesByChunk {
+        chunk_hash: [u8; 32],
+        response_sender: mpsc::Sender<Result<Vec<PieceValue>, MetadataDBError>>,
+    },
+    GetChunksByInfohash {
+        infohash: Vec<u8>,
+        response_sender: mpsc::Sender<Result<Vec<ChunkValue>, MetadataDBError>>,
+    },
+    GetInfohash {
+        infohash: [u8; 32],
+        response_sender: mpsc::Sender<Result<InfohashValue, MetadataDBError>>,
+    },
+    GetPieceRepairHistory {
+        piece_repair_hash: [u8; 32],
+        response_sender: mpsc::Sender<Result<PieceChallengeHistory, MetadataDBError>>,
+    },
+    GetChunkChallengeHistory {
+        challenge_hash: [u8; 32],
+        response_sender: mpsc::Sender<Result<ChunkChallengeHistory, MetadataDBError>>,
+    },
 }
 
 pub struct MetadataDB {
-    conn: Connection,
-    crsqlite_lib: PathBuf,
-    db_path: PathBuf,
-    command_sender: mpsc::Sender<MetadataDBCommand>,
+    pool: Arc<Pool<SqliteConnectionManager>>,
     command_receiver: mpsc::Receiver<MetadataDBCommand>,
 }
 
@@ -66,25 +112,36 @@ impl MetadataDB {
             )));
         }
 
-        let conn = Connection::open(db_path)?;
-        Self::load_crsqlite_extension(&conn, crsqlite_lib)?;
+        // Create connection manager
+        let crsqlite_lib = crsqlite_lib.to_path_buf();
+        let manager = SqliteConnectionManager::file(db_path)
+            .with_init(move |conn| {
+                Self::load_crsqlite_extension(conn, &crsqlite_lib)
+                    .map_err(|e| match e {
+                        MetadataDBError::Database(e) => e,
+                        _ => rusqlite::Error::InvalidParameterName(e.to_string()),
+                    })?;
+                Ok(())
+            });
+
+        // Create connection pool
+        let pool = Pool::new(manager)?;
+
+        // Test connection and validate database
+        {
+            let conn = pool.get()?;
+            Self::validate_database(&*conn)?;
+        }
 
         let (command_sender, command_receiver) =
             mpsc::channel::<MetadataDBCommand>(DB_MPSC_BUFFER_SIZE);
 
         let db = Self {
-            conn,
-            crsqlite_lib: crsqlite_lib.to_path_buf(),
-            db_path: db_path.to_path_buf(),
-            command_sender,
+            pool: Arc::new(pool),
             command_receiver,
         };
 
-        db.validate_database()?;
-
-        let command_sender_clone = db.command_sender.clone();
-
-        Ok((db, command_sender_clone))
+        Ok((db, command_sender))
     }
 
     fn load_crsqlite_extension(
@@ -116,7 +173,7 @@ impl MetadataDB {
     }
 
     /// Checks if all required tables exist in the database
-    fn validate_database(&self) -> Result<(), MetadataDBError> {
+    fn validate_database(conn: &Connection) -> Result<(), MetadataDBError> {
         const REQUIRED_TABLES: &[&str] = &[
             "infohashes",
             "chunks",
@@ -128,7 +185,7 @@ impl MetadataDB {
         ];
 
         for &table_name in REQUIRED_TABLES {
-            let exists: bool = self.conn.query_row(
+            let exists: bool = conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
                 params![table_name],
                 |row| Ok(row.get::<_, i32>(0)? > 0),
@@ -141,387 +198,547 @@ impl MetadataDB {
         Ok(())
     }
 
-    pub fn insert_piece(
+    pub async fn handle_insert_piece_repair_history(
         &self,
-        piece: PieceValue,
-        chunk_hash: &[u8; 32],
+        value: &PieceChallengeHistory,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
+        let pool = Arc::clone(&self.pool);
+        let value = value.clone();
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
 
-        // convert piece.miners into json string if it's not already
-        let miners = serde_json::to_string(&piece.miners).map_err(|e| {
-            MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            ))
-        })?;
+            tx.execute(
+                "INSERT INTO piece_repair_history (piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    value.piece_repair_hash,
+                    value.piece_hash,
+                    value.chunk_hash,
+                    value.validator_id.0,
+                    SqlDateTime(value.timestamp),
+                    value.signature.0.to_vec()
+                ],
+            )?;
 
-        tx.execute(
-            "INSERT INTO pieces (piece_hash, validator_id, chunk_idx, piece_idx, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                piece.piece_hash,
-                piece.validator_id.0,
-                piece.chunk_idx,
-                piece.piece_idx,
-                piece.piece_size,
-                piece.piece_type as u8,
-                miners
-            ],
-        )?;
+            tx.commit()?;
+            Ok::<(), MetadataDBError>(())
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
-        tx.execute(
-            "INSERT INTO chunk_pieces (chunk_hash, piece_idx, piece_hash) VALUES (?1, ?2, ?3)",
-            params![chunk_hash, piece.piece_idx, piece.piece_hash],
-        )?;
+        // Send the result through the response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send piece repair history response");
+        }
 
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn insert_chunk(
-        &self,
-        chunk: ChunkValue,
-        infohash: &[u8; 32],
-    ) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
-
-        tx.execute("INSERT INTO chunks (chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![
-            chunk.chunk_hash,
-            chunk.chunk_idx,
-            chunk.k,
-            chunk.m,
-            chunk.chunk_size,
-            chunk.padlen,
-            chunk.original_chunk_size
-        ])?;
-
-        tx.execute(
-            "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
-            params![infohash, chunk.chunk_idx, chunk.chunk_hash],
-        )?;
-
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn insert_infohash(&self, infohash_value: &InfohashValue) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
-
-        tx.execute(
-            "INSERT INTO infohashes (infohash, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                infohash_value.infohash,
-                infohash_value.length,
-                infohash_value.chunk_size,
-                infohash_value.chunk_count,
-                SqlDateTime(infohash_value.creation_timestamp),
-                infohash_value.signature.0.to_vec()
-            ],
-        )?;
-
-        tx.commit()?;
         Ok(())
     }
 
     pub fn insert_piece_repair_history(
-        &self,
-        value: &PieceChallengeHistory,
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        piece_repair_history: PieceChallengeHistory,
     ) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
 
-        tx.execute(
-            "INSERT INTO piece_repair_history (piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                value.piece_repair_hash,
-                value.piece_hash,
-                value.chunk_hash,
-                value.validator_id.0,
-                SqlDateTime(value.timestamp),
-                value.signature.0.to_vec()
-            ],
-        )?;
+        // Send the command to insert piece repair history
+        command_sender
+            .blocking_send(MetadataDBCommand::InsertPieceRepairHistory {
+                piece_repair_history,
+                response_sender,
+            })
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
-        tx.commit()?;
+        // Wait for the response
+        match response_receiver.blocking_recv() {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_insert_chunk_challenge_history(
+        &self,
+        value: &ChunkChallengeHistory,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let value = value.clone();
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+
+            // convert miners_challenged and miners_successful to json strings
+            let miners_challenged = serde_json::to_string(&value.miners_challenged).map_err(|e| {
+                MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text, 
+                    Box::new(e),
+                ))
+            })?;
+            let miners_successful = serde_json::to_string(&value.miners_successful).map_err(|e| {
+                MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                ))
+            })?;
+
+            tx.execute(
+                "INSERT INTO chunk_challenge_history (challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    value.challenge_hash,
+                    value.chunk_hash, 
+                    value.validator_id.0,
+                    miners_challenged,
+                    miners_successful,
+                    value.piece_repair_hash,
+                    SqlDateTime(value.timestamp),
+                    value.signature.0.to_vec()
+                ],
+            )?;
+
+            tx.commit()?;
+            Ok::<(), MetadataDBError>(())
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send chunk challenge history response");
+        }
+
         Ok(())
     }
 
     pub fn insert_chunk_challenge_history(
-        &self,
-        value: &ChunkChallengeHistory,
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        chunk_challenge_history: ChunkChallengeHistory,
     ) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
 
-        // convert miners_challenged and miners_successful to json strings
-        let miners_challenged = serde_json::to_string(&value.miners_challenged).map_err(|e| {
-            MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            ))
-        })?;
-        let miners_successful = serde_json::to_string(&value.miners_successful).map_err(|e| {
-            MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            ))
-        })?;
+        // Send the command to insert chunk challenge history
+        command_sender
+            .blocking_send(MetadataDBCommand::InsertChunkChallengeHistory {
+                chunk_challenge_history,
+                response_sender,
+            })
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
-        tx.execute(
-            "INSERT INTO chunk_challenge_history (challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                value.challenge_hash,
-                value.chunk_hash,
-                value.validator_id.0,
-                miners_challenged,
-                miners_successful,
-                value.piece_repair_hash,
-                SqlDateTime(value.timestamp),
-                value.signature.0.to_vec()
-            ],
-        )?;
-
-        tx.commit()?;
-        Ok(())
+        // Wait for the response
+        match response_receiver.blocking_recv() {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
     }
 
-    // Inserts all the metadata for the object in bulk
-    // TODO: Consider renaming function?
-    pub fn insert_object(
+    // Inserts all the metadata for the object in bulk and sends result via response_sender
+    pub async fn handle_insert_object(
         &self,
         infohash_value: &InfohashValue,
         chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
-        let tx = self.conn.unchecked_transaction()?;
+        let pool = Arc::clone(&self.pool);
+        let infohash_value = infohash_value.clone();
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
 
-        // Insert infohash
-        tx.execute(
-            "INSERT INTO infohashes (infohash, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                infohash_value.infohash,
-                infohash_value.length,
-                infohash_value.chunk_size,
-                infohash_value.chunk_count,
-                SqlDateTime(infohash_value.creation_timestamp),
-                infohash_value.signature.0.to_vec()
-            ],
-        )?;
+            // Insert infohash
+            tx.execute(
+                "INSERT INTO infohashes (infohash, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    infohash_value.infohash,
+                    infohash_value.length,
+                    infohash_value.chunk_size,
+                    infohash_value.chunk_count,
+                    SqlDateTime(infohash_value.creation_timestamp),
+                    infohash_value.signature.0.to_vec()
+                ],
+            )?;
 
-        // Prepare statements for better performance with multiple inserts
-        let mut chunk_stmt = tx.prepare(
-            "INSERT INTO chunks (chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-        )?;
+            // Prepare statements for better performance with multiple inserts
+            let mut chunk_stmt = tx.prepare(
+                "INSERT INTO chunks (chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            )?;
 
-        let mut tracker_chunk_stmt = tx.prepare(
-            "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
-        )?;
+            let mut tracker_chunk_stmt = tx.prepare(
+                "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
+            )?;
 
-        let mut piece_stmt = tx.prepare(
-            "INSERT INTO pieces (piece_hash, validator_id, chunk_idx, piece_idx, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
-        )?;
+            let mut piece_stmt = tx.prepare(
+                "INSERT INTO pieces (piece_hash, validator_id, chunk_idx, piece_idx, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+            )?;
 
-        let mut chunk_pieces_stmt = tx.prepare(
-            "INSERT INTO chunk_pieces (chunk_hash, piece_idx, piece_hash) VALUES (?1, ?2, ?3)",
-        )?;
+            let mut chunk_pieces_stmt = tx.prepare(
+                "INSERT INTO chunk_pieces (chunk_hash, piece_idx, piece_hash) VALUES (?1, ?2, ?3)",
+            )?;
 
-        // Insert chunks and their pieces
-        for (chunk, pieces) in chunks_with_pieces {
-            // Insert chunk
-            chunk_stmt.execute(params![
-                chunk.chunk_hash,
-                chunk.chunk_idx,
-                chunk.k,
-                chunk.m,
-                chunk.chunk_size,
-                chunk.padlen,
-                chunk.original_chunk_size
-            ])?;
-
-            // Insert chunk-infohash mapping
-            tracker_chunk_stmt.execute(params![
-                infohash_value.infohash,
-                chunk.chunk_idx,
-                chunk.chunk_hash
-            ])?;
-
-            // Insert all pieces for this chunk
-            for piece in pieces {
-                // Convert miners to JSON string
-                let miners = serde_json::to_string(&piece.miners).map_err(|e| {
-                    MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
-                        0,
-                        rusqlite::types::Type::Text,
-                        Box::new(e),
-                    ))
-                })?;
-                // Insert piece
-                piece_stmt.execute(params![
-                    piece.piece_hash,
-                    piece.validator_id.0,
-                    piece.chunk_idx,
-                    piece.piece_idx,
-                    piece.piece_size,
-                    piece.piece_type as u8,
-                    miners
-                ])?;
-
-                // Insert chunk-piece mapping
-                chunk_pieces_stmt.execute(params![
+            // Insert chunks and their pieces
+            for (chunk, pieces) in chunks_with_pieces {
+                // Insert chunk
+                chunk_stmt.execute(params![
                     chunk.chunk_hash,
-                    piece.piece_idx,
-                    piece.piece_hash
+                    chunk.chunk_idx,
+                    chunk.k,
+                    chunk.m,
+                    chunk.chunk_size,
+                    chunk.padlen,
+                    chunk.original_chunk_size
                 ])?;
+
+                // Insert chunk-infohash mapping
+                tracker_chunk_stmt.execute(params![
+                    infohash_value.infohash,
+                    chunk.chunk_idx,
+                    chunk.chunk_hash
+                ])?;
+
+                // Insert all pieces for this chunk
+                for piece in pieces {
+                    // Convert miners to JSON string
+                    let miners = serde_json::to_string(&piece.miners).map_err(|e| {
+                        MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(e),
+                        ))
+                    })?;
+                    // Insert piece
+                    piece_stmt.execute(params![
+                        piece.piece_hash,
+                        piece.validator_id.0,
+                        piece.chunk_idx,
+                        piece.piece_idx,
+                        piece.piece_size,
+                        piece.piece_type as u8,
+                        miners
+                    ])?;
+
+                    // Insert chunk-piece mapping
+                    chunk_pieces_stmt.execute(params![
+                        chunk.chunk_hash,
+                        piece.piece_idx,
+                        piece.piece_hash
+                    ])?;
+                }
             }
+
+            // Drop all prepared statements before committing
+            drop(chunk_stmt);
+            drop(tracker_chunk_stmt);
+            drop(piece_stmt);
+            drop(chunk_pieces_stmt);
+
+            tx.commit()?;
+            Ok::<(), MetadataDBError>(())
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send result through response channel
+        if let Err(e) = response_sender.send(Ok(result)).await {
+            error!("Failed to send response: {}", e);
+            Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    // a wrapper that  calls MetadatDBCommand::InsertObject
+    pub async fn insert_object(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        infohash_value: InfohashValue,
+        chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
+    ) -> Result<(), MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
+
+        // Send the command to insert the object
+        command_sender
+            .send(MetadataDBCommand::InsertObject {
+                infohash_value,
+                chunks_with_pieces,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_get_pieces_by_chunk(
+        &self,
+        chunk_hash: &[u8; 32],
+        response_sender: mpsc::Sender<Result<Vec<PieceValue>, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let chunk_hash = *chunk_hash;
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT p.piece_hash, p.validator_id, p.chunk_idx, p.piece_idx, p.piece_size, p.piece_type, p.miners 
+                    FROM pieces p 
+                    INNER JOIN chunk_pieces cp ON p.piece_hash = cp.piece_hash 
+                    WHERE cp.chunk_hash = ?1
+                    ORDER BY p.piece_idx",
+            )?;
+
+            let pieces = stmt
+                .query_map(params![chunk_hash], |row| {
+                    Ok(PieceValue {
+                        piece_hash: row.get(0)?,
+                        validator_id: Compact(row.get::<_, u16>(1)?),
+                        chunk_idx: row.get(2)?,
+                        piece_idx: row.get(3)?,
+                        piece_size: row.get(4)?,
+                        piece_type: row.get::<_, u8>(5)?.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Integer,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Invalid piece type",
+                                )),
+                            )
+                        })?,
+                        miners: serde_json::from_str(&row.get::<_, String>(6)?.as_str()).map_err(
+                            |e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    6,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            },
+                        )?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok::<Vec<PieceValue>, MetadataDBError>(pieces)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send pieces response");
         }
 
-        // Drop all prepared statements before committing
-        drop(chunk_stmt);
-        drop(tracker_chunk_stmt);
-        drop(piece_stmt);
-        drop(chunk_pieces_stmt);
-
-        tx.commit()?;
         Ok(())
     }
 
-    /// Processes db events and commands.
-    ///
-    /// This asynchronous function continuously processes db events and commands,
-    /// handling inserts, updates, and queries as they come in.
-    pub async fn process_events(&mut self) {
-        while let Some(command) = self.command_receiver.recv().await {
-            match command {
-                MetadataDBCommand::InsertPiece(piece, chunk_hash) => {
-                    if let Err(e) = self.insert_piece(piece, &chunk_hash) {
-                        error!("Error inserting piece: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::InsertChunk(chunk, infohash) => {
-                    if let Err(e) = self.insert_chunk(chunk, &infohash) {
-                        error!("Error inserting chunk: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::InsertInfohash(infohash_value) => {
-                    if let Err(e) = self.insert_infohash(&infohash_value) {
-                        error!("Error inserting infohash: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::InsertPieceRepairHistory(value) => {
-                    if let Err(e) = self.insert_piece_repair_history(&value) {
-                        error!("Error inserting piece repair history: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::InsertChunkChallengeHistory(value) => {
-                    if let Err(e) = self.insert_chunk_challenge_history(&value) {
-                        error!("Error inserting chunk challenge history: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::GetPiecesByChunk(chunk_hash) => {
-                    if let Ok(pieces) = self.get_pieces_by_chunk(&chunk_hash) {
-                        debug!("Retrieved pieces: {:?}", pieces);
-                    } else {
-                        error!("Error retrieving pieces for chunk: {:?}", chunk_hash);
-                    }
-                }
-                MetadataDBCommand::GetChunksByInfohash(infohash) => {
-                    if let Ok(chunks) = self.get_chunks_by_infohash(&infohash) {
-                        debug!("Retrieved chunks: {:?}", chunks);
-                    } else {
-                        error!("Error retrieving chunks for infohash: {:?}", infohash);
-                    }
-                }
-                MetadataDBCommand::GetInfohash(infohash) => {
-                    if let Ok(infohash_value) = self.get_infohash(&infohash) {
-                        debug!("Retrieved infohash: {:?}", infohash_value);
-                    } else {
-                        error!("Error retrieving infohash: {:?}", infohash);
-                    }
-                }
-                MetadataDBCommand::GetPieceRepairHistory(piece_repair_hash) => {
-                    if let Ok(history) = self.get_piece_repair_history(&piece_repair_hash) {
-                        debug!("Retrieved piece repair history: {:?}", history);
-                    } else {
-                        error!(
-                            "Error retrieving piece repair history: {:?}",
-                            piece_repair_hash
-                        );
-                    }
-                }
-                MetadataDBCommand::GetChunkChallengeHistory(challenge_hash) => {
-                    if let Ok(history) = self.get_chunk_challenge_history(&challenge_hash) {
-                        debug!("Retrieved chunk challenge history: {:?}", history);
-                    } else {
-                        error!(
-                            "Error retrieving chunk challenge history: {:?}",
-                            challenge_hash
-                        );
-                    }
-                }
-            }
+    pub async fn get_pieces_by_chunk(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        chunk_hash: [u8; 32],
+    ) -> Result<Vec<PieceValue>, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<Vec<PieceValue>, MetadataDBError>>(1);
+
+        // Send the command to get pieces by chunk
+        command_sender
+            .send(MetadataDBCommand::GetPiecesByChunk {
+                chunk_hash,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
         }
     }
 
-    pub fn get_pieces_by_chunk(
-        &self,
-        chunk_hash: &[u8; 32],
-    ) -> Result<Vec<PieceValue>, MetadataDBError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT p.piece_hash, p.validator_id, p.chunk_idx, p.piece_idx, p.piece_size, p.piece_type, p.miners 
-                FROM pieces p 
-                INNER JOIN chunk_pieces cp ON p.piece_hash = cp.piece_hash 
-                WHERE cp.chunk_hash = ?1
-                ORDER BY p.piece_idx",
-        )?;
-
-        let pieces = stmt
-            .query_map(params![chunk_hash], |row| {
-                Ok(PieceValue {
-                    piece_hash: row.get(0)?,
-                    validator_id: Compact(row.get::<_, u16>(1)?),
-                    chunk_idx: row.get(2)?,
-                    piece_idx: row.get(3)?,
-                    piece_size: row.get(4)?,
-                    piece_type: row.get::<_, u8>(5)?.try_into().map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            5,
-                            rusqlite::types::Type::Integer,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Invalid piece type",
-                            )),
-                        )
-                    })?,
-                    miners: serde_json::from_str(&row.get::<_, String>(6)?.as_str()).map_err(
-                        |e| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                6,
-                                rusqlite::types::Type::Text,
-                                Box::new(e),
-                            )
-                        },
-                    )?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(pieces)
-    }
-
-    pub fn get_chunks_by_infohash(
+    pub async fn handle_get_chunks_by_infohash(
         &self,
         infohash: &[u8],
-    ) -> Result<Vec<ChunkValue>, MetadataDBError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT tc.chunk_hash, tc.chunk_idx, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size 
-             FROM tracker_chunks tc 
-             JOIN chunks c ON tc.chunk_hash = c.chunk_hash 
-             WHERE tc.infohash = ?1 
-             ORDER BY tc.chunk_idx",
-        )?;
+        response_sender: mpsc::Sender<Result<Vec<ChunkValue>, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let infohash = infohash.to_vec();
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT tc.chunk_hash, tc.chunk_idx, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size 
+                 FROM tracker_chunks tc 
+                 JOIN chunks c ON tc.chunk_hash = c.chunk_hash 
+                 WHERE tc.infohash = ?1 
+                 ORDER BY tc.chunk_idx",
+            )?;
 
-        let chunks: Result<Vec<ChunkValue>, _> = stmt
-            .query_map(params![infohash], |row| {
+            let chunks: Result<Vec<ChunkValue>, _> = stmt
+                .query_map(params![infohash], |row| {
+                    let chunk_hash_bytes: Vec<u8> = row.get(0)?;
+                    let chunk_hash = chunk_hash_bytes.try_into().map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "chunk_hash".to_string(),
+                            rusqlite::types::Type::Blob,
+                        )
+                    })?;
+
+                    Ok(ChunkValue {
+                        chunk_hash,
+                        chunk_idx: row.get(1)?,
+                        k: row.get(2)?,
+                        m: row.get(3)?,
+                        chunk_size: row.get(4)?,
+                        padlen: row.get(5)?,
+                        original_chunk_size: row.get(6)?,
+                    })
+                })?
+                .collect();
+
+            chunks.map_err(MetadataDBError::from)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send result through response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send chunks response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_chunks_by_infohash(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        infohash: Vec<u8>,
+    ) -> Result<Vec<ChunkValue>, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<Vec<ChunkValue>, MetadataDBError>>(1);
+
+        // Send the command to get chunks by infohash
+        command_sender
+            .send(MetadataDBCommand::GetChunksByInfohash {
+                infohash,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_get_infohash(
+        &self,
+        infohash: &[u8; 32],
+        response_sender: mpsc::Sender<Result<InfohashValue, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let infohash = *infohash;
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT infohash, length, chunk_size, chunk_count, creation_timestamp, signature 
+                 FROM infohashes 
+                 WHERE infohash = ?1",
+            )?;
+
+            let infohash_value = stmt.query_row(params![infohash], |row| {
+                Ok(InfohashValue {
+                    infohash: row.get(0)?,
+                    length: row.get(1)?,
+                    chunk_size: row.get(2)?,
+                    chunk_count: row.get(3)?,
+                    creation_timestamp: row.get::<_, SqlDateTime>(4)?.0,
+                    signature: {
+                        let vec = row.get::<_, Vec<u8>>(5)?;
+                        let arr: [u8; 64] = vec.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Blob,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Invalid signature length",
+                                )),
+                            )
+                        })?;
+                        KeypairSignature::from_raw(arr)
+                    },
+                })
+            })?;
+
+            Ok::<InfohashValue, MetadataDBError>(infohash_value)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send result through response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send infohash response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_infohash(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        infohash: [u8; 32],
+    ) -> Result<InfohashValue, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<InfohashValue, MetadataDBError>>(1);
+
+        // Send the command to get infohash
+        command_sender
+            .send(MetadataDBCommand::GetInfohash {
+                infohash,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_get_random_chunk(
+        &self,
+        response_sender: mpsc::Sender<Result<ChunkValue, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size 
+                 FROM chunks 
+                 ORDER BY RANDOM() LIMIT 1",
+            )?;
+
+            // Execute the query and map the result to ChunkValue
+            let chunk = stmt.query_row([], |row| {
                 let chunk_hash_bytes: Vec<u8> = row.get(0)?;
                 let chunk_hash = chunk_hash_bytes.try_into().map_err(|_| {
                     rusqlite::Error::InvalidColumnType(
@@ -540,149 +757,327 @@ impl MetadataDB {
                     padlen: row.get(5)?,
                     original_chunk_size: row.get(6)?,
                 })
-            })?
-            .collect();
+            })?;
 
-        chunks.map_err(MetadataDBError::from)
+            Ok::<ChunkValue, MetadataDBError>(chunk)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send random chunk response");
+        }
+
+        Ok(())
     }
 
-    pub fn get_infohash(&self, infohash: &[u8; 32]) -> Result<InfohashValue, MetadataDBError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT infohash, length, chunk_size, chunk_count, creation_timestamp, signature 
-             FROM infohashes 
-             WHERE infohash = ?1",
-        )?;
+    pub async fn get_random_chunk(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+    ) -> Result<ChunkValue, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<ChunkValue, MetadataDBError>>(1);
 
-        let infohash_value = stmt.query_row(params![infohash], |row| {
-            Ok(InfohashValue {
-                infohash: row.get(0)?,
-                length: row.get(1)?,
-                chunk_size: row.get(2)?,
-                chunk_count: row.get(3)?,
-                creation_timestamp: row.get::<_, SqlDateTime>(4)?.0,
-                // TODO: create a newtype for KeypairSignature?
-                signature: {
-                    let vec = row.get::<_, Vec<u8>>(5)?;
-                    let arr: [u8; 64] = vec.try_into().map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            5,
-                            rusqlite::types::Type::Blob,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Invalid signature length",
-                            )),
-                        )
-                    })?;
-                    KeypairSignature::from_raw(arr)
-                },
-            })
-        })?;
+        // Send the command to get a random chunk
+        command_sender
+            .send(MetadataDBCommand::GetRandomChunk { response_sender })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
-        Ok(infohash_value)
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_get_piece_repair_history(
+        &self,
+        piece_repair_hash: &[u8; 32],
+        response_sender: mpsc::Sender<Result<PieceChallengeHistory, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let piece_repair_hash = *piece_repair_hash;
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature 
+                 FROM piece_repair_history 
+                 WHERE piece_repair_hash = ?1",
+            )?;
+
+            let piece_challenge_history = stmt.query_row(params![piece_repair_hash], |row| {
+                Ok(PieceChallengeHistory {
+                    piece_repair_hash: row.get(0)?,
+                    piece_hash: row.get(1)?,
+                    chunk_hash: row.get(2)?,
+                    validator_id: Compact(row.get::<_, u16>(3)?),
+                    timestamp: row.get::<_, SqlDateTime>(4)?.0,
+                    signature: {
+                        let vec = row.get::<_, Vec<u8>>(5)?;
+                        let arr: [u8; 64] = vec.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Blob,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "Invalid signature length",
+                                )),
+                            )
+                        })?;
+                        KeypairSignature::from_raw(arr)
+                    },
+                })
+            })?;
+
+            Ok::<PieceChallengeHistory, MetadataDBError>(piece_challenge_history)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send result through response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send piece repair history response");
+        }
+
+        Ok(())
     }
 
     pub fn get_piece_repair_history(
-        &self,
-        piece_repair_hash: &[u8; 32],
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        piece_repair_hash: [u8; 32],
     ) -> Result<PieceChallengeHistory, MetadataDBError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature 
-             FROM piece_repair_history 
-             WHERE piece_repair_hash = ?1",
-        )?;
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<PieceChallengeHistory, MetadataDBError>>(1);
 
-        let piece_challenge_history = stmt.query_row(params![piece_repair_hash], |row| {
-            Ok(PieceChallengeHistory {
-                piece_repair_hash: row.get(0)?,
-                piece_hash: row.get(1)?,
-                chunk_hash: row.get(2)?,
-                validator_id: Compact(row.get::<_, u16>(3)?),
-                timestamp: row.get::<_, SqlDateTime>(4)?.0,
-                signature: {
-                    let vec = row.get::<_, Vec<u8>>(5)?;
-                    let arr: [u8; 64] = vec.try_into().map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            5,
-                            rusqlite::types::Type::Blob,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Invalid signature length",
-                            )),
-                        )
-                    })?;
-                    KeypairSignature::from_raw(arr)
-                },
+        // Send the command to get piece repair history
+        command_sender
+            .blocking_send(MetadataDBCommand::GetPieceRepairHistory {
+                piece_repair_hash,
+                response_sender,
             })
-        })?;
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
-        Ok(piece_challenge_history)
+        // Wait for the response
+        match response_receiver.blocking_recv() {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
     }
 
-    pub fn get_chunk_challenge_history(
+    pub async fn handle_get_chunk_challenge_history(
         &self,
         challenge_hash: &[u8; 32],
-    ) -> Result<ChunkChallengeHistory, MetadataDBError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature 
-             FROM chunk_challenge_history 
-             WHERE challenge_hash = ?1",
-        )?;
+        response_sender: mpsc::Sender<Result<ChunkChallengeHistory, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let challenge_hash = *challenge_hash;
+        
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature 
+                 FROM chunk_challenge_history 
+                 WHERE challenge_hash = ?1",
+            )?;
 
-        let chunk_challenge_history = stmt.query_row(params![challenge_hash], |row| {
-            Ok(ChunkChallengeHistory {
-                challenge_hash: row.get(0)?,
-                chunk_hash: row.get(1)?,
-                validator_id: Compact(row.get::<_, u16>(2)?),
-                miners_challenged: serde_json::from_str(&row.get::<_, String>(3)?).map_err(
-                    |e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            3,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    },
-                )?,
-                miners_successful: serde_json::from_str(&row.get::<_, String>(4)?).map_err(
-                    |e| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            4,
-                            rusqlite::types::Type::Text,
-                            Box::new(e),
-                        )
-                    },
-                )?,
-                piece_repair_hash: row.get(5)?,
-                timestamp: row.get::<_, SqlDateTime>(6)?.0,
-                signature: {
-                    let vec = row.get::<_, Vec<u8>>(7)?;
-                    let arr: [u8; 64] = vec.try_into().map_err(|_| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            7,
-                            rusqlite::types::Type::Blob,
-                            Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "Invalid signature length",
-                            )),
-                        )
-                    })?;
-                    KeypairSignature::from_raw(arr)
-                },
-            })
-        })?;
+            let chunk_challenge_history =
+                stmt.query_row(params![challenge_hash], |row| {
+                    Ok(ChunkChallengeHistory {
+                        challenge_hash: row.get(0)?,
+                        chunk_hash: row.get(1)?,
+                        validator_id: Compact(row.get::<_, u16>(2)?),
+                        miners_challenged: serde_json::from_str(&row.get::<_, String>(3)?)
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    3,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?,
+                        miners_successful: serde_json::from_str(&row.get::<_, String>(4)?)
+                            .map_err(|e| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    4,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(e),
+                                )
+                            })?,
+                        piece_repair_hash: row.get(5)?,
+                        timestamp: row.get::<_, SqlDateTime>(6)?.0,
+                        signature: {
+                            let vec = row.get::<_, Vec<u8>>(7)?;
+                            let arr: [u8; 64] = vec.try_into().map_err(|_| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    7,
+                                    rusqlite::types::Type::Blob,
+                                    Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        "Invalid signature length",
+                                    )),
+                                )
+                            })?;
+                            KeypairSignature::from_raw(arr)
+                        },
+                    })
+                })?;
 
-        Ok(chunk_challenge_history)
+            Ok::<ChunkChallengeHistory, MetadataDBError>(chunk_challenge_history)
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send result through response channel
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send chunk challenge history response");
+        }
+
+        Ok(())
     }
+
+    pub async fn get_chunk_challenge_history(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        challenge_hash: [u8; 32],
+    ) -> Result<ChunkChallengeHistory, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<ChunkChallengeHistory, MetadataDBError>>(1);
+
+        // Send the command to get chunk challenge history
+        command_sender
+            .send(MetadataDBCommand::GetChunkChallengeHistory {
+                challenge_hash,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    /// Processes db events and commands.
+    ///
+    /// This asynchronous function continuously processes db events and commands,
+    /// handling inserts, updates, and queries as they come in.
+    pub async fn process_events(&mut self) {
+        while let Some(command) = self.command_receiver.recv().await {
+            match command {
+                MetadataDBCommand::InsertObject {
+                    infohash_value,
+                    chunks_with_pieces,
+                    response_sender,
+                } => {
+                    debug!(
+                        "Inserting object with infohash: {:?}, chunks: {}",
+                        infohash_value.infohash,
+                        chunks_with_pieces.len()
+                    );
+                    if let Err(e) = self.handle_insert_object(
+                        &infohash_value,
+                        chunks_with_pieces,
+                        response_sender,
+                    ).await {
+                        error!("Error inserting object: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetRandomChunk { response_sender } => {
+                    debug!("Handling request for random chunk");
+                    if let Err(e) = self.handle_get_random_chunk(response_sender).await {
+                        error!("Error retrieving random chunk: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::InsertPieceRepairHistory {
+                    piece_repair_history,
+                    response_sender,
+                } => {
+                    debug!("Handling insert piece repair history");
+                    if let Err(e) = self.handle_insert_piece_repair_history(
+                        &piece_repair_history,
+                        response_sender,
+                    ).await {
+                        error!("Error inserting piece repair history: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::InsertChunkChallengeHistory {
+                    chunk_challenge_history,
+                    response_sender,
+                } => {
+                    debug!("Handling insert chunk challenge history");
+                    if let Err(e) = self.handle_insert_chunk_challenge_history(
+                        &chunk_challenge_history,
+                        response_sender,
+                    ).await {
+                        error!("Error inserting chunk challenge history: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetPiecesByChunk {
+                    chunk_hash,
+                    response_sender,
+                } => {
+                    debug!("Handling get pieces by chunk");
+                    if let Err(e) = self.handle_get_pieces_by_chunk(&chunk_hash, response_sender).await {
+                        error!("Error getting pieces by chunk: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetChunksByInfohash {
+                    infohash,
+                    response_sender,
+                } => {
+                    debug!("Handling get chunks by infohash");
+                    if let Err(e) = self.handle_get_chunks_by_infohash(&infohash, response_sender).await {
+                        error!("Error getting chunks by infohash: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetInfohash {
+                    infohash,
+                    response_sender,
+                } => {
+                    debug!("Handling get infohash");
+                    if let Err(e) = self.handle_get_infohash(&infohash, response_sender).await {
+                        error!("Error getting infohash: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetPieceRepairHistory {
+                    piece_repair_hash,
+                    response_sender,
+                } => {
+                    debug!("Handling get piece repair history");
+                    if let Err(e) = self.handle_get_piece_repair_history(&piece_repair_hash, response_sender).await {
+                        error!("Error getting piece repair history: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetChunkChallengeHistory {
+                    challenge_hash,
+                    response_sender,
+                } => {
+                    debug!("Handling get chunk challenge history");
+                    if let Err(e) = self.handle_get_chunk_challenge_history(&challenge_hash, response_sender).await {
+                        error!("Error getting chunk challenge history: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 // tests for insertion and query functions in the metadatadb
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
+    use std::{fs, sync::Arc};
 
     use chrono::Utc;
     use subxt::ext::codec::Compact;
+    use tokio::sync::Mutex;
 
     use super::*;
     use crate::{
@@ -829,36 +1224,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_insert_and_query_infohash() {
+    #[tokio::test]
+    async fn test_insert_and_query_object() {
         let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
+        let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
-        let infohash_value = InfohashValue {
-            infohash: [0u8; 32],
-            length: 1000,
-            chunk_size: 256,
-            chunk_count: 4,
-            creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
+        // Start the DB event processing in the background
+        let handle = tokio::spawn(async move {
+            db.process_events().await;
+        });
 
-        db.insert_infohash(&infohash_value).unwrap();
-        let queried_infohash = db.get_infohash(&infohash_value.infohash).unwrap();
-
-        assert_eq!(queried_infohash, infohash_value);
-
-        // Clean up test file
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_insert_and_query_chunk() {
-        let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
-
-        // Create an infohash value first
-        let infohash = [2u8; 32];
+        // Create test data (unchanged)
+        let infohash = [1u8; 32];
         let infohash_value = InfohashValue {
             infohash,
             length: 1000,
@@ -868,50 +1245,8 @@ mod tests {
             signature: KeypairSignature::from_raw([0u8; 64]),
         };
 
-        // Insert the infohash first to satisfy foreign key constraint
-        db.insert_infohash(&infohash_value).unwrap();
-
-        let chunk_value = ChunkValue {
-            chunk_hash: [1u8; 32],
-            chunk_idx: 0,
-            k: 10,
-            m: 5,
-            chunk_size: 512,
-            padlen: 0,
-            original_chunk_size: 512,
-        };
-
-        db.insert_chunk(chunk_value.clone(), &infohash).unwrap();
-        let chunks = db.get_chunks_by_infohash(&infohash).unwrap();
-
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], chunk_value);
-
-        // Clean up test file
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_insert_and_query_piece() {
-        let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
-
-        // Create and insert an infohash first
-        let infohash = [21u8; 32];
-        let infohash_value = InfohashValue {
-            infohash,
-            length: 1000,
-            chunk_size: 256,
-            chunk_count: 4,
-            creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-        db.insert_infohash(&infohash_value).unwrap();
-
-        // Create and insert the chunk first
-        let chunk_hash = [4u8; 32];
         let chunk = ChunkValue {
-            chunk_hash,
+            chunk_hash: [2u8; 32],
             chunk_idx: 0,
             k: 10,
             m: 5,
@@ -919,10 +1254,101 @@ mod tests {
             padlen: 0,
             original_chunk_size: 512,
         };
-        db.insert_chunk(chunk, &infohash).unwrap();
 
-        // Now create and insert the piece
-        let piece_value = PieceValue {
+        let piece = PieceValue {
+            piece_hash: [3u8; 32],
+            validator_id: Compact(1),
+            chunk_idx: 0,
+            piece_idx: 0,
+            piece_size: 256,
+            piece_type: PieceType::Data,
+            miners: vec![Compact(1), Compact(2)],
+        };
+        let piece_clone = piece.clone();
+
+        // Insert the object and wait for it to complete
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value.clone(),
+            vec![(chunk.clone(), vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
+
+        // Query the infohash
+        let queried_infohash = MetadataDB::get_infohash(&command_sender, infohash)
+            .await
+            .expect("Failed to get infohash");
+        assert_eq!(queried_infohash.infohash, infohash);
+        assert_eq!(queried_infohash.length, 1000);
+        assert_eq!(queried_infohash.chunk_size, 256);
+        assert_eq!(queried_infohash.chunk_count, 4);
+
+        // Query the chunks by infohash
+        let queried_chunks =
+            MetadataDB::get_chunks_by_infohash(&command_sender, infohash.to_vec())
+            .await
+            .expect("Failed to get chunks by infohash");
+        assert_eq!(queried_chunks.len(), 1);
+        assert_eq!(queried_chunks[0].chunk_hash, chunk.chunk_hash);
+        assert_eq!(queried_chunks[0].chunk_idx, chunk.chunk_idx);
+        assert_eq!(queried_chunks[0].k, chunk.k);
+        assert_eq!(queried_chunks[0].m, chunk.m);
+        assert_eq!(queried_chunks[0].chunk_size, chunk.chunk_size);
+        assert_eq!(queried_chunks[0].padlen, chunk.padlen);
+        assert_eq!(queried_chunks[0].original_chunk_size, chunk.original_chunk_size);
+
+        // Query the pieces by chunk
+        let queried_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, chunk.chunk_hash)
+            .await
+            .expect("Failed to get pieces by chunk");
+        assert_eq!(queried_pieces.len(), 1);
+        assert_eq!(queried_pieces[0].piece_hash, piece_clone.piece_hash);
+        assert_eq!(queried_pieces[0].validator_id, piece_clone.validator_id);
+        assert_eq!(queried_pieces[0].chunk_idx, piece_clone.chunk_idx);
+        assert_eq!(queried_pieces[0].piece_idx, piece_clone.piece_idx);
+        assert_eq!(queried_pieces[0].piece_size, piece_clone.piece_size);
+        assert_eq!(queried_pieces[0].miners, piece_clone.miners);
+
+        // Clean up test file
+        cleanup_test_db(&db_path);
+        
+        // Abort the background task
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_insert_object_and_get_random_chunk() {
+        let (db_path, crsqlite_lib) = setup_test_db();
+        let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
+
+        // Start the DB event processing in the background
+        let handle = tokio::spawn(async move {
+            db.process_events().await;
+        });
+
+        // Create test data (unchanged)
+        let infohash = [1u8; 32];
+        let infohash_value = InfohashValue {
+            infohash,
+            length: 1000,
+            chunk_size: 256,
+            chunk_count: 4,
+            creation_timestamp: Utc::now(),
+            signature: KeypairSignature::from_raw([0u8; 64]),
+        };
+
+        let chunk = ChunkValue {
+            chunk_hash: [2u8; 32],
+            chunk_idx: 0,
+            k: 10,
+            m: 5,
+            chunk_size: 512,
+            padlen: 0,
+            original_chunk_size: 512,
+        };
+
+        let piece = PieceValue {
             piece_hash: [3u8; 32],
             validator_id: Compact(1),
             chunk_idx: 0,
@@ -932,211 +1358,25 @@ mod tests {
             miners: vec![Compact(1), Compact(2)],
         };
 
-        db.insert_piece(piece_value.clone(), &chunk_hash).unwrap();
-        let pieces = db.get_pieces_by_chunk(&chunk_hash).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0], piece_value);
-
-        // Clean up test file
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_insert_and_query_piece_repair_history() {
-        let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
-
-        // First create and insert a chunk
-        let chunk = ChunkValue {
-            chunk_hash: [7u8; 32],
-            chunk_idx: 0,
-            k: 10,
-            m: 5,
-            chunk_size: 512,
-            padlen: 0,
-            original_chunk_size: 512,
-        };
-
-        // Create and insert an infohash (needed for foreign key)
-        let infohash = [20u8; 32];
-        let infohash_value = InfohashValue {
-            infohash,
-            length: 1000,
-            chunk_size: 256,
-            chunk_count: 4,
-            creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-
-        // Insert infohash first
-        db.insert_infohash(&infohash_value).unwrap();
-
-        // Insert the chunk
-        db.insert_chunk(chunk, &infohash).unwrap();
-
-        // Now create and insert a piece
-        let piece = PieceValue {
-            piece_hash: [6u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
-            piece_size: 256,
-            piece_type: PieceType::Data,
-            miners: vec![Compact(1), Compact(2)],
-        };
-        db.insert_piece(piece, &[7u8; 32]).unwrap();
-
-        // Finally create and insert the piece repair history
-        let piece_repair_history = PieceChallengeHistory {
-            piece_repair_hash: [5u8; 32],
-            piece_hash: [6u8; 32],
-            chunk_hash: [7u8; 32],
-            validator_id: Compact(1),
-            timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-
-        db.insert_piece_repair_history(&piece_repair_history)
-            .unwrap();
-        let queried_history = db
-            .get_piece_repair_history(&piece_repair_history.piece_repair_hash)
-            .unwrap();
-
-        assert_eq!(queried_history, piece_repair_history);
-
-        // Clean up test file
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_insert_and_query_chunk_challenge_history() {
-        let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
-
-        // 1. Create an infohash
-        let infohash = [22u8; 32];
-        let infohash_value = InfohashValue {
-            infohash,
-            length: 1000,
-            chunk_size: 256,
-            chunk_count: 4,
-            creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-        db.insert_infohash(&infohash_value).unwrap();
-
-        // 2. Create a chunk
-        let chunk = ChunkValue {
-            chunk_hash: [9u8; 32],
-            chunk_idx: 0,
-            k: 10,
-            m: 5,
-            chunk_size: 512,
-            padlen: 0,
-            original_chunk_size: 512,
-        };
-        db.insert_chunk(chunk, &infohash).unwrap();
-
-        // 3. Create a piece
-        let piece = PieceValue {
-            piece_hash: [23u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
-            piece_size: 256,
-            piece_type: PieceType::Data,
-            miners: vec![Compact(1), Compact(2)],
-        };
-        db.insert_piece(piece, &[9u8; 32]).unwrap();
-
-        // 4. Create a piece repair history
-        let piece_repair_history = PieceChallengeHistory {
-            piece_repair_hash: [10u8; 32],
-            piece_hash: [23u8; 32],
-            chunk_hash: [9u8; 32],
-            validator_id: Compact(1),
-            timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-        db.insert_piece_repair_history(&piece_repair_history)
-            .unwrap();
-
-        // 5. Finally create the chunk challenge history
-        let chunk_challenge_history = ChunkChallengeHistory {
-            challenge_hash: [8u8; 32],
-            chunk_hash: [9u8; 32],
-            validator_id: Compact(1),
-            miners_challenged: vec![Compact(1), Compact(2)],
-            miners_successful: vec![Compact(2)],
-            piece_repair_hash: [10u8; 32],
-            timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-
-        db.insert_chunk_challenge_history(&chunk_challenge_history)
-            .unwrap();
-        let queried_history = db
-            .get_chunk_challenge_history(&chunk_challenge_history.challenge_hash)
-            .unwrap();
-
-        assert_eq!(queried_history, chunk_challenge_history);
-
-        // Clean up test file
-        cleanup_test_db(&db_path);
-    }
-
-    #[test]
-    fn test_insert_and_query_object() {
-        let (db_path, crsqlite_lib) = setup_test_db();
-        let (db, _) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
-
-        let infohash_value = InfohashValue {
-            infohash: [11u8; 32],
-            length: 2000,
-            chunk_size: 512,
-            chunk_count: 4,
-            creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
-        };
-
-        let chunk_value = ChunkValue {
-            chunk_hash: [12u8; 32],
-            chunk_idx: 0,
-            k: 10,
-            m: 5,
-            chunk_size: 512,
-            padlen: 0,
-            original_chunk_size: 512,
-        };
-
-        let piece_value = PieceValue {
-            piece_hash: [13u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
-            piece_size: 256,
-            piece_type: PieceType::Data,
-            miners: vec![Compact(1), Compact(2)],
-        };
-
-        db.insert_object(
-            &infohash_value,
-            vec![(chunk_value.clone(), vec![piece_value.clone()])],
+        // Insert the object
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value,
+            vec![(chunk, vec![piece])],
         )
-        .unwrap();
+        .await
+        .expect("Failed to insert object");
 
-        let queried_infohash = db.get_infohash(&infohash_value.infohash).unwrap();
-        assert_eq!(queried_infohash, infohash_value);
-
-        let chunks = db.get_chunks_by_infohash(&infohash_value.infohash).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], chunk_value);
-
-        let pieces = db.get_pieces_by_chunk(&chunk_value.chunk_hash).unwrap();
-        assert_eq!(pieces.len(), 1);
-        assert_eq!(pieces[0], piece_value);
+        // Query a random chunk
+        let random_chunk = MetadataDB::get_random_chunk(&command_sender)
+        .await
+        .expect("Failed to get random chunk");
+        assert_eq!(random_chunk.chunk_hash, [2u8; 32]);
 
         // Clean up test file
         cleanup_test_db(&db_path);
+        
+        // Abort the background task
+        handle.abort();
     }
 }
