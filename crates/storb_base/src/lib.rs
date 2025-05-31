@@ -10,7 +10,7 @@ use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
 use dashmap::DashMap;
-use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
+use libp2p::{multiaddr::multiaddr, Multiaddr};
 use memory_db::MemoryDb;
 use serde::ser::StdError;
 use subxt::utils::H256;
@@ -31,7 +31,7 @@ pub mod verification;
 pub mod version;
 
 // Node UID : NodeInfo
-pub type AddressBook = Arc<DashMap<Option<u16>, NodeInfo>>;
+pub type AddressBook = Arc<DashMap<u16, NodeInfo>>;
 
 const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
@@ -54,26 +54,19 @@ impl std::fmt::Display for NeuronError {
 
 impl std::error::Error for NeuronError {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SubtensorConfig {
     pub network: String,
     pub address: String,
     pub insecure: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NeuronConfig {
     pub sync_frequency: u64,
 }
 
-#[derive(Clone)]
-pub struct DhtConfig {
-    pub port: u16,
-    pub no_bootstrap: bool,
-    pub bootstrap_nodes: Option<Vec<Multiaddr>>,
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BaseNeuronConfig {
     pub version: Version,
     pub netuid: u16,
@@ -96,14 +89,12 @@ pub struct BaseNeuronConfig {
     pub min_stake_threshold: u64,
 
     pub db_file: PathBuf,
+    pub metadatadb_file: PathBuf,
     pub neurons_dir: PathBuf,
-    pub pem_file: PathBuf,
 
     pub subtensor: SubtensorConfig,
 
     pub neuron: NeuronConfig,
-
-    pub dht: DhtConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -112,11 +103,6 @@ pub struct NodeInfo {
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,
-}
-
-pub enum NodeKey {
-    Uid(u16),
-    PeerId(PeerId),
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -133,7 +119,6 @@ pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
     pub address_book: AddressBook,
-    pub peer_node_uid: bimap::BiMap<PeerId, u16>,
     pub signer: Signer,
     pub local_node_info: LocalNodeInfo,
 }
@@ -201,7 +186,6 @@ impl BaseNeuron {
             config: config.clone(),
             neurons: neurons_arc,
             address_book: address_book.clone(),
-            peer_node_uid: bimap::BiMap::new(),
             signer,
             local_node_info,
         };
@@ -351,8 +335,8 @@ mod tests {
             load_old_nodes: false,
             min_stake_threshold: 0,
             db_file: "./test.db".into(),
+            metadatadb_file: "./test.db".into(),
             neurons_dir: "./test_neurons".into(),
-            pem_file: "cert.pem".into(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
                 address: "wss://test.finney.opentensor.ai:443".to_string(),
@@ -360,11 +344,6 @@ mod tests {
             },
             neuron: NeuronConfig {
                 sync_frequency: 100,
-            },
-            dht: DhtConfig {
-                port: 8081,
-                no_bootstrap: true,
-                bootstrap_nodes: None,
             },
             otel_api_key: "".to_string(),
             otel_endpoint: "".to_string(),

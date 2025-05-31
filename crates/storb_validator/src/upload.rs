@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -7,10 +7,11 @@ use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length};
+use base::swarm::db::MetadataDBCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{BaseNeuron, NodeInfo};
+use base::{swarm, BaseNeuron, NodeInfo};
 use chrono::Utc;
-use crabtensor::sign::sign_message;
+use crabtensor::sign::{sign_message, KeypairSignature};
 use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
 use quinn::Connection;
@@ -165,6 +166,7 @@ impl<'a> UploadProcessor<'a> {
         })
     }
 
+    // TODO(restore)
     /// Process the upload of a file and its distribution to miners.
     pub(crate) async fn process_upload<S, E>(
         &self,
@@ -202,6 +204,7 @@ impl<'a> UploadProcessor<'a> {
         let miner_connections = self.miner_connections.clone();
         let validator = self.state.validator.clone();
         let validator_read_guard = validator.neuron.read().await;
+        let metadatdb_sender = validator.metadatadb_sender.clone();
 
         // Get MemoryDB from state
         let scoring_system = validator.scoring_system.clone();
@@ -232,62 +235,30 @@ impl<'a> UploadProcessor<'a> {
         // Wait for both tasks to complete
         let (_producer_result, consumer_result) = tokio::join!(producer_handle, consumer_handle);
 
-        let (piece_hashes, chunk_hashes) = consumer_result??;
+        let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        // log the chunk hashes as strings
-        debug!("Raw Chunk hashes: {:?}", chunk_hashes);
-        let chunk_hashes_str: Vec<String> = chunk_hashes.iter().map(hex::encode).collect();
-        debug!("Chunk hashes: {:?}", chunk_hashes_str);
-
-        let chunk_count = chunk_hashes.len() as u64;
-
-        let infohash = get_infohash(
-            filename.clone(),
-            timestamp,
-            chunk_size,
-            total_size,
-            piece_hashes,
-        );
-
-        let tracker_key = libp2p::kad::RecordKey::new(&infohash.as_bytes().to_vec());
-
-        let tracker_msg = (
-            tracker_key.clone(),
-            validator_id,
-            filename.clone(),
-            total_size,
-            chunk_size,
-            chunk_count,
-            chunk_hashes.clone(),
-            timestamp,
-        );
-
-        let tracker_msg_bytes = match bincode::serialize(&tracker_msg) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                error!("Failed to serialize msg: {:?}", err);
-                bail!("Failed to serialize tracker message");
-            }
-        };
-
-        let tracker_sig = sign_message(&signer, tracker_msg_bytes);
-
-        let tracker_dht_value = models::TrackerDHTValue {
-            infohash: tracker_key.clone(),
-            validator_id,
-            filename: filename.clone(),
-            length: total_size,
-            chunk_size,
-            chunk_count,
-            chunk_hashes: chunk_hashes.clone(),
-            creation_timestamp: now,
-            signature: tracker_sig,
-        };
+        let infohash: [u8; 32] = get_infohash(piece_hashes);
+        // convert the infohash to a hex string for logging
+        let infohash_str = hex::encode(infohash);
 
         // Put tracker entry into local database
-        debug!("Inserted tracker entry with infohash {infohash}");
+        let infohash_value = swarm::models::InfohashValue {
+            infohash,
+            length: total_size,
+            chunk_size,
+            chunk_count: (total_size + chunk_size - 1) / chunk_size,
+            creation_timestamp: now,
+            // TODO: use the signature of the data blob owner
+            // empty signature for now
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
 
-        Ok(infohash)
+        swarm::db::MetadataDB::insert_object(&metadatdb_sender, infohash_value, chunks_with_pieces)
+            .await
+            .expect("Failed to insert object entry into local database"); // TOOD: handle this error properly
+        debug!("Inserted object entry with infohash {infohash_str} into local database");
+
+        Ok(infohash_str)
     }
 }
 
@@ -340,18 +311,23 @@ where
     Ok(())
 }
 
+// TODO(restore)
 async fn consume_bytes(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
     mut rx: mpsc::Receiver<Vec<u8>>,
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
-    dht_sender: mpsc::Sender<DhtCommand>,
     signer: Signer,
-) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>)> {
+) -> Result<(
+    Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)>,
+    Vec<[u8; 32]>,
+)> {
     let mut chunk_idx = 0;
-    let mut chunk_hashes: Vec<[u8; 32]> = Vec::new();
     let mut piece_hashes: Vec<[u8; 32]> = Vec::new();
+    let mut chunks_with_pieces: Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)> =
+        Vec::new();
+
     let validator_guard = validator_base_neuron.read().await;
     let vali_uid = validator_guard
         .local_node_info
@@ -432,7 +408,7 @@ async fn consume_bytes(
                     let miner_info = vali_guard
                         .address_book
                         .clone()
-                        .get(&Some(miner_uid.clone()))
+                        .get(&miner_uid.clone())
                         .ok_or_else(|| {
                             anyhow::anyhow!(
                                 "Miner info not found for miner with UID: {}",
@@ -450,7 +426,7 @@ async fn consume_bytes(
                             scoring_clone,
                         ) => {
                             match upload_result {
-                                Ok(piece_hash) => {
+                                Ok((piece_hash, miner_uid)) => {
                                     let mut pieces = successful_pieces.write().await;
                                     if !pieces.contains(&piece.piece_idx) {
                                         pieces.insert(piece.piece_idx);
@@ -462,7 +438,7 @@ async fn consume_bytes(
                                             debug!("Required number of pieces uploaded - signalling completion");
                                         }
 
-                                        return Ok(Some((piece.piece_idx, piece_data, piece_hash)));
+                                        return Ok(Some((piece.piece_idx, piece_data, piece_hash, miner_uid)));
                                     }
                                     Ok(None)
                                 }
@@ -484,47 +460,25 @@ async fn consume_bytes(
         // Wait for all uploads to complete or be cancelled
         let results = futures::future::join_all(futures).await;
 
+        // a map to track miners for each piece hash (piece_hash -> Vec<miner_uid>)
+        let mut miners_for_piece: HashMap<[u8; 32], Vec<u16>> = HashMap::new();
         // Process successful uploads
         for result in results {
             match result {
-                Ok(Ok(Some((piece_idx, piece, piece_hash)))) => {
+                // TODO: remove unused variables from the match arm?
+                Ok(Ok(Some((piece_idx, piece, piece_hash, miner_uid)))) => {
                     // Process successful upload (DHT updates etc)
                     chunk_hash_raw.update(&piece_hash);
                     chunk_piece_hashes.push(piece_hash);
                     piece_hashes.push(piece_hash);
 
-                    // Add piece entry to DHT...
-                    let piece_key = libp2p::kad::RecordKey::new(&piece_hash);
-                    debug!("UPLOAD PIECE KEY: {:?}", &piece_key);
+                    debug!("UPLOAD PIECE HASH: {:?}", &piece_hash);
 
-                    let msg = (
-                        piece_key.clone(),
-                        validator_id,
-                        chunk_idx,
-                        piece_idx,
-                        piece.piece_type.clone(),
-                    );
-                    let msg_bytes = match bincode::serialize(&msg) {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            error!("Failed to serialize msg: {:?}", err);
-                            continue;
-                        }
-                    };
-                    let signature = sign_message(&signer, msg_bytes);
-                    let piece_size = piece.data.len() as u64;
-                    // Get netuid from validator state
-                    let value = models::PieceDHTValue {
-                        piece_hash,
-                        validator_id,
-                        chunk_idx,
-                        piece_idx,
-                        piece_size,
-                        piece_type: piece.piece_type,
-                        signature,
-                    };
-
-                    // Put piece entry into local database
+                    // insert miner uid into miners_for_piece map
+                    miners_for_piece
+                        .entry(piece_hash)
+                        .or_default()
+                        .push(miner_uid);
                 }
                 Ok(Ok(None)) => {
                     // Upload was skipped or cancelled - no action needed
@@ -540,55 +494,50 @@ async fn consume_bytes(
 
         // TODO: some of this stuff can be moved into its own helper function
         let chunk_size = encoded.chunk_size;
-        let chunk_hash = chunk_hash_raw.finalize();
+        let chunk_hash_finalized = chunk_hash_raw.finalize();
+        let chunk_hash = chunk_hash_finalized.as_bytes();
 
-        let chunk_key = libp2p::kad::RecordKey::new(&chunk_hash.as_bytes());
-        debug!("UPLOAD CHUNK KEY: {:?}", &chunk_key);
+        debug!("UPLOAD CHUNK HASH: {:?}", &chunk_hash);
 
-        let chunk_msg = (
-            chunk_key.clone(),
-            validator_id,
-            chunk_piece_hashes.clone(),
-            chunk_idx,
-            encoded.k,
-            encoded.m,
-            chunk_size,
-            encoded.padlen,
-            encoded.original_chunk_size,
-        );
-
-        let chunk_msg_bytes = match bincode::serialize(&chunk_msg) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                error!("Failed to serialize msg: {:?}", err);
-                continue; // Skip to the next iteration on error
-            }
-        };
-
-        let chunk_sig = sign_message(&signer, chunk_msg_bytes);
-
-        let chunk_dht_value = models::ChunkDHTValue {
-            chunk_hash: chunk_key.clone(),
-            validator_id,
-            piece_hashes: chunk_piece_hashes,
-            chunk_idx,
+        let chunk_dht_value = swarm::models::ChunkValue {
+            chunk_hash: *chunk_hash,
             k: encoded.k,
             m: encoded.m,
             chunk_size,
             padlen: encoded.padlen,
             original_chunk_size: encoded.original_chunk_size,
-            signature: chunk_sig,
         };
 
-        // Put chunk entry into local database
-        debug!("Distributed pieces for chunk with hash {:?}", chunk_key);
+        // create vector of the piecevalues for the current chunk
+        // the piece_type for each piece can be retrieved by getting the piece type from the encoded pieces
+        let chunk_piece_values = encoded
+            .pieces
+            .iter()
+            .enumerate()
+            .map(|(piece_idx, piece)| swarm::models::PieceValue {
+                piece_hash: chunk_piece_hashes[piece_idx],
+                piece_size: piece.data.len() as u64,
+                piece_type: piece.piece_type.clone(),
+                miners: miners_for_piece
+                    .get(&chunk_piece_hashes[piece_idx])
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Compact)
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
 
-        chunk_hashes.push(*chunk_hash.as_bytes());
+        // Put chunk entry into local database
+        debug!("Distributed pieces for chunk with hash {:?}", chunk_hash);
+
+        let chunk_with_pieces = (chunk_dht_value.clone(), chunk_piece_values.clone());
+        chunks_with_pieces.push(chunk_with_pieces);
 
         chunk_idx += 1;
     }
 
-    Ok((piece_hashes, chunk_hashes))
+    Ok((chunks_with_pieces, piece_hashes))
 }
 
 /// Upload a piece to a miner and verify the upload by checking the hash, then update the miner's stats
@@ -598,7 +547,7 @@ pub async fn upload_piece_to_miner(
     conn: &Connection,
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
-) -> Result<[u8; 32]> {
+) -> Result<([u8; 32], u16)> {
     let miner_uid = miner_info.neuron_info.uid;
     // Track request
     if let Err(e) = scoring_system
@@ -641,5 +590,5 @@ pub async fn upload_piece_to_miner(
         )?;
     }
 
-    Ok(piece_hash)
+    Ok((piece_hash, miner_uid))
 }

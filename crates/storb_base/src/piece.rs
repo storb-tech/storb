@@ -50,15 +50,6 @@ pub struct EncodedChunk {
     pub original_chunk_size: u64,
 }
 
-#[derive(Serialize)]
-struct InfoHashData {
-    filename: String,
-    timestamp: i64,
-    chunk_size: u64,
-    total_size: u64,
-    pieces: Vec<[u8; 32]>,
-}
-
 /// Piece response that is sent from the miner to the validator.
 ///
 /// - `piece_hash` is the fixed width piece signature from which we start
@@ -119,28 +110,16 @@ pub fn deserialise_piece_response(
     }
 }
 
-pub fn get_infohash(
-    filename: String,
-    timestamp: i64,
-    chunk_size: u64,
-    total_size: u64,
-    pieces: Vec<[u8; 32]>,
-) -> String {
-    let infohash_data = InfoHashData {
-        filename,
-        timestamp,
-        chunk_size,
-        total_size,
-        pieces,
-    };
-
-    // Serialize the struct to a compact JSON string.
-    let infohash_json =
-        serde_json::to_string(&infohash_data).expect("Failed to serialize infohash_data to JSON");
-
-    let infohash_bytes = infohash_json.as_bytes();
-
-    blake3::hash(infohash_bytes).to_hex().to_string()
+pub fn get_infohash(piece_hashes: Vec<[u8; 32]>) -> [u8; 32] {
+    // The infohash is a hash of the piece hashes
+    let mut hasher = blake3::Hasher::new();
+    for piece_hash in piece_hashes {
+        hasher.update(&piece_hash);
+    }
+    let hash = hasher.finalize();
+    let mut infohash = [0u8; 32];
+    infohash.copy_from_slice(&hash.as_bytes()[..32]);
+    infohash
 }
 
 pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {

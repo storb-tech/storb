@@ -24,16 +24,15 @@ use crate::MinerState;
     tag = "Info"
 )]
 pub async fn node_info(
-    state: extract::State<Arc<Mutex<MinerState>>>,
+    state: axum::extract::State<MinerState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
     info!("Got node info req");
-
-    let neuron = state.lock().await.miner.lock().await.neuron.clone();
-    let serialized_local_node_info = bincode::serialize(&neuron.local_node_info).map_err(|e| {
+    let local_node_info = state.local_node_info.clone();
+    let serialized_local_node_info = bincode::serialize(&local_node_info).map_err(|e| {
         error!("Error while deserialising local node info: {e}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            bincode::serialize(&"Failed to serialize local node info").unwrap_or_default(),
+            bincode::serialize("An internal server error occurred").unwrap_or_default(),
         )
     })?;
 
@@ -52,7 +51,7 @@ pub async fn node_info(
     tag = "Handshake"
 )]
 pub async fn handshake(
-    state: extract::State<Arc<Mutex<MinerState>>>,
+    state: extract::State<MinerState>,
     bytes: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
     info!("Got handshake request");
@@ -67,21 +66,10 @@ pub async fn handshake(
         &payload.message,
     );
 
-    let miner_base_neuron = state
-        .clone()
-        .lock()
-        .await
-        .miner
-        .clone()
-        .lock()
-        .await
-        .neuron
-        .clone();
+    let address_book = state.clone().miner.neuron.read().await.address_book.clone();
 
-    let validator_info = miner_base_neuron
-        .address_book
-        .clone()
-        .get(&Some(payload.message.validator.uid.clone()))
+    let validator_info = address_book
+        .get(&payload.message.validator.uid.clone())
         .ok_or_else(|| {
             error!("Error while getting validator info");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -113,7 +101,7 @@ pub async fn handshake(
     tag = "Piece Download"
 )]
 pub async fn get_piece(
-    state: extract::State<Arc<Mutex<MinerState>>>,
+    state: extract::State<MinerState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
     info!("Get piece request");
@@ -145,21 +133,10 @@ pub async fn get_piece(
         &payload.message,
     );
 
-    let miner_base_neuron = state
-        .clone()
-        .lock()
-        .await
-        .miner
-        .clone()
-        .lock()
-        .await
-        .neuron
-        .clone();
+    let address_book = state.clone().miner.neuron.read().await.address_book.clone();
 
-    let validator_info = miner_base_neuron
-        .address_book
-        .clone()
-        .get(&Some(payload.message.validator.uid.clone()))
+    let validator_info = address_book
+        .get(&payload.message.validator.uid.clone())
         .ok_or_else(|| {
             error!("Error while getting validator info");
             (
@@ -191,7 +168,8 @@ pub async fn get_piece(
     })?;
 
     info!("Piece hash: {}", piece_hash_query);
-    let object_store = state.lock().await.object_store.lock().await.clone();
+    let store = state.clone().object_store.clone();
+    let object_store = store.lock().await;
     // If an error occurs during piece hash decode, it is bound to be a user error.
     let piece_hash = PieceHash::new(piece_hash_query.clone()).map_err(|_| {
         (

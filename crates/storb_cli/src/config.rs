@@ -87,12 +87,11 @@ pub struct Settings {
     pub min_stake_threshold: u64,
 
     pub db_file: String,
+    pub metadatadb_file: String,
     pub neurons_dir: String,
-    pub pem_file: String,
 
     pub subtensor: Subtensor,
     pub neuron: Neuron,
-    pub dht: Dht,
 
     pub miner: Miner,
     pub validator: Validator,

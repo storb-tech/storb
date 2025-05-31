@@ -41,7 +41,6 @@ impl ToSql for SqlDateTime {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkValue {
     pub chunk_hash: [u8; 32],
-    pub chunk_idx: u64,
     pub k: u64,
     pub m: u64,
     pub chunk_size: u64,
@@ -69,11 +68,9 @@ pub struct InfohashValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceValue {
     pub piece_hash: [u8; 32],
-    pub validator_id: Compact<u16>,
-    pub chunk_idx: u64,
-    pub piece_idx: u64,
     pub piece_size: u64,
     pub piece_type: PieceType,
+    // TODO: shouldn't this be a set instead of a vector?
     pub miners: Vec<Compact<u16>>,
 }
 

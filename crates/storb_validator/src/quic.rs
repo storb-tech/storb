@@ -13,7 +13,8 @@ use tracing::{error, info};
 
 use crate::signature::InsecureCertVerifier;
 
-pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+// TODO: Make this configurable?
+pub const QUIC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(3);
 // TODO: turn this into a setting?
 const MIN_REQUIRED_MINERS: usize = 1; // Minimum number of miners needed for operation
 const MAX_ATTEMPTS: i32 = 5;

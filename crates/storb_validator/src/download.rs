@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base::constants::MIN_BANDWIDTH;
-use base::swarm::dht::DhtCommand;
+use base::swarm::db::MetadataDBCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, AddressBook, BaseNeuron};
 use crabtensor::sign::sign_message;
@@ -27,16 +27,16 @@ const THREAD_COUNT: usize = 10;
 
 /// Processes download streams and retrieves file pieces from available miners.
 pub(crate) struct DownloadProcessor {
-    pub dht_sender: mpsc::Sender<DhtCommand>,
+    pub metadatadb_sender: mpsc::Sender<MetadataDBCommand>,
     pub state: Arc<ValidatorState>,
 }
 
 impl DownloadProcessor {
     /// Create a new instance of the DownloadProcessor.
     pub(crate) async fn new(state: &ValidatorState) -> Result<Self> {
-        let dht_sender = state.validator.neuron.read().await.command_sender.clone();
+        let metadatadb_sender = state.validator.metadatadb_sender.clone();
         Ok(Self {
-            dht_sender,
+            metadatadb_sender,
             state: Arc::new(state.clone()),
         })
     }
@@ -45,29 +45,32 @@ impl DownloadProcessor {
     async fn produce_piece(
         validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
-        dht_sender: mpsc::Sender<DhtCommand>,
+        // TODO(purge_dht)
+        // dht_sender: mpsc::Sender<DhtCommand>,
         local_address_book: AddressBook,
         piece_hash: [u8; 32],
     ) -> Result<base::piece::Piece> {
         // Retrieve the piece entry.
         let piece_key = RecordKey::new(&piece_hash);
         debug!("RecordKey of piece hash: {:?}", &piece_key);
-        let piece_entry = swarm::dht::StorbDHT::get_piece_entry(&dht_sender, piece_key.clone())
-            .await
-            .map_err(|err| anyhow!("Failed to get piece entry: {err}"))
-            .context("Failed to get piece entry from DHT")?
-            .ok_or_else(|| anyhow!("Piece entry not found"))?;
+        // TODO(purge_dht)
+        // let piece_entry = swarm::dht::StorbDHT::get_piece_entry(&dht_sender, piece_key.clone())
+        //     .await
+        //     .map_err(|err| anyhow!("Failed to get piece entry: {err}"))
+        //     .context("Failed to get piece entry from DHT")?
+        //     .ok_or_else(|| anyhow!("Piece entry not found"))?;
 
         debug!(
             "Looking for piece providers for {:?}",
             &piece_entry.piece_hash
         );
 
-        let piece_providers =
-            swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_entry.piece_hash.clone())
-                .await
-                .map_err(|err| anyhow!("Failed to get piece providers: {err}"))
-                .context("Error getting piece providers")?;
+        // TODO(storb_dht)
+        // let piece_providers =
+        //     swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_entry.piece_hash.clone())
+        //         .await
+        //         .map_err(|err| anyhow!("Failed to get piece providers: {err}"))
+        //         .context("Error getting piece providers")?;
 
         if piece_providers.is_empty() {
             bail!("No providers found for piece {:?}", &piece_entry.piece_hash);

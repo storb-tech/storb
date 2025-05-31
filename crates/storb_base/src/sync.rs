@@ -221,8 +221,7 @@ impl Synchronizable for BaseNeuron {
                 version: remote_node_info.version,
             };
 
-            self.address_book
-                .insert(Some(neuron_info.uid), node_info.clone());
+            self.address_book.insert(neuron_info.uid, node_info.clone());
         }
 
         info!("Completed sync_metagraph in {:?}", start.elapsed());

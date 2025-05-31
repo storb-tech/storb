@@ -4,7 +4,6 @@ log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 netuid = 26             # Testnet is 269
 external_ip = "0.0.0.0"
 api_port = 6969
-quic_port = 6970
 post_ip = false
 
 wallet_path = "~/.bittensor/wallets"
@@ -21,8 +20,8 @@ load_old_nodes = true
 min_stake_threshold = 1000
 
 db_file = "storb_data/database.db"
+metadatadb_file = "storb_data/metadata.db"
 neurons_dir = "storb_data/neurons.state"
-pem_file = "storb_data/storb.pem"
 
 [subtensor]
 network = "finney"
@@ -31,14 +30,6 @@ insecure = true
 
 [neuron]
 sync_frequency = 300
-
-[dht]
-port = 6942
-no_bootstrap = false
-
-# mainnet dht bootstrap node
-bootstrap_nodes = ["/ip4/185.216.203.183/udp/6942/quic-v1/p2p/12D3KooWHD7S45Y2ao9bK6W8zKWxzkTBaDqNU7iKnX1jJr49okov"]
-# bootstrap_nodes = ["/ip4/<ipv4-addr>/udp/<port>/quic-v1/p2p/<peer-id>"]
 
 [miner]
 store_dir = "object_store"

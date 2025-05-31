@@ -8,19 +8,29 @@ Validators play a crucial role in the Storb network by serving as gateways to th
 
 Have a look over the `settings.toml` file. There are various parameters there that can be modified. Alternatively, one can just set these parameters through the CLI as shown in the following steps.
 
-### Setting up database
+### Setting up databases
 
-You'll also need to set up the local database using SQLx.
+You'll also need to set up the local databases using SQLx.
+
+#### Install SQLx CLI
+cargo install sqlx-cli
+
+#### Score database
 
 ```bash
-cargo install sqlx-cli
 sqlx database create --database-url "sqlite://storb_data/database.db"
-sqlx migrate run --database-url "sqlite://storb_data/database.db"
+sqlx migrate run --source migrations/scoresdb/ --database-url "sqlite://storb_data/database.db"
+```
+#### Metadata database
+
+```bash
+sqlx database create  --database-url "sqlite://storb_data/metadata.db"
+sqlx migrate run --source migrations/metadatadb/ --database-url "sqlite://storb_data/metadata.db"
 ```
 
 ### Running validator
 
-- Mainnet
+#### Mainnet
 
     ```bash
     ./target/release/storb validator \
@@ -33,7 +43,7 @@ sqlx migrate run --database-url "sqlite://storb_data/database.db"
         --post-ip
     ```
 
-- Testnet
+#### Testnet
 
     ```bash
     ./target/release/storb validator \

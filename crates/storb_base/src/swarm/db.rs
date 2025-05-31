@@ -352,7 +352,8 @@ impl MetadataDB {
             let tx = conn.unchecked_transaction()?;
 
             // Insert infohash
-            tx.execute(
+            // If it already exists, it will be ignored due to the unique constraint
+            match tx.execute(
                 "INSERT INTO infohashes (infohash, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     infohash_value.infohash,
@@ -362,11 +363,18 @@ impl MetadataDB {
                     SqlDateTime(infohash_value.creation_timestamp),
                     infohash_value.signature.0.to_vec()
                 ],
-            )?;
+            ) {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                    // Ignore if infohash already exists
+                    debug!("Infohash {} already exists, skipping insert", hex::encode(infohash_value.infohash));
+                }
+                Err(e) => return Err(MetadataDBError::Database(e)),
+            }
 
             // Prepare statements for better performance with multiple inserts
             let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks (chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
             )?;
 
             let mut tracker_chunk_stmt = tx.prepare(
@@ -374,7 +382,7 @@ impl MetadataDB {
             )?;
 
             let mut piece_stmt = tx.prepare(
-                "INSERT INTO pieces (piece_hash, validator_id, chunk_idx, piece_idx, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4)"
             )?;
 
             let mut chunk_pieces_stmt = tx.prepare(
@@ -382,27 +390,44 @@ impl MetadataDB {
             )?;
 
             // Insert chunks and their pieces
-            for (chunk, pieces) in chunks_with_pieces {
+            // Iterate over each chunk and its associated pieces, also ensure that we can get the index
+            for (chunk_idx, (chunk, pieces)) in chunks_with_pieces.iter().enumerate() {
                 // Insert chunk
-                chunk_stmt.execute(params![
+                // if it already exists, it will be ignored due to the unique constraint
+                match chunk_stmt.execute(params![
                     chunk.chunk_hash,
-                    chunk.chunk_idx,
                     chunk.k,
                     chunk.m,
                     chunk.chunk_size,
                     chunk.padlen,
                     chunk.original_chunk_size
-                ])?;
+                ]) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                        // Ignore if chunk already exists
+                        debug!("Chunk {} already exists, skipping insert", hex::encode(chunk.chunk_hash));
+                    }
+                    Err(e) => return Err(MetadataDBError::Database(e)),
+                }
+
 
                 // Insert chunk-infohash mapping
-                tracker_chunk_stmt.execute(params![
+                // If it already exists, it will be ignored due to the unique constraint
+                match tracker_chunk_stmt.execute(params![
                     infohash_value.infohash,
-                    chunk.chunk_idx,
+                    chunk_idx,
                     chunk.chunk_hash
-                ])?;
+                ]) {
+                    Ok(_) => {}
+                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                        // Ignore if chunk-infohash mapping already exists
+                        debug!("Chunk {} for infohash {} already exists, skipping insert", hex::encode(chunk.chunk_hash), hex::encode(infohash_value.infohash));
+                    }
+                    Err(e) => return Err(MetadataDBError::Database(e)),
+                };
 
                 // Insert all pieces for this chunk
-                for piece in pieces {
+                for (piece_idx, piece) in pieces.iter().enumerate() {
                     // Convert miners to JSON string
                     let miners = serde_json::to_string(&piece.miners).map_err(|e| {
                         MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
@@ -412,22 +437,75 @@ impl MetadataDB {
                         ))
                     })?;
                     // Insert piece
-                    piece_stmt.execute(params![
+                    // If it already exists, update the miners
+                    // make sure to check if a miner uid already exists in the miners list
+                    // if it does, just dont insert that particular miner uid
+                    // TODO: this is so cooked lmao
+                    match piece_stmt.execute(params![
                         piece.piece_hash,
-                        piece.validator_id.0,
-                        piece.chunk_idx,
-                        piece.piece_idx,
                         piece.piece_size,
-                        piece.piece_type as u8,
+                        piece.piece_type.clone() as u8,
                         miners
-                    ])?;
+                    ]) {
+                        Ok(_) => {}
+                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                            // Read The miners from the database
+                            // Check to see if any of the miners we want to insert are already in the database
+                            let mut existing_miners_stmt = conn.prepare(
+                                "SELECT miners FROM pieces WHERE piece_hash = ?1",
+                            )?;
+                            let existing_miners: String = existing_miners_stmt
+                                .query_row(params![piece.piece_hash], |row| {
+                                    row.get(0)
+                                })
+                                .map_err(|e| MetadataDBError::Database(e))?;
+                            let mut existing_miners: Vec<Compact<u16>> =
+                                serde_json::from_str(&existing_miners).map_err(|e| {
+                                    MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                                        0,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(e),
+                                    ))
+                                })?;
+                            // Add new miners to the existing miners
+                            for miner in &piece.miners {
+                                if !existing_miners.contains(miner) {
+                                    existing_miners.push(*miner);
+                                }
+                            }
+                            // Update the piece with the new miners
+                            let updated_miners = serde_json::to_string(&existing_miners).map_err(
+                                |e| {
+                                    MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                                        0,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(e),
+                                    ))
+                                },
+                            )?;
+                            conn.execute(
+                                "UPDATE pieces SET miners = ?1 WHERE piece_hash = ?2",
+                                params![updated_miners, piece.piece_hash],
+                            )
+                            .map_err(|e| MetadataDBError::Database(e))?;
+                        }
+                        Err(e) => return Err(MetadataDBError::Database(e)),
+                    }
 
                     // Insert chunk-piece mapping
-                    chunk_pieces_stmt.execute(params![
+                    // If it already exists, it will be ignored due to the unique constraint
+                    match chunk_pieces_stmt.execute(params![
                         chunk.chunk_hash,
-                        piece.piece_idx,
+                        piece_idx,
                         piece.piece_hash
-                    ])?;
+                    ]) {
+                        Ok(_) => {}
+                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                            // Ignore if chunk-piece mapping already exists
+                            debug!("Chunk-piece mapping for chunk {} and piece {} already exists, skipping insert", hex::encode(chunk.chunk_hash), hex::encode(piece.piece_hash));
+                        }
+                        Err(e) => return Err(MetadataDBError::Database(e)),
+                    };
                 }
             }
 
@@ -492,24 +570,21 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT p.piece_hash, p.validator_id, p.chunk_idx, p.piece_idx, p.piece_size, p.piece_type, p.miners 
+                "SELECT p.piece_hash, p.piece_size, p.piece_type, p.miners 
                     FROM pieces p 
                     INNER JOIN chunk_pieces cp ON p.piece_hash = cp.piece_hash 
                     WHERE cp.chunk_hash = ?1
-                    ORDER BY p.piece_idx",
+                    ORDER BY cp.piece_idx",
             )?;
 
             let pieces = stmt
                 .query_map(params![chunk_hash], |row| {
                     Ok(PieceValue {
                         piece_hash: row.get(0)?,
-                        validator_id: Compact(row.get::<_, u16>(1)?),
-                        chunk_idx: row.get(2)?,
-                        piece_idx: row.get(3)?,
-                        piece_size: row.get(4)?,
-                        piece_type: row.get::<_, u8>(5)?.try_into().map_err(|_| {
+                        piece_size: row.get(1)?,
+                        piece_type: row.get::<_, u8>(2)?.try_into().map_err(|_| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                5,
+                                2,
                                 rusqlite::types::Type::Integer,
                                 Box::new(std::io::Error::new(
                                     std::io::ErrorKind::InvalidData,
@@ -517,10 +592,10 @@ impl MetadataDB {
                                 )),
                             )
                         })?,
-                        miners: serde_json::from_str(&row.get::<_, String>(6)?.as_str()).map_err(
+                        miners: serde_json::from_str(&row.get::<_, String>(3)?.as_str()).map_err(
                             |e| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    6,
+                                    3,
                                     rusqlite::types::Type::Text,
                                     Box::new(e),
                                 )
@@ -531,7 +606,9 @@ impl MetadataDB {
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok::<Vec<PieceValue>, MetadataDBError>(pieces)
-        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send the result through the response channel
         if response_sender.send(Ok(result)).await.is_err() {
@@ -578,7 +655,7 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT tc.chunk_hash, tc.chunk_idx, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size 
+                "SELECT c.chunk_hash, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size 
                  FROM tracker_chunks tc 
                  JOIN chunks c ON tc.chunk_hash = c.chunk_hash 
                  WHERE tc.infohash = ?1 
@@ -598,18 +675,19 @@ impl MetadataDB {
 
                     Ok(ChunkValue {
                         chunk_hash,
-                        chunk_idx: row.get(1)?,
-                        k: row.get(2)?,
-                        m: row.get(3)?,
-                        chunk_size: row.get(4)?,
-                        padlen: row.get(5)?,
-                        original_chunk_size: row.get(6)?,
+                        k: row.get(1)?,
+                        m: row.get(2)?,
+                        chunk_size: row.get(3)?,
+                        padlen: row.get(4)?,
+                        original_chunk_size: row.get(5)?,
                     })
                 })?
                 .collect();
 
             chunks.map_err(MetadataDBError::from)
-        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send result through response channel
         if response_sender.send(Ok(result)).await.is_err() {
@@ -733,7 +811,7 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT chunk_hash, chunk_idx, k, m, chunk_size, padlen, original_chunk_size 
+                "SELECT chunk_hash, k, m, chunk_size, padlen, original_chunk_size 
                  FROM chunks 
                  ORDER BY RANDOM() LIMIT 1",
             )?;
@@ -751,12 +829,11 @@ impl MetadataDB {
 
                 Ok(ChunkValue {
                     chunk_hash,
-                    chunk_idx: row.get(1)?,
-                    k: row.get(2)?,
-                    m: row.get(3)?,
-                    chunk_size: row.get(4)?,
-                    padlen: row.get(5)?,
-                    original_chunk_size: row.get(6)?,
+                    k: row.get(1)?,
+                    m: row.get(2)?,
+                    chunk_size: row.get(3)?,
+                    padlen: row.get(4)?,
+                    original_chunk_size: row.get(5)?,
                 })
             })?;
 
@@ -1151,7 +1228,6 @@ mod tests {
         conn.execute(
             "CREATE TABLE chunks (
                 chunk_hash BLOB PRIMARY KEY,
-                chunk_idx INTEGER NOT NULL,
                 k INTEGER NOT NULL,
                 m INTEGER NOT NULL,
                 chunk_size INTEGER NOT NULL,
@@ -1176,9 +1252,6 @@ mod tests {
         conn.execute(
             "CREATE TABLE pieces (
                 piece_hash BLOB PRIMARY KEY,
-                validator_id INTEGER NOT NULL,
-                chunk_idx INTEGER NOT NULL,
-                piece_idx INTEGER NOT NULL,
                 piece_size INTEGER NOT NULL,
                 piece_type INTEGER NOT NULL,
                 miners TEXT NOT NULL
@@ -1262,7 +1335,6 @@ mod tests {
 
         let chunk = ChunkValue {
             chunk_hash: [2u8; 32],
-            chunk_idx: 0,
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1272,9 +1344,6 @@ mod tests {
 
         let piece = PieceValue {
             piece_hash: [3u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1305,7 +1374,6 @@ mod tests {
             .expect("Failed to get chunks by infohash");
         assert_eq!(queried_chunks.len(), 1);
         assert_eq!(queried_chunks[0].chunk_hash, chunk.chunk_hash);
-        assert_eq!(queried_chunks[0].chunk_idx, chunk.chunk_idx);
         assert_eq!(queried_chunks[0].k, chunk.k);
         assert_eq!(queried_chunks[0].m, chunk.m);
         assert_eq!(queried_chunks[0].chunk_size, chunk.chunk_size);
@@ -1321,9 +1389,6 @@ mod tests {
             .expect("Failed to get pieces by chunk");
         assert_eq!(queried_pieces.len(), 1);
         assert_eq!(queried_pieces[0].piece_hash, piece_clone.piece_hash);
-        assert_eq!(queried_pieces[0].validator_id, piece_clone.validator_id);
-        assert_eq!(queried_pieces[0].chunk_idx, piece_clone.chunk_idx);
-        assert_eq!(queried_pieces[0].piece_idx, piece_clone.piece_idx);
         assert_eq!(queried_pieces[0].piece_size, piece_clone.piece_size);
         assert_eq!(queried_pieces[0].miners, piece_clone.miners);
 
@@ -1357,7 +1422,6 @@ mod tests {
 
         let chunk = ChunkValue {
             chunk_hash: [2u8; 32],
-            chunk_idx: 0,
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1367,9 +1431,6 @@ mod tests {
 
         let piece = PieceValue {
             piece_hash: [3u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1416,7 +1477,6 @@ mod tests {
 
         let chunk = ChunkValue {
             chunk_hash: [2u8; 32],
-            chunk_idx: 0,
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1426,9 +1486,6 @@ mod tests {
 
         let piece = PieceValue {
             piece_hash: [3u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1496,7 +1553,6 @@ mod tests {
 
         let chunk = ChunkValue {
             chunk_hash: [2u8; 32],
-            chunk_idx: 0,
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1506,9 +1562,6 @@ mod tests {
 
         let piece = PieceValue {
             piece_hash: [3u8; 32],
-            validator_id: Compact(1),
-            chunk_idx: 0,
-            piece_idx: 0,
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1571,6 +1624,179 @@ mod tests {
         );
         assert_eq!(queried_history.miners_successful, vec![Compact(1)]);
         assert_eq!(queried_history.piece_repair_hash, piece_repair_hash);
+
+        // Clean up test file
+        cleanup_test_db(&db_path);
+
+        // Abort the background task
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_insert_object_updates_piece_miners() {
+        let (db_path, crsqlite_lib) = setup_test_db();
+        let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
+
+        // Start the DB event processing in the background
+        let handle = tokio::spawn(async move {
+            db.process_events().await;
+        });
+
+        // Create first object with a piece that has miners [1, 2]
+        let infohash1 = [1u8; 32];
+        let infohash_value1 = InfohashValue {
+            infohash: infohash1,
+            length: 1000,
+            chunk_size: 256,
+            chunk_count: 1,
+            creation_timestamp: Utc::now(),
+            signature: KeypairSignature::from_raw([0u8; 64]),
+        };
+
+        let chunk1 = ChunkValue {
+            chunk_hash: [2u8; 32],
+            k: 10,
+            m: 5,
+            chunk_size: 512,
+            padlen: 0,
+            original_chunk_size: 512,
+        };
+
+        let piece1 = PieceValue {
+            piece_hash: [3u8; 32], // Same piece hash for both objects
+            piece_size: 256,
+            piece_type: PieceType::Data,
+            miners: vec![Compact(1), Compact(2)], // Initial miners
+        };
+
+        // Insert the first object
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value1,
+            vec![(chunk1, vec![piece1])],
+        )
+        .await
+        .expect("Failed to insert first object");
+
+        // Verify initial miners
+        let initial_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, [2u8; 32])
+            .await
+            .expect("Failed to get pieces by chunk");
+        assert_eq!(initial_pieces.len(), 1);
+        assert_eq!(initial_pieces[0].miners, vec![Compact(1), Compact(2)]);
+
+        // Create second object with the SAME piece but different miners [2, 3, 4]
+        let infohash2 = [4u8; 32];
+        let infohash_value2 = InfohashValue {
+            infohash: infohash2,
+            length: 2000,
+            chunk_size: 256,
+            chunk_count: 1,
+            creation_timestamp: Utc::now(),
+            signature: KeypairSignature::from_raw([1u8; 64]),
+        };
+
+        let chunk2 = ChunkValue {
+            chunk_hash: [5u8; 32], // Different chunk
+            k: 10,
+            m: 5,
+            chunk_size: 512,
+            padlen: 0,
+            original_chunk_size: 512,
+        };
+
+        let piece2 = PieceValue {
+            piece_hash: [3u8; 32], // SAME piece hash as piece1
+            piece_size: 256,
+            piece_type: PieceType::Data,
+            miners: vec![Compact(2), Compact(3), Compact(4)], // Some overlap (2) and new miners (3, 4)
+        };
+
+        // Insert the second object - this should update the miners for the existing piece
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value2,
+            vec![(chunk2, vec![piece2])],
+        )
+        .await
+        .expect("Failed to insert second object");
+
+        // Query the piece from both chunks to verify miners were updated
+        let pieces_chunk1 = MetadataDB::get_pieces_by_chunk(&command_sender, [2u8; 32])
+            .await
+            .expect("Failed to get pieces from first chunk");
+
+        let pieces_chunk2 = MetadataDB::get_pieces_by_chunk(&command_sender, [5u8; 32])
+            .await
+            .expect("Failed to get pieces from second chunk");
+
+        // Both should have the same piece with merged miners
+        assert_eq!(pieces_chunk1.len(), 1);
+        assert_eq!(pieces_chunk2.len(), 1);
+
+        // The piece should now have miners [1, 2, 3, 4] (merged and deduplicated)
+        let expected_miners = vec![Compact(1), Compact(2), Compact(3), Compact(4)];
+
+        // Sort both vectors for comparison since order might vary
+        let mut actual_miners_chunk1 = pieces_chunk1[0].miners.clone();
+        let mut actual_miners_chunk2 = pieces_chunk2[0].miners.clone();
+        actual_miners_chunk1.sort_by_key(|c| c.0);
+        actual_miners_chunk2.sort_by_key(|c| c.0);
+
+        let mut expected_sorted = expected_miners.clone();
+        expected_sorted.sort_by_key(|c| c.0);
+
+        assert_eq!(actual_miners_chunk1, expected_sorted);
+        assert_eq!(actual_miners_chunk2, expected_sorted);
+
+        // Verify that both pieces have the same miners (since they're the same piece)
+        assert_eq!(pieces_chunk1[0].miners, pieces_chunk2[0].miners);
+
+        // Test edge case: inserting the same piece again with duplicate miners should not change anything
+        let infohash3 = [6u8; 32];
+        let infohash_value3 = InfohashValue {
+            infohash: infohash3,
+            length: 3000,
+            chunk_size: 256,
+            chunk_count: 1,
+            creation_timestamp: Utc::now(),
+            signature: KeypairSignature::from_raw([2u8; 64]),
+        };
+
+        let chunk3 = ChunkValue {
+            chunk_hash: [7u8; 32], // Different chunk
+            k: 10,
+            m: 5,
+            chunk_size: 512,
+            padlen: 0,
+            original_chunk_size: 512,
+        };
+
+        let piece3 = PieceValue {
+            piece_hash: [3u8; 32], // SAME piece hash again
+            piece_size: 256,
+            piece_type: PieceType::Data,
+            miners: vec![Compact(2), Compact(3)], // Miners that already exist
+        };
+
+        // Insert the third object - should not change miners since they already exist
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value3,
+            vec![(chunk3, vec![piece3])],
+        )
+        .await
+        .expect("Failed to insert third object");
+
+        // Verify miners are still the same
+        let pieces_chunk3 = MetadataDB::get_pieces_by_chunk(&command_sender, [7u8; 32])
+            .await
+            .expect("Failed to get pieces from third chunk");
+
+        let mut actual_miners_chunk3 = pieces_chunk3[0].miners.clone();
+        actual_miners_chunk3.sort_by_key(|c| c.0);
+
+        assert_eq!(actual_miners_chunk3, expected_sorted);
 
         // Clean up test file
         cleanup_test_db(&db_path);
