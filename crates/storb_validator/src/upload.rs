@@ -172,7 +172,7 @@ impl<'a> UploadProcessor<'a> {
         &self,
         stream: S,
         total_size: u64,
-        validator_id: Compact<u16>,
+        filename: String,
     ) -> Result<String>
     where
         S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
@@ -209,9 +209,6 @@ impl<'a> UploadProcessor<'a> {
         // Get MemoryDB from state
         let scoring_system = validator.scoring_system.clone();
 
-        let signer = validator_read_guard.signer.clone();
-        // Clone the signer to avoid borrowing issues
-        let signer_clone = signer.clone();
         // Cloning again to avoid borrowing issues
         let validator_clone = validator.clone();
         let consumer_handle = tokio::spawn(async move {
@@ -221,7 +218,6 @@ impl<'a> UploadProcessor<'a> {
                 rx,
                 miner_uids,
                 miner_connections,
-                signer_clone,
             )
             .await
         });
@@ -229,8 +225,6 @@ impl<'a> UploadProcessor<'a> {
         drop(validator_read_guard);
 
         let now = Utc::now();
-        let timestamp = now.timestamp();
-        let filename: String = "filename".to_string(); // TODO: get filename from params
 
         // Wait for both tasks to complete
         let (_producer_result, consumer_result) = tokio::join!(producer_handle, consumer_handle);
@@ -244,6 +238,7 @@ impl<'a> UploadProcessor<'a> {
         // Put tracker entry into local database
         let infohash_value = swarm::models::InfohashValue {
             infohash,
+            name: filename,
             length: total_size,
             chunk_size,
             chunk_count: (total_size + chunk_size - 1) / chunk_size,
@@ -318,7 +313,6 @@ async fn consume_bytes(
     mut rx: mpsc::Receiver<Vec<u8>>,
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
-    signer: Signer,
 ) -> Result<(
     Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)>,
     Vec<[u8; 32]>,
@@ -333,7 +327,6 @@ async fn consume_bytes(
         .local_node_info
         .uid
         .context("Failed to get UID for validator")?;
-    let validator_id = Compact(vali_uid);
     drop(validator_guard);
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
@@ -466,7 +459,7 @@ async fn consume_bytes(
         for result in results {
             match result {
                 // TODO: remove unused variables from the match arm?
-                Ok(Ok(Some((piece_idx, piece, piece_hash, miner_uid)))) => {
+                Ok(Ok(Some((_, _, piece_hash, miner_uid)))) => {
                     // Process successful upload (DHT updates etc)
                     chunk_hash_raw.update(&piece_hash);
                     chunk_piece_hashes.push(piece_hash);

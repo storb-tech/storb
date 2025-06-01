@@ -11,7 +11,6 @@ use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signe
 use crabtensor::AccountId;
 use dashmap::DashMap;
 use libp2p::{multiaddr::multiaddr, Multiaddr};
-use memory_db::MemoryDb;
 use serde::ser::StdError;
 use subxt::utils::H256;
 use tokio::sync::RwLock;

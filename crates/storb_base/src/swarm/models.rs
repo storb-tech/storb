@@ -55,6 +55,7 @@ pub struct ChunkValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfohashValue {
     pub infohash: [u8; 32],
+    pub name: String,
     pub length: u64,
     pub chunk_size: u64,
     pub chunk_count: u64,

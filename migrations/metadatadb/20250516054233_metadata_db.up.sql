@@ -2,12 +2,13 @@
 
 -- infohashes
 CREATE TABLE IF NOT EXISTS infohashes (
-  infohash            BLOB      PRIMARY KEY,
-  length              INTEGER   NOT NULL,
-  chunk_size          INTEGER   NOT NULL,
-  chunk_count         INTEGER   NOT NULL,
-  creation_timestamp  DATETIME  NOT NULL,
-  signature           TEXT      NOT NULL
+  infohash            BLOB            PRIMARY KEY,
+  name                VARCHAR(4096)   NOT NULL,
+  length              INTEGER         NOT NULL,
+  chunk_size          INTEGER         NOT NULL,
+  chunk_count         INTEGER         NOT NULL,
+  creation_timestamp  DATETIME        NOT NULL,
+  signature           TEXT            NOT NULL
 );
 
 -- Chunks

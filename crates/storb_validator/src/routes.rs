@@ -122,6 +122,13 @@ pub async fn upload_file(
         return Err((StatusCode::BAD_REQUEST, "No file field found".to_string()));
     }
 
+    // get filename
+    let filename = field
+        .file_name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    debug!("Got filename: {filename}");
+
     let bytes = field.bytes().await.map_err(|e| {
         error!("Could not get bytes from the file field: {e}");
         (
@@ -137,7 +144,7 @@ pub async fn upload_file(
     }));
 
     match processor
-        .process_upload(stream, content_length, processor.validator_id)
+        .process_upload(stream, content_length, filename)
         .await
     {
         Ok(infohash) => {

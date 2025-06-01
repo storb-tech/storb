@@ -197,6 +197,7 @@ impl Validator {
         let infohash_sig = sign_message(&signer, infohash_message_bytes);
         let infohash_value = swarm::models::InfohashValue {
             infohash,
+            name: filename,
             length: 69420, // placeholder for total file size
             chunk_size: encoded.chunk_size,
             chunk_count: 69420, // placeholder for chunk count

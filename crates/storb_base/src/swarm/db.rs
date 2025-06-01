@@ -354,9 +354,10 @@ impl MetadataDB {
             // Insert infohash
             // If it already exists, it will be ignored due to the unique constraint
             match tx.execute(
-                "INSERT INTO infohashes (infohash, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO infohashes (infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     infohash_value.infohash,
+                    infohash_value.name,
                     infohash_value.length,
                     infohash_value.chunk_size,
                     infohash_value.chunk_count,
@@ -734,7 +735,7 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT infohash, length, chunk_size, chunk_count, creation_timestamp, signature 
+                "SELECT infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature 
                  FROM infohashes 
                  WHERE infohash = ?1",
             )?;
@@ -742,15 +743,16 @@ impl MetadataDB {
             let infohash_value = stmt.query_row(params![infohash], |row| {
                 Ok(InfohashValue {
                     infohash: row.get(0)?,
-                    length: row.get(1)?,
-                    chunk_size: row.get(2)?,
-                    chunk_count: row.get(3)?,
-                    creation_timestamp: row.get::<_, SqlDateTime>(4)?.0,
+                    name: row.get(1)?,
+                    length: row.get(2)?,
+                    chunk_size: row.get(3)?,
+                    chunk_count: row.get(4)?,
+                    creation_timestamp: row.get::<_, SqlDateTime>(5)?.0,
                     signature: {
-                        let vec = row.get::<_, Vec<u8>>(5)?;
+                        let vec = row.get::<_, Vec<u8>>(6)?;
                         let arr: [u8; 64] = vec.try_into().map_err(|_| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                5,
+                                6,
                                 rusqlite::types::Type::Blob,
                                 Box::new(std::io::Error::new(
                                     std::io::ErrorKind::InvalidData,
@@ -1170,6 +1172,7 @@ mod tests {
 
     use chrono::Utc;
     use subxt::ext::codec::Compact;
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::{
@@ -1178,22 +1181,8 @@ mod tests {
     };
 
     // Helper function to create a test database with schema
-    fn setup_test_db() -> (PathBuf, PathBuf) {
-        // Create a unique filename for each test based on timestamp
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_nanos();
-
-        // Create test directory if it doesn't exist
-        let test_dir = PathBuf::from("test_dir_metadatadb/");
-        fs::create_dir_all(&test_dir).expect("Failed to create test directory");
-
-        // Create unique test database path
-        let db_path = test_dir.join(format!("test_db_{}.sqlite", timestamp));
-
-        // Create empty file
-        fs::write(&db_path, b"").expect("Failed to write to test file");
+    fn setup_test_db(temp_file: &NamedTempFile) -> PathBuf {
+        let db_path = temp_file.path().to_path_buf();
 
         // Path to the CRSQLite extension
         let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
@@ -1215,10 +1204,11 @@ mod tests {
         conn.execute(
             "CREATE TABLE infohashes (
                 infohash BLOB PRIMARY KEY,
+                name VARCHAR(4096) NOT NULL,
                 length INTEGER NOT NULL,
                 chunk_size INTEGER NOT NULL,
                 chunk_count INTEGER NOT NULL,
-                creation_timestamp DATETIME NOT NULL,  /* Change TEXT to DATETIME */
+                creation_timestamp DATETIME NOT NULL,
                 signature BLOB NOT NULL
             )",
             [],
@@ -1299,22 +1289,16 @@ mod tests {
         )
         .expect("Failed to create chunk_challenge_history table");
 
-        // Return the paths needed for tests
-        (db_path, crsqlite_lib)
-    }
-
-    // Helper function to clean up test database
-    fn cleanup_test_db(db_path: &PathBuf) {
-        if db_path.exists() {
-            // Close any open connections first (implicitly done by Rust's Drop)
-            // Then remove the file
-            fs::remove_file(db_path).expect("Failed to remove test database file");
-        }
+        // Return the database path
+        db_path
     }
 
     #[tokio::test]
     async fn test_insert_and_query_object() {
-        let (db_path, crsqlite_lib) = setup_test_db();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
         // Start the DB event processing in the background
@@ -1322,10 +1306,11 @@ mod tests {
             db.process_events().await;
         });
 
-        // Create test data (unchanged)
+        // Create test data
         let infohash = [1u8; 32];
         let infohash_value = InfohashValue {
             infohash,
+            name: "test_object".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
@@ -1392,16 +1377,17 @@ mod tests {
         assert_eq!(queried_pieces[0].piece_size, piece_clone.piece_size);
         assert_eq!(queried_pieces[0].miners, piece_clone.miners);
 
-        // Clean up test file
-        cleanup_test_db(&db_path);
-
         // Abort the background task
         handle.abort();
+        // temp_file will be automatically cleaned up when it goes out of scope
     }
 
     #[tokio::test]
     async fn test_insert_object_and_get_random_chunk() {
-        let (db_path, crsqlite_lib) = setup_test_db();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
         // Start the DB event processing in the background
@@ -1409,10 +1395,11 @@ mod tests {
             db.process_events().await;
         });
 
-        // Create test data (unchanged)
+        // Create test data
         let infohash = [1u8; 32];
         let infohash_value = InfohashValue {
             infohash,
+            name: "test_object".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
@@ -1447,16 +1434,17 @@ mod tests {
             .expect("Failed to get random chunk");
         assert_eq!(random_chunk.chunk_hash, [2u8; 32]);
 
-        // Clean up test file
-        cleanup_test_db(&db_path);
-
         // Abort the background task
         handle.abort();
+        // temp_file will be automatically cleaned up when it goes out of scope
     }
 
     #[tokio::test]
     async fn test_insert_and_query_piece_repair_history() {
-        let (db_path, crsqlite_lib) = setup_test_db();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
         // Start the DB event processing in the background
@@ -1468,6 +1456,7 @@ mod tests {
         let infohash = [1u8; 32];
         let infohash_value = InfohashValue {
             infohash,
+            name: "test_object".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
@@ -1523,16 +1512,17 @@ mod tests {
         assert_eq!(queried_history.chunk_hash, [2u8; 32]);
         assert_eq!(queried_history.validator_id, Compact(1));
 
-        // Clean up test file
-        cleanup_test_db(&db_path);
-
         // Abort the background task
         handle.abort();
+        // temp_file will be automatically cleaned up when it goes out of scope
     }
 
     #[tokio::test]
     async fn test_insert_and_query_chunk_challenge_history() {
-        let (db_path, crsqlite_lib) = setup_test_db();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
         // Start the DB event processing in the background
@@ -1544,6 +1534,7 @@ mod tests {
         let infohash = [1u8; 32];
         let infohash_value = InfohashValue {
             infohash,
+            name: "test_object".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
@@ -1625,16 +1616,17 @@ mod tests {
         assert_eq!(queried_history.miners_successful, vec![Compact(1)]);
         assert_eq!(queried_history.piece_repair_hash, piece_repair_hash);
 
-        // Clean up test file
-        cleanup_test_db(&db_path);
-
         // Abort the background task
         handle.abort();
+        // temp_file will be automatically cleaned up when it goes out of scope
     }
 
     #[tokio::test]
     async fn test_insert_object_updates_piece_miners() {
-        let (db_path, crsqlite_lib) = setup_test_db();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
         // Start the DB event processing in the background
@@ -1646,6 +1638,7 @@ mod tests {
         let infohash1 = [1u8; 32];
         let infohash_value1 = InfohashValue {
             infohash: infohash1,
+            name: "test_object_1".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 1,
@@ -1689,6 +1682,7 @@ mod tests {
         let infohash2 = [4u8; 32];
         let infohash_value2 = InfohashValue {
             infohash: infohash2,
+            name: "test_object_2".to_string(),
             length: 2000,
             chunk_size: 256,
             chunk_count: 1,
@@ -1756,6 +1750,7 @@ mod tests {
         let infohash3 = [6u8; 32];
         let infohash_value3 = InfohashValue {
             infohash: infohash3,
+            name: "test_object_3".to_string(),
             length: 3000,
             chunk_size: 256,
             chunk_count: 1,
@@ -1798,10 +1793,8 @@ mod tests {
 
         assert_eq!(actual_miners_chunk3, expected_sorted);
 
-        // Clean up test file
-        cleanup_test_db(&db_path);
-
         // Abort the background task
         handle.abort();
+        // temp_file will be automatically cleaned up when it goes out of scope
     }
 }
