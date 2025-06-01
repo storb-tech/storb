@@ -7,13 +7,11 @@ use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use base::swarm;
-use libp2p::kad::RecordKey;
-use tokio::sync::RwLock; // Changed from std::sync::RwLock
+use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::apikey::ApiKeyManager;
-// TODO(restore): restore download processor
-// use crate::download::DownloadProcessor;
+use crate::download::DownloadProcessor;
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
 
@@ -188,137 +186,140 @@ pub async fn upload_file(
     }
 }
 
-// TODO(restore): restore download route
-// #[utoipa::path(
-//     get,
-//     path = "/file",
-//     responses(
-//         (status = 200, description = "File downloaded successfully", body = String),
-//         (status = 400, description = "Missing infohash parameter", body = String),
-//         (status = 500, description = "Internal server error during download", body = String)
-//     ),
-//     params(
-//         ("infohash" = String, Path, description = "The infohash of the file to retrieve."),
-//     ),
-//     tag = "Download"
-// )]
-// #[axum::debug_handler]
-// pub async fn download_file(
-//     state: axum::extract::State<ValidatorState>,
-//     Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
-//     headers: HeaderMap,
-//     Query(params): Query<HashMap<String, String>>,
-// ) -> Result<impl IntoResponse, (StatusCode, String)> {
-//     let api_key = get_api_key(&headers)
-//         .await
-//         .ok_or_else(|| (StatusCode::UNAUTHORIZED, "API key required".to_string()))?;
+#[utoipa::path(
+    get,
+    path = "/file",
+    responses(
+        (status = 200, description = "File downloaded successfully", body = String),
+        (status = 400, description = "Missing infohash parameter", body = String),
+        (status = 500, description = "Internal server error during download", body = String)
+    ),
+    params(
+        ("infohash" = String, Path, description = "The infohash of the file to retrieve."),
+    ),
+    tag = "Download"
+)]
+#[axum::debug_handler]
+pub async fn download_file(
+    state: axum::extract::State<ValidatorState>,
+    Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let api_key = get_api_key(&headers)
+        .await
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "API key required".to_string()))?;
 
-//     let infohash = params.get("infohash").ok_or_else(|| {
-//         (
-//             StatusCode::BAD_REQUEST,
-//             "Missing infohash parameter".to_string(),
-//         )
-//     })?;
+    let infohash = params.get("infohash").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing infohash parameter".to_string(),
+        )
+    })?;
 
-//     let processor = DownloadProcessor::new(&state).await.map_err(|e| {
-//         error!("Failed to initialise the download processor: {e}");
-//         (
-//             StatusCode::INTERNAL_SERVER_ERROR,
-//             "An internal server error occurred".to_string(),
-//         )
-//     })?;
+    let processor = DownloadProcessor::new(&state).await.map_err(|e| {
+        error!("Failed to initialise the download processor: {e}");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "An internal server error occurred".to_string(),
+        )
+    })?;
 
-//     // change this
-//     let headers = AppendHeaders([
-//         // NOTE: the specific content type should be left to the clients downloading it
-//         ("Content-Type", "application/octet-stream"),
-//         (
-//             "Content-Disposition",
-//             "inline; filename=\"downloaded_file\"", // TODO: use file name that's stored
-//         ),
-//     ]);
+    // change this
+    let headers = AppendHeaders([
+        // NOTE: the specific content type should be left to the clients downloading it
+        ("Content-Type", "application/octet-stream"),
+        (
+            "Content-Disposition",
+            "inline; filename=\"downloaded_file\"", // TODO: use file name that's stored
+        ),
+    ]);
 
-//     // get tracker info
-//     let key = RecordKey::new(&infohash.as_bytes().to_vec());
-//     let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(processor.dht_sender.clone(), key)
-//         .await
-//         .map_err(|e| {
-//             error!("Error getting tracker entry: {}", e);
-//             (
-//                 StatusCode::INTERNAL_SERVER_ERROR,
-//                 "Internal server error".to_string(),
-//             )
-//         })?;
-//     let tracker = tracker_res.ok_or_else(|| {
-//         error!("Tracker entry not found for infohash: {}", infohash);
-//         (
-//             StatusCode::INTERNAL_SERVER_ERROR,
-//             "Internal server error".to_string(),
-//         )
-//     })?;
+    // get tracker info
+    let infohash_bytes: [u8; 32] = match hex::decode(infohash) {
+        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+        _ => {
+            error!("Invalid infohash format: {}", infohash);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid infohash format".to_string(),
+            ));
+        }
+    };
 
-//     // get file size
-//     let content_length = tracker.length;
+    let tracker =
+        swarm::db::MetadataDB::get_infohash(&processor.metadatadb_sender.clone(), infohash_bytes)
+            .await
+            .map_err(|e| {
+                error!("Failed to get infohash from the database: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
+            })?;
 
-//     // Check quota before processing
-//     let key_manager = api_key_manager.read().await;
-//     let has_quota = key_manager
-//         .check_quota(&api_key, 0, content_length)
-//         .await
-//         .map_err(|e| {
-//             error!("Failed to check API key quota: {}", e);
-//             (
-//                 StatusCode::INTERNAL_SERVER_ERROR,
-//                 "Internal server error".to_string(),
-//             )
-//         })?;
-//     if !has_quota {
-//         return Err((StatusCode::FORBIDDEN, "Download quota exceeded".to_string()));
-//     }
-//     drop(key_manager);
+    // get file size
+    let content_length = tracker.length;
 
-//     // Process the download
-//     match processor.process_download(infohash.clone()).await {
-//         Ok(body) => {
-//             // Update API key usage after successful download
-//             api_key_manager
-//                 .write()
-//                 .await
-//                 .update_usage(&api_key, 0, content_length)
-//                 .await
-//                 .map_err(|e| {
-//                     error!("Failed to update API key usage: {}", e);
-//                     (
-//                         StatusCode::INTERNAL_SERVER_ERROR,
-//                         "Internal server error".to_string(),
-//                     )
-//                 })?;
+    // Check quota before processing
+    let key_manager = api_key_manager.read().await;
+    let has_quota = key_manager
+        .check_quota(&api_key, 0, content_length)
+        .await
+        .map_err(|e| {
+            error!("Failed to check API key quota: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+    if !has_quota {
+        return Err((StatusCode::FORBIDDEN, "Download quota exceeded".to_string()));
+    }
+    drop(key_manager);
 
-//             // Log API usage after successful download start
-//             api_key_manager
-//                 .write()
-//                 .await
-//                 .log_api_usage(&api_key, "/file", 0, content_length)
-//                 .await
-//                 .map_err(|e| {
-//                     error!("Failed to log API usage: {}", e);
-//                     (
-//                         StatusCode::INTERNAL_SERVER_ERROR,
-//                         "Internal server error".to_string(),
-//                     )
-//                 })?;
+    // Process the download
+    match processor.process_download(tracker).await {
+        Ok(body) => {
+            // Update API key usage after successful download
+            api_key_manager
+                .write()
+                .await
+                .update_usage(&api_key, 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update API key usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
 
-//             Ok((headers, body))
-//         }
-//         Err(e) => {
-//             error!("The processor failed to process the upload: {:?}", e);
-//             Err((
-//                 StatusCode::INTERNAL_SERVER_ERROR,
-//                 "An internal server error occurred".to_string(),
-//             ))
-//         }
-//     }
-// }
+            // Log API usage after successful download start
+            api_key_manager
+                .write()
+                .await
+                .log_api_usage(&api_key, "/file", 0, content_length)
+                .await
+                .map_err(|e| {
+                    error!("Failed to log API usage: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal server error".to_string(),
+                    )
+                })?;
+
+            Ok((headers, body))
+        }
+        Err(e) => {
+            error!("The processor failed to process the upload: {:?}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "An internal server error occurred".to_string(),
+            ))
+        }
+    }
+}
 
 async fn get_api_key(headers: &HeaderMap) -> Option<String> {
     headers

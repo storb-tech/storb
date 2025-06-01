@@ -19,9 +19,7 @@ use opentelemetry::global;
 use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::Resource;
-// TODO(restore)
-// use routes::{download_file, node_info, upload_file};
-use routes::{node_info, upload_file};
+use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
@@ -29,8 +27,7 @@ use validator::{Validator, ValidatorConfig};
 
 pub mod apikey;
 mod constants;
-// TODO(restore)
-// mod download;
+mod download;
 mod middleware;
 mod quic;
 mod routes;
@@ -90,7 +87,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let mut otel_headers: HashMap<String, String> = HashMap::new();
     otel_headers.insert("X-Api-Key".to_string(), config.otel_api_key.clone());
     let url = config.otel_endpoint.clone() + "metrics";
-    let url_clone = url.clone();
     let metrics_exporter = MetricExporter::builder()
         .with_http()
         .with_endpoint(url)
@@ -227,10 +223,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
-    // TODO(restore): remove this loop and restore the routes
-    // loop {
-    // }
-
     let db_path = config.api_keys_db.clone();
     // Initialize API key manager
     let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
@@ -239,8 +231,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Create protected routes that require API key
     let protected_routes = Router::new()
         .route("/file", post(upload_file))
-        // TODO(restore): Uncomment when download_file is implemented
-        // .route("/file", get(download_file))
+        .route("/file", get(download_file))
         .route_layer(from_fn(require_api_key));
 
     // Create main router with all routes

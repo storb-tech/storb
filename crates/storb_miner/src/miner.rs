@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use base::sync::Synchronizable;
 use base::{BaseNeuron, BaseNeuronConfig, NeuronError};
 use tokio::sync::RwLock;
-use tracing::info;
 
 #[derive(Clone)]
 pub struct MinerConfig {

@@ -7,12 +7,10 @@ use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length};
-use base::swarm::db::MetadataDBCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{swarm, BaseNeuron, NodeInfo};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
-use crabtensor::wallet::Signer;
 use futures::{Stream, TryStreamExt};
 use quinn::Connection;
 use rand::rngs::StdRng;
@@ -36,7 +34,6 @@ const BYTES_PER_MB: u64 = 1024 * 1024;
 pub(crate) struct UploadProcessor<'a> {
     pub miner_uids: Vec<u16>,
     pub miner_connections: Vec<(SocketAddr, Connection)>,
-    pub validator_id: Compact<u16>,
     pub state: &'a ValidatorState,
 }
 
@@ -124,8 +121,7 @@ pub async fn upload_piece_data(
 impl<'a> UploadProcessor<'a> {
     /// Create a new instance of the UploadProcessor.
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
-        let (validator_id, quic_addresses, miner_uids) =
-            get_id_quic_uids(state.validator.clone()).await;
+        let (_, quic_addresses, miner_uids) = get_id_quic_uids(state.validator.clone()).await;
 
         info!(
             "Attempting to establish connections with {} miners",
@@ -161,12 +157,10 @@ impl<'a> UploadProcessor<'a> {
         Ok(Self {
             miner_uids,
             miner_connections,
-            validator_id,
             state,
         })
     }
 
-    // TODO(restore)
     /// Process the upload of a file and its distribution to miners.
     pub(crate) async fn process_upload<S, E>(
         &self,
@@ -185,7 +179,7 @@ impl<'a> UploadProcessor<'a> {
         }
 
         let chunk_size = piece_length(total_size, None, None);
-        let (tx, rx) = mpsc::channel(chunk_size as usize);
+        let (tx, rx) = mpsc::channel::<(u64, Vec<u8>)>(chunk_size as usize);
 
         // Spawn producer task
         let producer_handle = {
@@ -241,12 +235,22 @@ impl<'a> UploadProcessor<'a> {
             name: filename,
             length: total_size,
             chunk_size,
-            chunk_count: (total_size + chunk_size - 1) / chunk_size,
+            chunk_count: chunks_with_pieces.len() as u64,
             creation_timestamp: now,
             // TODO: use the signature of the data blob owner
             // empty signature for now
             signature: KeypairSignature::from_raw([0; 64]),
         };
+
+        // display chunks_with_pieces
+        debug!("Chunks with pieces: {:?}", chunks_with_pieces);
+
+        // display hash of chunks_with_pieces
+        let serialized = bincode::serialize(&chunks_with_pieces)?;
+        debug!(
+            "HASH: {}",
+            hex::encode(blake3::hash(&serialized).as_bytes())
+        );
 
         swarm::db::MetadataDB::insert_object(&metadatdb_sender, infohash_value, chunks_with_pieces)
             .await
@@ -259,7 +263,7 @@ impl<'a> UploadProcessor<'a> {
 
 async fn produce_bytes<S, E>(
     stream: S,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<(u64, Vec<u8>)>,
     total_size: u64,
     chunk_size: usize,
 ) -> Result<()>
@@ -271,6 +275,7 @@ where
     let mut buffer = Vec::with_capacity(chunk_size);
 
     let mut stream = stream.map_err(|e| anyhow::anyhow!("Stream error: {}", e.into()));
+    let mut chunk_idx: u64 = 0;
 
     while let Some(chunk_result) = stream.try_next().await? {
         buffer.extend_from_slice(&chunk_result);
@@ -292,42 +297,34 @@ where
                 );
             }
 
-            tx.send(chunk_data).await?;
+            tx.send((chunk_idx, chunk_data)).await?;
+            chunk_idx += 1;
         }
     }
 
     // Send any remaining data
     if !buffer.is_empty() {
         total_processed += buffer.len() as u64;
-        tx.send(buffer).await?;
+        // TODO: is sending the chunk idx and remaining buffer correct here?
+        tx.send((chunk_idx, buffer)).await?;
     }
 
     info!("Total bytes processed: {}", total_processed);
     Ok(())
 }
 
-// TODO(restore)
 async fn consume_bytes(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<(u64, Vec<u8>)>,
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
 ) -> Result<(
     Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)>,
     Vec<[u8; 32]>,
 )> {
-    let mut chunk_idx = 0;
-    let mut piece_hashes: Vec<[u8; 32]> = Vec::new();
     let mut chunks_with_pieces: Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)> =
         Vec::new();
-
-    let validator_guard = validator_base_neuron.read().await;
-    let vali_uid = validator_guard
-        .local_node_info
-        .uid
-        .context("Failed to get UID for validator")?;
-    drop(validator_guard);
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
     // and hence determine which miners to use for each piece. we do the following for the time being:
@@ -343,17 +340,18 @@ async fn consume_bytes(
         .collect();
     let miner_uids: Vec<u16> = indices.iter().map(|&i| miner_uids[i]).collect();
 
-    while let Some(chunk) = rx.recv().await {
+    while let Some((chunk_idx, chunk)) = rx.recv().await {
         // Encode the chunk using FEC
         let encoded = encode_chunk(&chunk, chunk_idx);
-        let mut chunk_piece_hashes: Vec<[u8; 32]> = Vec::new();
+        let target_piece_count = encoded.pieces.len();
+        // Create filled vector of length target_piece_count
+        let mut chunk_piece_hashes: Vec<[u8; 32]> = vec![[0; 32]; target_piece_count];
         let mut chunk_hash_raw = blake3::Hasher::new();
 
         // Distribute pieces to miners
         let mut futures = Vec::new();
         let successful_pieces = Arc::new(RwLock::new(HashSet::new()));
         let upload_count = Arc::new(AtomicUsize::new(0));
-        let target_piece_count = encoded.pieces.len();
 
         // Create a channel to signal when we have enough successful uploads
         let (completion_tx, _) = tokio::sync::broadcast::channel(1);
@@ -459,11 +457,10 @@ async fn consume_bytes(
         for result in results {
             match result {
                 // TODO: remove unused variables from the match arm?
-                Ok(Ok(Some((_, _, piece_hash, miner_uid)))) => {
+                Ok(Ok(Some((piece_idx, _, piece_hash, miner_uid)))) => {
                     // Process successful upload (DHT updates etc)
                     chunk_hash_raw.update(&piece_hash);
-                    chunk_piece_hashes.push(piece_hash);
-                    piece_hashes.push(piece_hash);
+                    chunk_piece_hashes[piece_idx as usize] = piece_hash;
 
                     debug!("UPLOAD PIECE HASH: {:?}", &piece_hash);
 
@@ -526,9 +523,13 @@ async fn consume_bytes(
 
         let chunk_with_pieces = (chunk_dht_value.clone(), chunk_piece_values.clone());
         chunks_with_pieces.push(chunk_with_pieces);
-
-        chunk_idx += 1;
     }
+
+    // get pieces from chunks_with_pieces
+    let piece_hashes: Vec<[u8; 32]> = chunks_with_pieces
+        .iter()
+        .flat_map(|(_, pieces)| pieces.iter().map(|p| p.piece_hash))
+        .collect();
 
     Ok((chunks_with_pieces, piece_hashes))
 }

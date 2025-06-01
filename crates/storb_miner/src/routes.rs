@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{self, Query};
@@ -8,7 +7,6 @@ use axum::response::IntoResponse;
 use base::piece_hash::{piecehash_to_bytes_raw, PieceHash};
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
 use crate::MinerState;

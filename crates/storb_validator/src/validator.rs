@@ -10,15 +10,13 @@ use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length, Piece};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{piece_hash, swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
+use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
 use chrono::Utc;
-use crabtensor::api::runtime_apis::metadata;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
 use crabtensor::weights::set_weights_payload;
 use crabtensor::weights::NormalizedWeight;
 use futures::stream::{FuturesUnordered, StreamExt};
-use libp2p::kad::RecordKey;
 use libp2p::Multiaddr;
 use ndarray::Array1;
 use rand::rngs::StdRng;
@@ -27,7 +25,7 @@ use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, RwLock};
 use tokio::task;
 use tracing::{debug, error, info, warn};
 
@@ -36,7 +34,7 @@ use crate::constants::{
     MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 use crate::quic::{create_quic_client, make_client_endpoint};
-use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
+use crate::scoring::{normalize_min_max, ScoringSystem};
 use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
@@ -176,7 +174,7 @@ impl Validator {
         let mut store_futures = FuturesUnordered::new();
 
         // random .bin filename
-        let filename = format!("chunk_{}.bin", rng.gen::<u64>().to_string());
+        let filename = format!("chunk_{}.bin", rng.gen::<u64>());
 
         let now = Utc::now();
 
@@ -331,7 +329,7 @@ impl Validator {
         let vali_id_compact = Compact(validator_id);
 
         let chunk_value = swarm::models::ChunkValue {
-            chunk_hash: chunk_hash.clone(),
+            chunk_hash,
             k: encoded.k,
             m: encoded.m,
             chunk_size: encoded.chunk_size,
@@ -344,15 +342,15 @@ impl Validator {
             .pieces
             .iter()
             .map(|piece| {
-                let p_hash = blake3::hash(&piece.data).as_bytes().to_owned();
+                let piece_hash = blake3::hash(&piece.data).as_bytes().to_owned();
                 swarm::models::PieceValue {
-                    piece_hash: p_hash.clone(),
+                    piece_hash,
                     piece_size: piece.data.len() as u64,
                     piece_type: piece.piece_type.clone(),
                     miners: miners_for_piece_hash
-                        .get(&p_hash)
+                        .get(&piece_hash)
                         .cloned()
-                        .unwrap_or_else(|| vec![vali_id_compact.clone()]),
+                        .unwrap_or_else(|| vec![vali_id_compact]),
                 }
             })
             .collect();
@@ -600,7 +598,6 @@ impl Validator {
         let start_time = Instant::now();
 
         let piece_len = piece.data.len();
-        let piece_idx = piece.piece_idx;
 
         let quic_conn = match create_quic_client(&client, socket_addr).await {
             Ok(conn) => conn,

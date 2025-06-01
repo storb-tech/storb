@@ -127,7 +127,7 @@ impl MetadataDB {
         // Test connection and validate database
         {
             let conn = pool.get()?;
-            Self::validate_database(&*conn)?;
+            Self::validate_database(&conn)?;
         }
 
         let (command_sender, command_receiver) =
@@ -203,7 +203,7 @@ impl MetadataDB {
         let pool = Arc::clone(&self.pool);
         let value = value.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let tx = conn.unchecked_transaction()?;
 
@@ -224,7 +224,7 @@ impl MetadataDB {
         }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send the result through the response channel
-        if response_sender.send(Ok(result)).await.is_err() {
+        if response_sender.send(Ok(())).await.is_err() {
             error!("Failed to send piece repair history response");
         }
 
@@ -265,7 +265,7 @@ impl MetadataDB {
         let pool = Arc::clone(&self.pool);
         let value = value.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let tx = conn.unchecked_transaction()?;
 
@@ -304,7 +304,7 @@ impl MetadataDB {
         }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send the result through the response channel
-        if response_sender.send(Ok(result)).await.is_err() {
+        if response_sender.send(Ok(())).await.is_err() {
             error!("Failed to send chunk challenge history response");
         }
 
@@ -347,7 +347,7 @@ impl MetadataDB {
         let pool = Arc::clone(&self.pool);
         let infohash_value = infohash_value.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let tx = conn.unchecked_transaction()?;
 
@@ -459,7 +459,7 @@ impl MetadataDB {
                                 .query_row(params![piece.piece_hash], |row| {
                                     row.get(0)
                                 })
-                                .map_err(|e| MetadataDBError::Database(e))?;
+                                .map_err(MetadataDBError::Database)?;
                             let mut existing_miners: Vec<Compact<u16>> =
                                 serde_json::from_str(&existing_miners).map_err(|e| {
                                     MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
@@ -488,7 +488,7 @@ impl MetadataDB {
                                 "UPDATE pieces SET miners = ?1 WHERE piece_hash = ?2",
                                 params![updated_miners, piece.piece_hash],
                             )
-                            .map_err(|e| MetadataDBError::Database(e))?;
+                            .map_err(MetadataDBError::Database)?;
                         }
                         Err(e) => return Err(MetadataDBError::Database(e)),
                     }
@@ -521,7 +521,7 @@ impl MetadataDB {
         }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send result through response channel
-        if let Err(e) = response_sender.send(Ok(result)).await {
+        if let Err(e) = response_sender.send(Ok(())).await {
             error!("Failed to send response: {}", e);
             Err(MetadataDBError::Database(
                 rusqlite::Error::ExecuteReturnedResults,
@@ -571,9 +571,9 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT p.piece_hash, p.piece_size, p.piece_type, p.miners 
-                    FROM pieces p 
-                    INNER JOIN chunk_pieces cp ON p.piece_hash = cp.piece_hash 
+                "SELECT p.piece_hash, p.piece_size, p.piece_type, p.miners
+                    FROM pieces p
+                    INNER JOIN chunk_pieces cp ON p.piece_hash = cp.piece_hash
                     WHERE cp.chunk_hash = ?1
                     ORDER BY cp.piece_idx",
             )?;
@@ -593,7 +593,7 @@ impl MetadataDB {
                                 )),
                             )
                         })?,
-                        miners: serde_json::from_str(&row.get::<_, String>(3)?.as_str()).map_err(
+                        miners: serde_json::from_str(row.get::<_, String>(3)?.as_str()).map_err(
                             |e| {
                                 rusqlite::Error::FromSqlConversionFailure(
                                     3,
@@ -656,10 +656,10 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT c.chunk_hash, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size 
-                 FROM tracker_chunks tc 
-                 JOIN chunks c ON tc.chunk_hash = c.chunk_hash 
-                 WHERE tc.infohash = ?1 
+                "SELECT c.chunk_hash, c.k, c.m, c.chunk_size, c.padlen, c.original_chunk_size
+                 FROM tracker_chunks tc
+                 JOIN chunks c ON tc.chunk_hash = c.chunk_hash
+                 WHERE tc.infohash = ?1
                  ORDER BY tc.chunk_idx",
             )?;
 
@@ -735,8 +735,8 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature 
-                 FROM infohashes 
+                "SELECT infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature
+                 FROM infohashes
                  WHERE infohash = ?1",
             )?;
 
@@ -813,8 +813,8 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT chunk_hash, k, m, chunk_size, padlen, original_chunk_size 
-                 FROM chunks 
+                "SELECT chunk_hash, k, m, chunk_size, padlen, original_chunk_size
+                 FROM chunks
                  ORDER BY RANDOM() LIMIT 1",
             )?;
 
@@ -885,8 +885,8 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature 
-                 FROM piece_repair_history 
+                "SELECT piece_repair_hash, piece_hash, chunk_hash, validator_id, timestamp, signature
+                 FROM piece_repair_history
                  WHERE piece_repair_hash = ?1",
             )?;
 
@@ -962,8 +962,8 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature 
-                 FROM chunk_challenge_history 
+                "SELECT challenge_hash, chunk_hash, validator_id, miners_challenged, miners_successful, piece_repair_hash, timestamp, signature
+                 FROM chunk_challenge_history
                  WHERE challenge_hash = ?1",
             )?;
 
@@ -1167,7 +1167,6 @@ impl MetadataDB {
 // tests for insertion and query functions in the metadatadb
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::path::PathBuf;
 
     use chrono::Utc;
