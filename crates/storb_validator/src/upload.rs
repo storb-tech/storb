@@ -198,7 +198,8 @@ impl<'a> UploadProcessor<'a> {
         let miner_connections = self.miner_connections.clone();
         let validator = self.state.validator.clone();
         let validator_read_guard = validator.neuron.read().await;
-        let metadatdb_sender = validator.metadatadb_sender.clone();
+        let metadatadb_sender = validator.metadatadb_sender.clone();
+        let metadatadb_sender_clone = metadatadb_sender.clone();
 
         // Get MemoryDB from state
         let scoring_system = validator.scoring_system.clone();
@@ -209,6 +210,7 @@ impl<'a> UploadProcessor<'a> {
             consume_bytes(
                 validator_clone.neuron.clone(),
                 scoring_system,
+                metadatadb_sender_clone,
                 rx,
                 miner_uids,
                 miner_connections,
@@ -252,9 +254,13 @@ impl<'a> UploadProcessor<'a> {
             hex::encode(blake3::hash(&serialized).as_bytes())
         );
 
-        swarm::db::MetadataDB::insert_object(&metadatdb_sender, infohash_value, chunks_with_pieces)
-            .await
-            .expect("Failed to insert object entry into local database"); // TOOD: handle this error properly
+        swarm::db::MetadataDB::insert_object(
+            &metadatadb_sender,
+            infohash_value,
+            chunks_with_pieces,
+        )
+        .await
+        .expect("Failed to insert object entry into local database"); // TOOD: handle this error properly
         debug!("Inserted object entry with infohash {infohash_str} into local database");
 
         Ok(infohash_str)
@@ -316,6 +322,7 @@ where
 async fn consume_bytes(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
+    metadatadb_sender: mpsc::Sender<swarm::db::MetadataDBCommand>,
     mut rx: mpsc::Receiver<(u64, Vec<u8>)>,
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
@@ -384,6 +391,7 @@ async fn consume_bytes(
                 let upload_count = upload_count.clone();
                 let completion_tx = completion_tx.clone();
                 let mut completion_rx = completion_tx.subscribe();
+                let metadatadb_sender_clone = metadatadb_sender.clone();
 
                 let piece_data = piece.clone();
                 let future = tokio::spawn(async move {
@@ -415,6 +423,7 @@ async fn consume_bytes(
                             &conn,
                             piece_data.clone(),
                             scoring_clone,
+                            Some(metadatadb_sender_clone),
                         ) => {
                             match upload_result {
                                 Ok((piece_hash, miner_uid)) => {
@@ -541,7 +550,34 @@ pub async fn upload_piece_to_miner(
     conn: &Connection,
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
+    metadatadb_sender: Option<mpsc::Sender<swarm::db::MetadataDBCommand>>,
 ) -> Result<([u8; 32], u16)> {
+    let piece_hash = *blake3::hash(&piece.data).as_bytes();
+
+    // If there is a metadatadb_sender, check if the piece is already uploaded
+    if let Some(metadatadb_sender) = &metadatadb_sender {
+        // Check if the piece is already uploaded
+        // if trying to get_piece returns an error, it means that the piece is not in the database
+        match swarm::db::MetadataDB::get_piece(metadatadb_sender, piece_hash).await {
+            Ok(_) => {
+                // Piece already exists, no need to upload
+                debug!(
+                    "Piece with hash {} already exists, skipping upload",
+                    hex::encode(piece_hash)
+                );
+                return Ok((piece_hash, miner_info.neuron_info.uid));
+            }
+            Err(e) => {
+                // We assume that the piece does not exist if we get an error
+                debug!(
+                    "Piece with hash {} not found in database, proceeding with upload: {}",
+                    hex::encode(piece_hash),
+                    e
+                );
+            }
+        };
+    }
+
     let miner_uid = miner_info.neuron_info.uid;
     // Track request
     if let Err(e) = scoring_system
@@ -556,7 +592,6 @@ pub async fn upload_piece_to_miner(
         );
     }
 
-    let piece_hash = *blake3::hash(&piece.data).as_bytes();
     let upload_result =
         upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;
 

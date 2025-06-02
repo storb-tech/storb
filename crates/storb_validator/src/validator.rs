@@ -250,29 +250,11 @@ impl Validator {
         while let Some(result) = store_futures.next().await {
             match result {
                 Ok(Ok(challenge_result)) => {
-                    let db = self.scoring_system.write().await.db.clone();
-
-                    // Update attempts count
-                    if let Err(e) = db.conn.lock().await.execute(
-                        "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
-                        [challenge_result.miner_uid],
-                    ) {
-                        error!("Failed to update store attempts: {}", e);
-                    }
-
                     if challenge_result.success {
                         info!(
                             "Store challenge succeeded for miner {}",
                             challenge_result.miner_uid
                         );
-                        // Update success count
-                        if let Err(e) = db.conn.lock().await.execute(
-                            "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
-                            [challenge_result.miner_uid],
-                        ) {
-                            error!("Failed to update store successes: {}", e);
-                        }
-
                         // add the miner uid to the miners_for_piece_hash
                         miners_for_piece_hash
                             .entry(challenge_result.piece_hash)
@@ -621,6 +603,7 @@ impl Validator {
             &quic_conn,
             piece,
             scoring_clone,
+            None,
         )
         .await
         {
