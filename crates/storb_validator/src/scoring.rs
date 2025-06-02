@@ -5,28 +5,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use base::memory_db::MemoryDb;
-use libp2p::kad::RecordKey;
 use ndarray::{array, s, Array, Array1};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{MIN_REQUESTS_FOR_SCORE, STATS_RESET_THRESHOLD, Z_SCORE, Z_SQUARED};
-
-// Add these error types at the top of the file
-#[derive(Debug, Error)]
-pub enum ChunkError {
-    #[error("No chunks available in database")]
-    EmptyTable,
-    #[error("Invalid chunk size: expected 32 bytes, got {0}")]
-    InvalidSize(usize),
-    #[error("Database error: {0}")]
-    Database(#[from] rusqlite::Error),
-}
 
 /// ScoreState stores the scores for each miner.
 ///
@@ -138,56 +121,6 @@ pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
     }
 
     arr.mapv(|x| (x - min) / (max - min))
-}
-
-#[allow(dead_code)]
-pub async fn select_random_chunk_from_db(
-    db_conn: Arc<Mutex<Connection>>,
-) -> Result<RecordKey, ChunkError> {
-    // Get row count
-    let row_count: u64 = db_conn
-        .lock()
-        .await
-        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-        .map_err(ChunkError::Database)?;
-
-    debug!("Num. entries in sqlite db: {row_count}");
-
-    // Check for empty table
-    if row_count == 0 {
-        return Err(ChunkError::EmptyTable);
-    }
-
-    let mut rng: StdRng = SeedableRng::from_entropy();
-    let offset_rows_by: u64 = rng.gen_range(0..row_count);
-
-    let row_idx = offset_rows_by + 1;
-    debug!("Getting chunk at row {row_idx} from sqlite db");
-
-    let chosen_chunk_vec: Vec<u8> = db_conn
-        .lock()
-        .await
-        .query_row(
-            "SELECT chunk_hash FROM chunks ORDER BY chunk_hash LIMIT 1 OFFSET ?",
-            [offset_rows_by],
-            |row| row.get(0),
-        )
-        .map_err(ChunkError::Database)?;
-
-    debug!("Chosen chunk: {:?}", chosen_chunk_vec);
-
-    // Validate chunk size
-    if chosen_chunk_vec.len() != 32 {
-        return Err(ChunkError::InvalidSize(chosen_chunk_vec.len()));
-    }
-
-    // Convert to fixed size array
-    let vec_len = chosen_chunk_vec.len();
-    let chosen_chunk_raw: [u8; 32] = chosen_chunk_vec
-        .try_into()
-        .map_err(|_| ChunkError::InvalidSize(vec_len))?;
-
-    Ok(RecordKey::new(&chosen_chunk_raw))
 }
 
 /// Calculates the Lower Confidence Bound (LCB) of a binomial proportion
@@ -497,75 +430,5 @@ impl ScoringSystem {
                 // TODO: submit to telemetry
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use rusqlite::Connection;
-    use tokio::sync::Mutex;
-
-    use super::*;
-
-    async fn setup_test_db() -> Arc<Mutex<Connection>> {
-        let conn = Connection::open_in_memory().unwrap();
-
-        // Create test table and insert sample data
-        conn.execute("CREATE TABLE chunks (chunk_hash BLOB NOT NULL)", [])
-            .unwrap();
-
-        // Insert 3 sample chunks
-        let test_chunks = vec![vec![1u8; 32], vec![2u8; 32], vec![3u8; 32]];
-
-        for chunk in test_chunks {
-            conn.execute("INSERT INTO chunks (chunk_hash) VALUES (?)", [chunk])
-                .unwrap();
-        }
-
-        Arc::new(Mutex::new(conn))
-    }
-
-    #[tokio::test]
-    async fn test_select_random_chunk_success() {
-        let db_conn = setup_test_db().await;
-
-        // Call function multiple times to test randomness
-        for _ in 0..10 {
-            let result = select_random_chunk_from_db(db_conn.clone()).await;
-            assert!(result.is_ok());
-            let key = result.unwrap();
-            assert_eq!(key.as_ref().len(), 32); // Verify key length
-        }
-    }
-
-    #[tokio::test]
-    async fn test_select_random_chunk_empty_table() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE chunks (chunk BLOB NOT NULL)", [])
-            .unwrap();
-        let db_conn = Arc::new(Mutex::new(conn));
-
-        let result = select_random_chunk_from_db(db_conn).await;
-        assert!(matches!(result.unwrap_err(), ChunkError::EmptyTable));
-    }
-
-    #[tokio::test]
-    async fn test_select_random_chunk_invalid_data() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE chunks (chunk_hash BLOB NOT NULL)", [])
-            .unwrap();
-
-        // Insert invalid chunk hash (wrong size)
-        conn.execute(
-            "INSERT INTO chunks (chunk_hash) VALUES (?)",
-            [vec![1u8; 16]], // Only 16 bytes instead of 32
-        )
-        .unwrap();
-
-        let db_conn = Arc::new(Mutex::new(conn));
-        let result = select_random_chunk_from_db(db_conn).await;
-        assert!(matches!(result.unwrap_err(), ChunkError::InvalidSize(16)));
     }
 }

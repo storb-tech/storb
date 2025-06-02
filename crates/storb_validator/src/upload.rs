@@ -327,11 +327,16 @@ async fn consume_bytes(
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
 ) -> Result<(
-    Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)>,
+    Vec<(
+        metadata::models::ChunkValue,
+        Vec<metadata::models::PieceValue>,
+    )>,
     Vec<[u8; 32]>,
 )> {
-    let mut chunks_with_pieces: Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)> =
-        Vec::new();
+    let mut chunks_with_pieces: Vec<(
+        metadata::models::ChunkValue,
+        Vec<metadata::models::PieceValue>,
+    )> = Vec::new();
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
     // and hence determine which miners to use for each piece. we do the following for the time being:
@@ -467,7 +472,7 @@ async fn consume_bytes(
             match result {
                 // TODO: remove unused variables from the match arm?
                 Ok(Ok(Some((piece_idx, _, piece_hash, miner_uid)))) => {
-                    // Process successful upload (DHT updates etc)
+                    // Process successful upload
                     chunk_hash_raw.update(&piece_hash);
                     chunk_piece_hashes[piece_idx as usize] = piece_hash;
 
@@ -498,7 +503,7 @@ async fn consume_bytes(
 
         debug!("UPLOAD CHUNK HASH: {:?}", &chunk_hash);
 
-        let chunk_dht_value = metadata::models::ChunkValue {
+        let chunk_value = metadata::models::ChunkValue {
             chunk_hash: *chunk_hash,
             k: encoded.k,
             m: encoded.m,
@@ -530,7 +535,7 @@ async fn consume_bytes(
         // Put chunk entry into local database
         debug!("Distributed pieces for chunk with hash {:?}", chunk_hash);
 
-        let chunk_with_pieces = (chunk_dht_value.clone(), chunk_piece_values.clone());
+        let chunk_with_pieces = (chunk_value.clone(), chunk_piece_values.clone());
         chunks_with_pieces.push(chunk_with_pieces);
     }
 

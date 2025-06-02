@@ -300,7 +300,6 @@ impl Validator {
         let chunk_hash = chunk_hash_raw.finalize().as_bytes().to_owned();
         // let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
-        // Create chunk DHT value
         let validator_id = {
             let neuron_guard = self.neuron.read().await;
             neuron_guard
@@ -338,8 +337,10 @@ impl Validator {
             })
             .collect();
 
-        let chunks_with_pieces: Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)> =
-            vec![(chunk_value, piece_values.clone())];
+        let chunks_with_pieces: Vec<(
+            metadata::models::ChunkValue,
+            Vec<metadata::models::PieceValue>,
+        )> = vec![(chunk_value, piece_values.clone())];
 
         // attempt to insert object, show success message or error message
         match metadata::db::MetadataDB::insert_object(
@@ -374,7 +375,8 @@ impl Validator {
         info!("Running synthetic retrieval challenges");
 
         // pick pieces, ask some of the miners that have the pieces
-        let chunk_entry = match metadata::db::MetadataDB::get_random_chunk(&metadatadb_sender).await {
+        let chunk_entry = match metadata::db::MetadataDB::get_random_chunk(&metadatadb_sender).await
+        {
             Ok(chunk) => chunk,
             Err(e) => {
                 error!("Failed to get random chunk: {}", e);

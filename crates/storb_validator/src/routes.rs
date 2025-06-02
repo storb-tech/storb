@@ -247,16 +247,18 @@ pub async fn download_file(
         }
     };
 
-    let tracker =
-        metadata::db::MetadataDB::get_infohash(&processor.metadatadb_sender.clone(), infohash_bytes)
-            .await
-            .map_err(|e| {
-                error!("Failed to get infohash from the database: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
-            })?;
+    let tracker = metadata::db::MetadataDB::get_infohash(
+        &processor.metadatadb_sender.clone(),
+        infohash_bytes,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get infohash from the database: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
 
     // get file size
     let content_length = tracker.length;

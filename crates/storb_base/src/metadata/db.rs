@@ -1269,8 +1269,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        piece::PieceType,
         metadata::models::{ChunkValue, InfohashValue, PieceValue},
+        piece::PieceType,
     };
 
     // Helper function to create a test database with schema

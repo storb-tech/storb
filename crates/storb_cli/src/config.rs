@@ -1,7 +1,6 @@
 //! Settings for Storb, defined in the settings.toml file.
 
 use config::{Config, ConfigError, File};
-use libp2p::Multiaddr;
 use serde::Deserialize;
 
 #[allow(unused)]
@@ -17,16 +16,6 @@ pub struct Subtensor {
 #[derive(Debug, Deserialize)]
 pub struct Neuron {
     pub sync_frequency: u64,
-}
-
-#[allow(unused)]
-#[derive(Debug, Deserialize)]
-pub struct Dht {
-    pub port: u16,
-    #[serde(default)]
-    pub no_bootstrap: bool,
-    #[serde(default)]
-    pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
 #[allow(unused)]

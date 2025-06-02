@@ -224,13 +224,15 @@ impl DownloadProcessor {
         chunk_idx: u64,
     ) -> Result<()> {
         // let piece_hashes = chunk_info;
-        let piece_values =
-            metadata::db::MetadataDB::get_pieces_by_chunk(&metadatadb_sender, chunk_info.chunk_hash)
-                .await
-                .map_err(|e| {
-                    error!("Failed to get pieces by chunk: {}", e);
-                    anyhow!("Internal server error while getting pieces by chunk")
-                })?;
+        let piece_values = metadata::db::MetadataDB::get_pieces_by_chunk(
+            &metadatadb_sender,
+            chunk_info.chunk_hash,
+        )
+        .await
+        .map_err(|e| {
+            error!("Failed to get pieces by chunk: {}", e);
+            anyhow!("Internal server error while getting pieces by chunk")
+        })?;
 
         let total_pieces = piece_values.len();
 
