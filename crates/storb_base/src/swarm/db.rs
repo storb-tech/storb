@@ -1278,7 +1278,7 @@ mod tests {
         let db_path = temp_file.path().to_path_buf();
 
         // Path to the CRSQLite extension
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         // Create connection and set up schema
         let conn = Connection::open(&db_path).expect("Failed to open database");
@@ -1390,7 +1390,7 @@ mod tests {
     async fn test_insert_and_query_object() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1479,7 +1479,7 @@ mod tests {
     async fn test_insert_object_and_get_random_chunk() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1536,7 +1536,7 @@ mod tests {
     async fn test_insert_object_get_piece() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1595,7 +1595,7 @@ mod tests {
     async fn test_get_non_existant_piece() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1628,7 +1628,7 @@ mod tests {
     async fn test_insert_and_query_piece_repair_history() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1706,7 +1706,7 @@ mod tests {
     async fn test_insert_and_query_chunk_challenge_history() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 
@@ -1810,7 +1810,7 @@ mod tests {
     async fn test_insert_object_updates_piece_miners() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let db_path = setup_test_db(&temp_file);
-        let crsqlite_lib = PathBuf::from("/root/crsqlite/crsqlite.so");
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
 
         let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
 

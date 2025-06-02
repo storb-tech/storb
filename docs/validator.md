@@ -28,6 +28,31 @@ sqlx database create  --database-url "sqlite://storb_data/metadata.db"
 sqlx migrate run --source migrations/metadatadb/ --database-url "sqlite://storb_data/metadata.db"
 ```
 
+#### Installing cr-sqlite
+You will also need to install the cr-sqlite extension for sqlite.
+
+First, visit their releases page: https://github.com/vlcn-io/cr-sqlite/releases
+then download the latest release for your platform and extract it. For example, if you are on Linux, and running on a x86_64 platform, you would download `crsqlite-linux-x86_64.zip`
+```bash
+wget https://github.com/vlcn-io/cr-sqlite/releases/download/v0.16.3/crsqlite-linux-x86_64.zip
+unzip crsqlite-linux-x86_64.zip
+```
+
+Then, copy the `crsqlite.so` file to the `crsqlite` directory under the root directory of the repository.
+```bash
+mkdir -p /path/to/storb/repo/crsqlite
+mv /path/to/unzipped/crsqlite.so /path/to/storb/repo/crsqlite
+```
+
+Then update the `crsqlite_file` parameter in `settings.toml` to point to the location of the `crsqlite.so` file if it isn't already. For example:
+```toml
+...
+[validator]
+...
+crsqlite_file = "/path/to/storb/repo/crsqlite/crsqlite.so"
+...
+```
+
 ### Running validator
 
 #### Mainnet

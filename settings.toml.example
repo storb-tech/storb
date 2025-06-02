@@ -37,6 +37,7 @@ store_dir = "object_store"
 [validator]
 scores_state_file = "storb_data/scores.storb-state"
 api_keys_db = "storb_data/api_keys.db"
+crsqlite_file = "crsqlite/crsqlite.so"
 
 [validator.neuron]
 num_concurrent_forwards = 1

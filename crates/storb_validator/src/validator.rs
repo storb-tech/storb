@@ -84,6 +84,7 @@ impl MinerLatencyMap {
 #[derive(Clone, Debug)]
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
+    pub crsqlite_file: PathBuf,
     pub moving_average_alpha: f64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
@@ -121,7 +122,7 @@ impl Validator {
         // TODO(metadatadb): use config varibable to get path for crsqlite library?
         let (mut metadatadb, metadatadb_sender) = swarm::db::MetadataDB::new(
             &config.neuron_config.metadatadb_file,
-            &PathBuf::from("/root/crsqlite/crsqlite.so"),
+            &PathBuf::from(&config.crsqlite_file),
         )
         .map_err(|e| NeuronError::ConfigError(e.to_string()))?;
         info!("MetadataDB initialized");

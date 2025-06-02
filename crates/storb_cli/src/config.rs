@@ -56,6 +56,7 @@ pub struct ValidatorQuery {
 #[derive(Debug, Deserialize)]
 pub struct Validator {
     pub scores_state_file: String,
+    pub crsqlite_file: String,
     pub api_keys_db: String,
     pub neuron: ValidatorNeuron,
     pub query: ValidatorQuery,
