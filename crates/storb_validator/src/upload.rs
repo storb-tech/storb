@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{swarm, BaseNeuron, NodeInfo};
+use base::{metadata, BaseNeuron, NodeInfo};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
 use futures::{Stream, TryStreamExt};
@@ -232,7 +232,7 @@ impl<'a> UploadProcessor<'a> {
         let infohash_str = hex::encode(infohash);
 
         // Put tracker entry into local database
-        let infohash_value = swarm::models::InfohashValue {
+        let infohash_value = metadata::models::InfohashValue {
             infohash,
             name: filename,
             length: total_size,
@@ -254,7 +254,7 @@ impl<'a> UploadProcessor<'a> {
             hex::encode(blake3::hash(&serialized).as_bytes())
         );
 
-        swarm::db::MetadataDB::insert_object(
+        metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
             infohash_value,
             chunks_with_pieces,
@@ -322,15 +322,15 @@ where
 async fn consume_bytes(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
-    metadatadb_sender: mpsc::Sender<swarm::db::MetadataDBCommand>,
+    metadatadb_sender: mpsc::Sender<metadata::db::MetadataDBCommand>,
     mut rx: mpsc::Receiver<(u64, Vec<u8>)>,
     miner_uids: Vec<u16>,
     miner_connections: Vec<(SocketAddr, Connection)>,
 ) -> Result<(
-    Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)>,
+    Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)>,
     Vec<[u8; 32]>,
 )> {
-    let mut chunks_with_pieces: Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)> =
+    let mut chunks_with_pieces: Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)> =
         Vec::new();
 
     // TODO: the miners connections that will be used here should be determined by the scoring system
@@ -498,7 +498,7 @@ async fn consume_bytes(
 
         debug!("UPLOAD CHUNK HASH: {:?}", &chunk_hash);
 
-        let chunk_dht_value = swarm::models::ChunkValue {
+        let chunk_dht_value = metadata::models::ChunkValue {
             chunk_hash: *chunk_hash,
             k: encoded.k,
             m: encoded.m,
@@ -513,7 +513,7 @@ async fn consume_bytes(
             .pieces
             .iter()
             .enumerate()
-            .map(|(piece_idx, piece)| swarm::models::PieceValue {
+            .map(|(piece_idx, piece)| metadata::models::PieceValue {
                 piece_hash: chunk_piece_hashes[piece_idx],
                 piece_size: piece.data.len() as u64,
                 piece_type: piece.piece_type.clone(),
@@ -550,7 +550,7 @@ pub async fn upload_piece_to_miner(
     conn: &Connection,
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
-    metadatadb_sender: Option<mpsc::Sender<swarm::db::MetadataDBCommand>>,
+    metadatadb_sender: Option<mpsc::Sender<metadata::db::MetadataDBCommand>>,
 ) -> Result<([u8; 32], u16)> {
     let piece_hash = *blake3::hash(&piece.data).as_bytes();
 
@@ -558,7 +558,7 @@ pub async fn upload_piece_to_miner(
     if let Some(metadatadb_sender) = &metadatadb_sender {
         // Check if the piece is already uploaded
         // if trying to get_piece returns an error, it means that the piece is not in the database
-        match swarm::db::MetadataDB::get_piece(metadatadb_sender, piece_hash).await {
+        match metadata::db::MetadataDB::get_piece(metadatadb_sender, piece_hash).await {
             Ok(_) => {
                 // Piece already exists, no need to upload
                 debug!(

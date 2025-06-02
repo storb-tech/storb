@@ -46,11 +46,8 @@ mv /path/to/unzipped/crsqlite.so /path/to/storb/repo/crsqlite
 
 Then update the `crsqlite_file` parameter in `settings.toml` to point to the location of the `crsqlite.so` file if it isn't already. For example:
 ```toml
-...
 [validator]
-...
 crsqlite_file = "/path/to/storb/repo/crsqlite/crsqlite.so"
-...
 ```
 
 ### Running validator

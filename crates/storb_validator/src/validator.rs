@@ -10,7 +10,7 @@ use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length, Piece};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
+use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError};
 use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
@@ -99,7 +99,7 @@ pub struct Validator {
     pub config: ValidatorConfig,
     pub neuron: Arc<RwLock<BaseNeuron>>,
     pub scoring_system: Arc<RwLock<ScoringSystem>>,
-    pub metadatadb_sender: mpsc::Sender<swarm::db::MetadataDBCommand>,
+    pub metadatadb_sender: mpsc::Sender<metadata::db::MetadataDBCommand>,
 }
 
 impl Validator {
@@ -120,7 +120,7 @@ impl Validator {
 
         info!("Validator initialized with config: {:?}", config);
         // TODO(metadatadb): use config varibable to get path for crsqlite library?
-        let (mut metadatadb, metadatadb_sender) = swarm::db::MetadataDB::new(
+        let (mut metadatadb, metadatadb_sender) = metadata::db::MetadataDB::new(
             &config.neuron_config.metadatadb_file,
             &PathBuf::from(&config.crsqlite_file),
         )
@@ -194,7 +194,7 @@ impl Validator {
             .context("Failed to serialize infohash message")?;
 
         let infohash_sig = sign_message(&signer, infohash_message_bytes);
-        let infohash_value = swarm::models::InfohashValue {
+        let infohash_value = metadata::models::InfohashValue {
             infohash,
             name: filename,
             length: 69420, // placeholder for total file size
@@ -311,7 +311,7 @@ impl Validator {
 
         let vali_id_compact = Compact(validator_id);
 
-        let chunk_value = swarm::models::ChunkValue {
+        let chunk_value = metadata::models::ChunkValue {
             chunk_hash,
             k: encoded.k,
             m: encoded.m,
@@ -321,12 +321,12 @@ impl Validator {
         };
 
         // Create piece values
-        let piece_values: Vec<swarm::models::PieceValue> = encoded
+        let piece_values: Vec<metadata::models::PieceValue> = encoded
             .pieces
             .iter()
             .map(|piece| {
                 let piece_hash = blake3::hash(&piece.data).as_bytes().to_owned();
-                swarm::models::PieceValue {
+                metadata::models::PieceValue {
                     piece_hash,
                     piece_size: piece.data.len() as u64,
                     piece_type: piece.piece_type.clone(),
@@ -338,11 +338,11 @@ impl Validator {
             })
             .collect();
 
-        let chunks_with_pieces: Vec<(swarm::models::ChunkValue, Vec<swarm::models::PieceValue>)> =
+        let chunks_with_pieces: Vec<(metadata::models::ChunkValue, Vec<metadata::models::PieceValue>)> =
             vec![(chunk_value, piece_values.clone())];
 
         // attempt to insert object, show success message or error message
-        match swarm::db::MetadataDB::insert_object(
+        match metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
             infohash_value,
             chunks_with_pieces,
@@ -374,7 +374,7 @@ impl Validator {
         info!("Running synthetic retrieval challenges");
 
         // pick pieces, ask some of the miners that have the pieces
-        let chunk_entry = match swarm::db::MetadataDB::get_random_chunk(&metadatadb_sender).await {
+        let chunk_entry = match metadata::db::MetadataDB::get_random_chunk(&metadatadb_sender).await {
             Ok(chunk) => chunk,
             Err(e) => {
                 error!("Failed to get random chunk: {}", e);
@@ -384,7 +384,7 @@ impl Validator {
 
         debug!("Selected chunk key: {:?}", chunk_entry);
 
-        let challenge_pieces = match swarm::db::MetadataDB::get_pieces_by_chunk(
+        let challenge_pieces = match metadata::db::MetadataDB::get_pieces_by_chunk(
             &metadatadb_sender,
             chunk_entry.chunk_hash,
         )

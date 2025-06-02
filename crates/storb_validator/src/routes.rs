@@ -6,7 +6,7 @@ use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
-use base::swarm;
+use base::metadata;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
@@ -248,7 +248,7 @@ pub async fn download_file(
     };
 
     let tracker =
-        swarm::db::MetadataDB::get_infohash(&processor.metadatadb_sender.clone(), infohash_bytes)
+        metadata::db::MetadataDB::get_infohash(&processor.metadatadb_sender.clone(), infohash_bytes)
             .await
             .map_err(|e| {
                 error!("Failed to get infohash from the database: {}", e);

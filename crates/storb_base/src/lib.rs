@@ -18,12 +18,11 @@ use tracing::{error, info};
 
 use crate::version::Version;
 
-// TODO: rename this from swarm to something else
 pub mod constants;
 pub mod memory_db;
 pub mod piece;
 pub mod piece_hash;
-pub mod swarm;
+pub mod metadata;
 pub mod sync;
 pub mod utils;
 pub mod verification;

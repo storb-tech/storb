@@ -8,9 +8,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base::constants::MIN_BANDWIDTH;
-use base::swarm::db::MetadataDBCommand;
+use base::metadata::db::MetadataDBCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{swarm, AddressBook, BaseNeuron};
+use base::{metadata, AddressBook, BaseNeuron};
 use crabtensor::sign::sign_message;
 use futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -45,7 +45,7 @@ impl DownloadProcessor {
         validator_base_neuron: Arc<RwLock<BaseNeuron>>,
         scoring_system: Arc<RwLock<ScoringSystem>>,
         local_address_book: AddressBook,
-        piece_value: swarm::models::PieceValue,
+        piece_value: metadata::models::PieceValue,
         chunk_idx: u64,
         piece_idx: u64,
     ) -> Result<base::piece::Piece> {
@@ -220,12 +220,12 @@ impl DownloadProcessor {
         metadatadb_sender: mpsc::Sender<MetadataDBCommand>,
         address_book: AddressBook,
         chunk_tx: mpsc::Sender<Vec<u8>>,
-        chunk_info: swarm::models::ChunkValue,
+        chunk_info: metadata::models::ChunkValue,
         chunk_idx: u64,
     ) -> Result<()> {
         // let piece_hashes = chunk_info;
         let piece_values =
-            swarm::db::MetadataDB::get_pieces_by_chunk(&metadatadb_sender, chunk_info.chunk_hash)
+            metadata::db::MetadataDB::get_pieces_by_chunk(&metadatadb_sender, chunk_info.chunk_hash)
                 .await
                 .map_err(|e| {
                     error!("Failed to get pieces by chunk: {}", e);
@@ -235,7 +235,7 @@ impl DownloadProcessor {
         let total_pieces = piece_values.len();
 
         let (piece_task_tx, piece_task_rx) =
-            mpsc::channel::<(u64, swarm::models::PieceValue)>(total_pieces);
+            mpsc::channel::<(u64, metadata::models::PieceValue)>(total_pieces);
         let piece_task_rx = Arc::new(Mutex::new(piece_task_rx));
         let (piece_result_tx, mut piece_result_rx) =
             mpsc::channel::<base::piece::Piece>(total_pieces);
@@ -362,7 +362,7 @@ impl DownloadProcessor {
     /// Process the file download request.
     pub(crate) async fn process_download(
         &self,
-        tracker: swarm::models::InfohashValue,
+        tracker: metadata::models::InfohashValue,
     ) -> Result<impl IntoResponse, (StatusCode, String)> {
         let infohash = tracker.infohash;
         debug!("Downloading file with infohash: {}", hex::encode(infohash));
@@ -370,7 +370,7 @@ impl DownloadProcessor {
         let metadatadb_sender = self.metadatadb_sender.clone();
 
         let chunk_values =
-            swarm::db::MetadataDB::get_chunks_by_infohash(&metadatadb_sender, infohash.to_vec())
+            metadata::db::MetadataDB::get_chunks_by_infohash(&metadatadb_sender, infohash.to_vec())
                 .await
                 .map_err(|e| {
                     error!("Failed to get chunks by infohash: {}", e);

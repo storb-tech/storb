@@ -24,7 +24,6 @@ pub enum PieceType {
     Parity,
 }
 
-// implement TryFrom for PieceType to convert from u8
 impl TryFrom<u8> for PieceType {
     type Error = &'static str;
 

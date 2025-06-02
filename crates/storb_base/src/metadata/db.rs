@@ -12,7 +12,7 @@ use tracing::{debug, error};
 use super::models::{
     ChunkChallengeHistory, ChunkValue, InfohashValue, PieceChallengeHistory, SqlDateTime,
 };
-use crate::{constants::DB_MPSC_BUFFER_SIZE, swarm::models::PieceValue};
+use crate::{constants::DB_MPSC_BUFFER_SIZE, metadata::models::PieceValue};
 
 #[derive(Debug)]
 pub enum MetadataDBError {
@@ -1270,7 +1270,7 @@ mod tests {
     use super::*;
     use crate::{
         piece::PieceType,
-        swarm::models::{ChunkValue, InfohashValue, PieceValue},
+        metadata::models::{ChunkValue, InfohashValue, PieceValue},
     };
 
     // Helper function to create a test database with schema

@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-// syncing timeout
 pub const NEURON_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub const PIECE_LENGTH_FUNC_MIN_SIZE: u64 = 16 * 1024; // 16 KiB
