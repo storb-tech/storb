@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, InfoHash, PieceHash};
+use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, InfoHash, PieceHash};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{metadata, BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
@@ -357,7 +357,7 @@ async fn consume_bytes(
         let encoded = encode_chunk(&chunk, chunk_idx);
         let target_piece_count = encoded.pieces.len();
         // Create filled vector of length target_piece_count
-        let mut chunk_piece_hashes: Vec<PieceHash> = vec![[0; 32]; target_piece_count];
+        let mut chunk_piece_hashes: Vec<PieceHash> = vec![PieceHash([0; 32]); target_piece_count];
         let mut chunk_hash_raw = blake3::Hasher::new();
 
         // Distribute pieces to miners
@@ -473,7 +473,7 @@ async fn consume_bytes(
                 // TODO: remove unused variables from the match arm?
                 Ok(Ok(Some((piece_idx, _, piece_hash, miner_uid)))) => {
                     // Process successful upload
-                    chunk_hash_raw.update(&piece_hash);
+                    chunk_hash_raw.update(&piece_hash.0);
                     chunk_piece_hashes[piece_idx as usize] = piece_hash;
 
                     debug!("UPLOAD PIECE HASH: {:?}", &piece_hash);
@@ -504,7 +504,7 @@ async fn consume_bytes(
         debug!("UPLOAD CHUNK HASH: {:?}", &chunk_hash);
 
         let chunk_value = metadata::models::ChunkValue {
-            chunk_hash: *chunk_hash,
+            chunk_hash: ChunkHash(*chunk_hash),
             k: encoded.k,
             m: encoded.m,
             chunk_size,
@@ -557,7 +557,7 @@ pub async fn upload_piece_to_miner(
     scoring_system: Arc<RwLock<ScoringSystem>>,
     metadatadb_sender: Option<mpsc::Sender<metadata::db::MetadataDBCommand>>,
 ) -> Result<(PieceHash, NodeUID)> {
-    let piece_hash = *blake3::hash(&piece.data).as_bytes();
+    let piece_hash = PieceHash(*blake3::hash(&piece.data).as_bytes());
 
     // If there is a metadatadb_sender, check if the piece is already uploaded
     if let Some(metadatadb_sender) = &metadatadb_sender {
@@ -605,9 +605,9 @@ pub async fn upload_piece_to_miner(
 
     // log hash that we get vs. hash that we expect
     info!(
-        "Hash from miner: {:?}, Expected hash: {:?}",
-        upload_result.as_bytes_ref(),
-        piece_hash
+        "Hash from miner: {}, Expected hash: {}",
+        hex::encode(upload_result.as_bytes_ref()),
+        hex::encode(piece_hash)
     );
 
     // Update stats
@@ -617,7 +617,7 @@ pub async fn upload_piece_to_miner(
         [miner_uid],
     )?;
 
-    if upload_result.as_bytes_ref() == piece_hash {
+    if upload_result.as_bytes_ref() == piece_hash.0 {
         db.conn.lock().await.execute(
             "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
             [miner_uid],

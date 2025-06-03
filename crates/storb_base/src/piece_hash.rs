@@ -62,5 +62,5 @@ pub fn piecehash_str_to_bytes(piecehash: &PieceHashStr) -> Result<PieceHash, Str
     w.write_all(&final_piece_hash)
         .map_err(|err| format!("Failed to write bytes: {err}"))?;
 
-    Ok(piece_hash_bytes)
+    Ok(PieceHash(piece_hash_bytes))
 }

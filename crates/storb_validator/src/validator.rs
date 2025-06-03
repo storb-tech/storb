@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, Piece, PieceHash};
+use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, Piece, PieceHash};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
@@ -24,7 +24,6 @@ use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use subxt::ext::codec::Compact;
-use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task;
 use tracing::{debug, error, info, warn};
@@ -185,7 +184,7 @@ impl Validator {
         let piece_hashes = encoded
             .pieces
             .iter()
-            .map(|piece| blake3::hash(&piece.data).as_bytes().to_owned())
+            .map(|piece| PieceHash(blake3::hash(&piece.data).as_bytes().to_owned()))
             .collect::<Vec<_>>();
         // TODO(infohash_data): we may want to remvoe the chunk and total size parameters
         let infohash = get_infohash(piece_hashes);
@@ -230,7 +229,7 @@ impl Validator {
                 drop(neuron_guard);
 
                 let validator = self.clone();
-                let piece_hash_copy = piece_hash.to_owned();
+                let piece_hash_copy = PieceHash(piece_hash.to_owned());
 
                 let piece_clone = piece.clone();
                 store_futures.push(task::spawn(async move {
@@ -297,7 +296,7 @@ impl Validator {
             chunk_piece_hashes.push(piece_hash);
         }
 
-        let chunk_hash = chunk_hash_raw.finalize().as_bytes().to_owned();
+        let chunk_hash = ChunkHash(chunk_hash_raw.finalize().as_bytes().to_owned());
         // let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
         let validator_id = {
@@ -324,7 +323,7 @@ impl Validator {
             .pieces
             .iter()
             .map(|piece| {
-                let piece_hash = blake3::hash(&piece.data).as_bytes().to_owned();
+                let piece_hash = PieceHash(blake3::hash(&piece.data).as_bytes().to_owned());
                 metadata::models::PieceValue {
                     piece_hash,
                     piece_size: piece.data.len() as u64,
@@ -624,7 +623,7 @@ impl Validator {
         };
 
         let latency = start_time.elapsed().as_secs_f64();
-        let success = hash.as_bytes_ref() == piece_hash;
+        let success = hash == piece_hash;
 
         Ok(ChallengeResult {
             miner_uid,
@@ -782,7 +781,7 @@ impl Validator {
         };
 
         let computed_hash = blake3::hash(&piece_data);
-        let success = *computed_hash.as_bytes() == piece_hash;
+        let success = PieceHash(*computed_hash.as_bytes()) == piece_hash;
 
         Ok(ChallengeResult {
             miner_uid,

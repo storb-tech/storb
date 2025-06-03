@@ -174,7 +174,7 @@ impl DownloadProcessor {
 
                 // Verify the integrity of the piece_data using Blake3.
                 let computed_hash = blake3::hash(&piece_data);
-                if computed_hash.as_bytes() != &piece_hash {
+                if computed_hash.as_bytes() != piece_hash.as_ref() {
                     bail!("Hash mismatch for miner {:?}", miner_uid);
                 }
 

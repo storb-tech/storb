@@ -1405,7 +1405,7 @@ mod tests {
         });
 
         // Create test data
-        let infohash = [1u8; 32];
+        let infohash = InfoHash([1u8; 32]);
         let infohash_value = InfohashValue {
             infohash,
             name: "test_object".to_string(),
@@ -1417,7 +1417,7 @@ mod tests {
         };
 
         let chunk = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1426,7 +1426,7 @@ mod tests {
         };
 
         let piece = PieceValue {
-            piece_hash: [3u8; 32],
+            piece_hash: PieceHash([3u8; 32]),
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1494,7 +1494,7 @@ mod tests {
         });
 
         // Create test data
-        let infohash = [1u8; 32];
+        let infohash = InfoHash([1u8; 32]);
         let infohash_value = InfohashValue {
             infohash,
             name: "test_object".to_string(),
@@ -1506,7 +1506,7 @@ mod tests {
         };
 
         let chunk = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1515,7 +1515,7 @@ mod tests {
         };
 
         let piece = PieceValue {
-            piece_hash: [3u8; 32],
+            piece_hash: PieceHash([3u8; 32]),
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1530,7 +1530,7 @@ mod tests {
         let random_chunk = MetadataDB::get_random_chunk(&command_sender)
             .await
             .expect("Failed to get random chunk");
-        assert_eq!(random_chunk.chunk_hash, [2u8; 32]);
+        assert_eq!(random_chunk.chunk_hash, ChunkHash([2u8; 32]));
 
         // Abort the background task
         handle.abort();
@@ -1551,7 +1551,7 @@ mod tests {
         });
 
         // Create test data
-        let infohash = [1u8; 32];
+        let infohash = InfoHash([1u8; 32]);
         let infohash_value = InfohashValue {
             infohash,
             name: "test_object".to_string(),
@@ -1563,7 +1563,7 @@ mod tests {
         };
 
         let chunk = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1572,7 +1572,7 @@ mod tests {
         };
 
         let piece = PieceValue {
-            piece_hash: [3u8; 32],
+            piece_hash: PieceHash([3u8; 32]),
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1584,10 +1584,10 @@ mod tests {
             .expect("Failed to insert object");
 
         // Query the piece by its hash
-        let queried_piece = MetadataDB::get_piece(&command_sender, [3u8; 32])
+        let queried_piece = MetadataDB::get_piece(&command_sender, PieceHash([3u8; 32]))
             .await
             .expect("Failed to get piece");
-        assert_eq!(queried_piece.piece_hash, [3u8; 32]);
+        assert_eq!(queried_piece.piece_hash, PieceHash([3u8; 32]));
         assert_eq!(queried_piece.piece_size, 256);
         assert_eq!(queried_piece.miners, vec![Compact(1), Compact(2)]);
 
@@ -1610,7 +1610,7 @@ mod tests {
         });
 
         // Attempt to get a piece that does not exist
-        let result = MetadataDB::get_piece(&command_sender, [99u8; 32]).await;
+        let result = MetadataDB::get_piece(&command_sender, PieceHash([99u8; 32])).await;
 
         // print result
         println!("Result: {:?}", result);
@@ -1643,7 +1643,7 @@ mod tests {
         });
 
         // First create and insert a chunk that the piece repair history will reference
-        let infohash = [1u8; 32];
+        let infohash = InfoHash([1u8; 32]);
         let infohash_value = InfohashValue {
             infohash,
             name: "test_object".to_string(),
@@ -1655,7 +1655,7 @@ mod tests {
         };
 
         let chunk = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1664,7 +1664,7 @@ mod tests {
         };
 
         let piece = PieceValue {
-            piece_hash: [3u8; 32],
+            piece_hash: PieceHash([3u8; 32]),
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1679,8 +1679,8 @@ mod tests {
         let piece_repair_hash = [4u8; 32];
         let piece_repair_history = PieceChallengeHistory {
             piece_repair_hash,
-            piece_hash: [3u8; 32],
-            chunk_hash: [2u8; 32], // References the chunk we just inserted
+            piece_hash: PieceHash([3u8; 32]),
+            chunk_hash: ChunkHash([2u8; 32]), // References the chunk we just inserted
             validator_id: Compact(1),
             timestamp: Utc::now(),
             signature: KeypairSignature::from_raw([0u8; 64]),
@@ -1698,8 +1698,8 @@ mod tests {
                 .expect("Failed to get piece repair history");
 
         assert_eq!(queried_history.piece_repair_hash, piece_repair_hash);
-        assert_eq!(queried_history.piece_hash, [3u8; 32]);
-        assert_eq!(queried_history.chunk_hash, [2u8; 32]);
+        assert_eq!(queried_history.piece_hash, PieceHash([3u8; 32]));
+        assert_eq!(queried_history.chunk_hash, ChunkHash([2u8; 32]));
         assert_eq!(queried_history.validator_id, Compact(1));
 
         // Abort the background task
@@ -1721,7 +1721,7 @@ mod tests {
         });
 
         // First create and insert a chunk that the chunk challenge history will reference
-        let infohash = [1u8; 32];
+        let infohash = InfoHash([1u8; 32]);
         let infohash_value = InfohashValue {
             infohash,
             name: "test_object".to_string(),
@@ -1733,7 +1733,7 @@ mod tests {
         };
 
         let chunk = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1742,7 +1742,7 @@ mod tests {
         };
 
         let piece = PieceValue {
-            piece_hash: [3u8; 32],
+            piece_hash: PieceHash([3u8; 32]),
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)],
@@ -1757,8 +1757,8 @@ mod tests {
         let piece_repair_hash = [4u8; 32];
         let piece_repair_history = PieceChallengeHistory {
             piece_repair_hash,
-            piece_hash: [3u8; 32],
-            chunk_hash: [2u8; 32], // References the chunk we just inserted
+            piece_hash: PieceHash([3u8; 32]),
+            chunk_hash: ChunkHash([2u8; 32]), // References the chunk we just inserted
             validator_id: Compact(1),
             timestamp: Utc::now(),
             signature: KeypairSignature::from_raw([0u8; 64]),
@@ -1773,7 +1773,7 @@ mod tests {
         let challenge_hash = [5u8; 32];
         let chunk_challenge_history = ChunkChallengeHistory {
             challenge_hash,
-            chunk_hash: [2u8; 32], // References the chunk we just inserted
+            chunk_hash: ChunkHash([2u8; 32]), // References the chunk we just inserted
             validator_id: Compact(1),
             miners_challenged: vec![Compact(1), Compact(2)],
             miners_successful: vec![Compact(1)],
@@ -1797,7 +1797,7 @@ mod tests {
                 .expect("Failed to get chunk challenge history");
 
         assert_eq!(queried_history.challenge_hash, challenge_hash);
-        assert_eq!(queried_history.chunk_hash, [2u8; 32]);
+        assert_eq!(queried_history.chunk_hash, ChunkHash([2u8; 32]));
         assert_eq!(queried_history.validator_id, Compact(1));
         assert_eq!(
             queried_history.miners_challenged,
@@ -1825,7 +1825,7 @@ mod tests {
         });
 
         // Create first object with a piece that has miners [1, 2]
-        let infohash1 = [1u8; 32];
+        let infohash1 = InfoHash([1u8; 32]);
         let infohash_value1 = InfohashValue {
             infohash: infohash1,
             name: "test_object_1".to_string(),
@@ -1837,7 +1837,7 @@ mod tests {
         };
 
         let chunk1 = ChunkValue {
-            chunk_hash: [2u8; 32],
+            chunk_hash: ChunkHash([2u8; 32]),
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1846,7 +1846,7 @@ mod tests {
         };
 
         let piece1 = PieceValue {
-            piece_hash: [3u8; 32], // Same piece hash for both objects
+            piece_hash: PieceHash([3u8; 32]), // Same piece hash for both objects
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(1), Compact(2)], // Initial miners
@@ -1862,14 +1862,14 @@ mod tests {
         .expect("Failed to insert first object");
 
         // Verify initial miners
-        let initial_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, [2u8; 32])
+        let initial_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([2u8; 32]))
             .await
             .expect("Failed to get pieces by chunk");
         assert_eq!(initial_pieces.len(), 1);
         assert_eq!(initial_pieces[0].miners, vec![Compact(1), Compact(2)]);
 
         // Create second object with the SAME piece but different miners [2, 3, 4]
-        let infohash2 = [4u8; 32];
+        let infohash2 = InfoHash([4u8; 32]);
         let infohash_value2 = InfohashValue {
             infohash: infohash2,
             name: "test_object_2".to_string(),
@@ -1881,7 +1881,7 @@ mod tests {
         };
 
         let chunk2 = ChunkValue {
-            chunk_hash: [5u8; 32], // Different chunk
+            chunk_hash: ChunkHash([5u8; 32]), // Different chunk
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1890,7 +1890,7 @@ mod tests {
         };
 
         let piece2 = PieceValue {
-            piece_hash: [3u8; 32], // SAME piece hash as piece1
+            piece_hash: PieceHash([3u8; 32]), // SAME piece hash as piece1
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(2), Compact(3), Compact(4)], // Some overlap (2) and new miners (3, 4)
@@ -1906,11 +1906,11 @@ mod tests {
         .expect("Failed to insert second object");
 
         // Query the piece from both chunks to verify miners were updated
-        let pieces_chunk1 = MetadataDB::get_pieces_by_chunk(&command_sender, [2u8; 32])
+        let pieces_chunk1 = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([2u8; 32]))
             .await
             .expect("Failed to get pieces from first chunk");
 
-        let pieces_chunk2 = MetadataDB::get_pieces_by_chunk(&command_sender, [5u8; 32])
+        let pieces_chunk2 = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([5u8; 32]))
             .await
             .expect("Failed to get pieces from second chunk");
 
@@ -1937,7 +1937,7 @@ mod tests {
         assert_eq!(pieces_chunk1[0].miners, pieces_chunk2[0].miners);
 
         // Test edge case: inserting the same piece again with duplicate miners should not change anything
-        let infohash3 = [6u8; 32];
+        let infohash3 = InfoHash([6u8; 32]);
         let infohash_value3 = InfohashValue {
             infohash: infohash3,
             name: "test_object_3".to_string(),
@@ -1949,7 +1949,7 @@ mod tests {
         };
 
         let chunk3 = ChunkValue {
-            chunk_hash: [7u8; 32], // Different chunk
+            chunk_hash: ChunkHash([7u8; 32]), // Different chunk
             k: 10,
             m: 5,
             chunk_size: 512,
@@ -1958,7 +1958,7 @@ mod tests {
         };
 
         let piece3 = PieceValue {
-            piece_hash: [3u8; 32], // SAME piece hash again
+            piece_hash: PieceHash([3u8; 32]), // SAME piece hash again
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(2), Compact(3)], // Miners that already exist
@@ -1974,7 +1974,7 @@ mod tests {
         .expect("Failed to insert third object");
 
         // Verify miners are still the same
-        let pieces_chunk3 = MetadataDB::get_pieces_by_chunk(&command_sender, [7u8; 32])
+        let pieces_chunk3 = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([7u8; 32]))
             .await
             .expect("Failed to get pieces from third chunk");
 
