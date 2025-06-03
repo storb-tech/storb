@@ -1,7 +1,6 @@
 //! Settings for Storb, defined in the settings.toml file.
 
 use config::{Config, ConfigError, File};
-use libp2p::Multiaddr;
 use serde::Deserialize;
 
 #[allow(unused)]
@@ -17,16 +16,6 @@ pub struct Subtensor {
 #[derive(Debug, Deserialize)]
 pub struct Neuron {
     pub sync_frequency: u64,
-}
-
-#[allow(unused)]
-#[derive(Debug, Deserialize)]
-pub struct Dht {
-    pub port: u16,
-    #[serde(default)]
-    pub no_bootstrap: bool,
-    #[serde(default)]
-    pub bootstrap_nodes: Option<Vec<Multiaddr>>,
 }
 
 #[allow(unused)]
@@ -56,6 +45,7 @@ pub struct ValidatorQuery {
 #[derive(Debug, Deserialize)]
 pub struct Validator {
     pub scores_state_file: String,
+    pub crsqlite_file: String,
     pub api_keys_db: String,
     pub neuron: ValidatorNeuron,
     pub query: ValidatorQuery,
@@ -87,13 +77,11 @@ pub struct Settings {
     pub min_stake_threshold: u64,
 
     pub db_file: String,
-    pub dht_dir: String,
+    pub metadatadb_file: String,
     pub neurons_dir: String,
-    pub pem_file: String,
 
     pub subtensor: Subtensor,
     pub neuron: Neuron,
-    pub dht: Dht,
 
     pub miner: Miner,
     pub validator: Validator,

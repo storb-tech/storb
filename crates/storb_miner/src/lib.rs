@@ -7,9 +7,11 @@ use anyhow::{Context, Result};
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::Extension;
-use base::piece_hash::PieceHash;
-use base::swarm;
+use base::constants::NEURON_SYNC_TIMEOUT;
+use base::piece_hash::PieceHashStr;
+use base::sync::Synchronizable;
 use base::verification::HandshakePayload;
+use base::LocalNodeInfo;
 use crabtensor::sign::verify_signature;
 use dashmap::DashMap;
 use middleware::InfoApiRateLimiter;
@@ -30,8 +32,9 @@ pub mod store;
 
 #[derive(Clone)]
 pub struct MinerState {
-    pub miner: Arc<Mutex<Miner>>,
+    pub miner: Arc<Miner>,
     pub object_store: Arc<Mutex<ObjectStore>>,
+    pub local_node_info: LocalNodeInfo,
 }
 
 /// Configures the QUIC server with a self-signed certificate for localhost
@@ -55,10 +58,9 @@ async fn main(config: MinerConfig) -> Result<()> {
     info!("Configuring miner server...");
     let server_config = configure_server(config.clone().neuron_config.external_ip).unwrap();
 
-    let miner = Arc::new(Mutex::new(Miner::new(config.clone()).await.unwrap()));
+    let miner = Arc::new(Miner::new(config.clone()).await.unwrap());
 
-    // Create weak reference for sync task
-    let sync_miner = Arc::downgrade(&miner);
+    let sync_miner = miner.clone();
 
     let object_store = Arc::new(Mutex::new(
         ObjectStore::new(&config.store_dir).expect("Failed to initialize object store"),
@@ -66,22 +68,39 @@ async fn main(config: MinerConfig) -> Result<()> {
 
     // Spawn background sync task
     tokio::spawn(async move {
+        let local_miner = sync_miner.clone();
+        let neuron = local_miner.neuron.clone();
         let mut interval = time::interval(Duration::from_secs(
             config.neuron_config.neuron.sync_frequency,
         ));
         loop {
             interval.tick().await;
-            if let Some(miner) = sync_miner.upgrade() {
-                let mut guard = miner.lock().await;
-                let _ = guard.sync().await; // TODO: handle error properly
+            info!("Syncing miner");
+            match tokio::time::timeout(NEURON_SYNC_TIMEOUT, async {
+                let start = std::time::Instant::now();
+                let sync_result = neuron.write().await.sync_metagraph().await;
+                (sync_result, start.elapsed())
+            })
+            .await
+            {
+                Ok((Ok(_), elapsed)) => {
+                    info!("Miner sync completed in {:?}", elapsed);
+                }
+                Ok((Err(e), elapsed)) => {
+                    error!("Miner sync failed: {}. Elapsed time: {:?}", e, elapsed);
+                }
+                Err(_) => {
+                    error!("Miner sync timed out after {:?}", NEURON_SYNC_TIMEOUT);
+                }
             }
         }
     });
 
-    let state = Arc::new(Mutex::new(MinerState {
-        miner,
+    let state = MinerState {
+        miner: miner.clone(),
         object_store,
-    }));
+        local_node_info: miner.neuron.read().await.local_node_info.clone(),
+    };
 
     let assigned_quic_port = config
         .neuron_config
@@ -99,13 +118,6 @@ async fn main(config: MinerConfig) -> Result<()> {
     )
     .expect("Failed to create QUIC endpoint");
 
-    info!(
-        "Miner listening for pieces on quic://0.0.0.0:{}",
-        config
-            .neuron_config
-            .quic_port
-            .expect("Could not get quic port")
-    );
     let info_api_rate_limit_state: InfoApiRateLimiter = Arc::new(DashMap::new());
     let app = axum::Router::new()
         .route(
@@ -133,21 +145,10 @@ async fn main(config: MinerConfig) -> Result<()> {
         .unwrap();
     });
 
-    let dht_sender = state
-        .lock()
-        .await
-        .miner
-        .lock()
-        .await
-        .neuron
-        .command_sender
-        .clone();
-
     let quic_server = tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
-            let dht_sender_clone = dht_sender.clone();
-            let object_store_clone = state.lock().await.object_store.lock().await.clone();
-            let state_clone = state.clone();
+            let object_store = state.object_store.clone();
+            let miner = state.miner.clone();
 
             tokio::spawn(async move {
                 match incoming.await {
@@ -191,29 +192,17 @@ async fn main(config: MinerConfig) -> Result<()> {
                                 &signature_payload.message,
                             );
 
-                            let miner_base_neuron = state_clone
-                                .clone()
-                                .lock()
-                                .await
-                                .miner
-                                .clone()
-                                .lock()
-                                .await
-                                .neuron
-                                .clone();
-                            let validator_peer_id = if let Some(peer_id) = miner_base_neuron
-                                .peer_node_uid
-                                .get_by_right(&signature_payload.message.validator.uid)
-                            {
-                                peer_id
-                            } else {
-                                error!("Could not get validator peer ID");
-                                continue;
-                            };
-                            let validator_info = if let Some(vali_info) = miner_base_neuron
-                                .address_book
-                                .clone()
-                                .get(validator_peer_id)
+                            let address_book =
+                                miner.clone().neuron.read().await.address_book.clone();
+
+                            info!(
+                                "Received handshake from validator {} with uid {}",
+                                signature_payload.message.validator.account_id,
+                                signature_payload.message.validator.uid
+                            );
+
+                            let validator_info = if let Some(vali_info) =
+                                address_book.get(&signature_payload.message.validator.uid)
                             {
                                 vali_info.clone()
                             } else {
@@ -275,24 +264,6 @@ async fn main(config: MinerConfig) -> Result<()> {
 
                             let hash_raw = blake3::hash(&piece);
                             let hash: String = hash_raw.to_hex().to_string();
-                            let piece_key = libp2p::kad::RecordKey::new(&hash_raw.as_bytes());
-
-                            // Add miner as a provider for the piece
-
-                            match swarm::dht::StorbDHT::start_providing_piece(
-                                dht_sender_clone.clone(),
-                                piece_key.clone(),
-                            )
-                            .await
-                            {
-                                Ok(_) => debug!(
-                                    "Added miner as provider for piece with key {:?}",
-                                    piece_key
-                                ),
-                                Err(e) => {
-                                    error!("Failed to add miner as provider for piece: {}", e)
-                                }
-                            }
 
                             if let Err(e) = send.write_all(hash_raw.as_bytes()).await {
                                 error!("Failed to send hash: {}", e);
@@ -305,8 +276,10 @@ async fn main(config: MinerConfig) -> Result<()> {
                             }
 
                             let piece_hash =
-                                PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
-                            object_store_clone
+                                PieceHashStr::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
+                            object_store
+                                .lock()
+                                .await
                                 .write(&piece_hash, &piece)
                                 .await
                                 .expect("Failed to write piece to store");

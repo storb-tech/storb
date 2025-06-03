@@ -1,4 +1,8 @@
 use bincode::Options;
+use rusqlite::{
+    types::{FromSql, FromSqlResult, ToSqlOutput},
+    ToSql,
+};
 use serde::{ser::Error, Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, error};
@@ -8,6 +12,146 @@ use crate::constants::{
     PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
     PIECE_LENGTH_SCALING,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PieceHash(pub [u8; 32]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChunkHash(pub [u8; 32]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct InfoHash(pub [u8; 32]);
+
+impl TryFrom<Vec<u8>> for PieceHash {
+    type Error = &'static str;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        if value.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&value);
+            Ok(PieceHash(hash))
+        } else {
+            Err("Invalid PieceHash length, expected 32 bytes")
+        }
+    }
+}
+
+impl TryFrom<Vec<u8>> for ChunkHash {
+    type Error = &'static str;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        if value.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&value);
+            Ok(ChunkHash(hash))
+        } else {
+            Err("Invalid ChunkHash length, expected 32 bytes")
+        }
+    }
+}
+
+impl TryFrom<Vec<u8>> for InfoHash {
+    type Error = &'static str;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        if value.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&value);
+            Ok(InfoHash(hash))
+        } else {
+            Err("Invalid InfoHash length, expected 32 bytes")
+        }
+    }
+}
+
+impl ToSql for PieceHash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::from(&self.0[..]))
+    }
+}
+
+impl FromSql for PieceHash {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(blob) if blob.len() == 32 => {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(blob);
+                Ok(PieceHash(hash))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl ToSql for ChunkHash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::from(&self.0[..]))
+    }
+}
+
+impl FromSql for ChunkHash {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(blob) if blob.len() == 32 => {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(blob);
+                Ok(ChunkHash(hash))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl ToSql for InfoHash {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::from(&self.0[..]))
+    }
+}
+
+impl FromSql for InfoHash {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            rusqlite::types::ValueRef::Blob(blob) if blob.len() == 32 => {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(blob);
+                Ok(InfoHash(hash))
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+impl PieceHash {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+impl ChunkHash {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+impl InfoHash {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+
+impl AsRef<[u8]> for PieceHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl AsRef<[u8]> for ChunkHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl AsRef<[u8]> for InfoHash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Piece {
@@ -24,6 +168,18 @@ pub enum PieceType {
     Parity,
 }
 
+impl TryFrom<u8> for PieceType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(PieceType::Data),
+            1 => Ok(PieceType::Parity),
+            _ => Err("Invalid PieceType value"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EncodedChunk {
     pub pieces: Vec<Piece>,
@@ -37,15 +193,6 @@ pub struct EncodedChunk {
     pub original_chunk_size: u64,
 }
 
-#[derive(Serialize)]
-struct InfoHashData {
-    filename: String,
-    timestamp: i64,
-    chunk_size: u64,
-    total_size: u64,
-    pieces: Vec<[u8; 32]>,
-}
-
 /// Piece response that is sent from the miner to the validator.
 ///
 /// - `piece_hash` is the fixed width piece signature from which we start
@@ -54,7 +201,7 @@ struct InfoHashData {
 #[derive(Serialize, Deserialize)]
 #[repr(C)]
 pub struct PieceResponse {
-    pub piece_hash: [u8; 32],
+    pub piece_hash: PieceHash,
     pub piece_data: Vec<u8>,
 }
 
@@ -85,7 +232,7 @@ pub fn serialise_piece_response(
 /// serialised data to determine where the actual payload starts.
 pub fn deserialise_piece_response(
     serialised_buf: &[u8],
-    piece_hash: &[u8; 32],
+    piece_hash: &PieceHash,
 ) -> Result<Vec<u8>, Box<bincode::Error>> {
     let bincode_opts = bincode::DefaultOptions::new()
         .with_little_endian()
@@ -94,7 +241,7 @@ pub fn deserialise_piece_response(
 
     if let Some(pos) = serialised_buf
         .windows(32)
-        .position(|window| window == piece_hash)
+        .position(|window| window == piece_hash.as_ref())
     {
         let piece_data = serialised_buf[pos + 32..].to_vec();
         let deserialized_piece_response = bincode_opts.deserialize(&piece_data)?;
@@ -106,28 +253,16 @@ pub fn deserialise_piece_response(
     }
 }
 
-pub fn get_infohash(
-    filename: String,
-    timestamp: i64,
-    chunk_size: u64,
-    total_size: u64,
-    pieces: Vec<[u8; 32]>,
-) -> String {
-    let infohash_data = InfoHashData {
-        filename,
-        timestamp,
-        chunk_size,
-        total_size,
-        pieces,
-    };
-
-    // Serialize the struct to a compact JSON string.
-    let infohash_json =
-        serde_json::to_string(&infohash_data).expect("Failed to serialize infohash_data to JSON");
-
-    let infohash_bytes = infohash_json.as_bytes();
-
-    blake3::hash(infohash_bytes).to_hex().to_string()
+pub fn get_infohash(piece_hashes: Vec<PieceHash>) -> InfoHash {
+    // The infohash is a hash of the piece hashes
+    let mut hasher = blake3::Hasher::new();
+    for piece_hash in piece_hashes {
+        hasher.update(piece_hash.as_ref());
+    }
+    let hash = hasher.finalize();
+    let mut infohash = [0u8; 32];
+    infohash.copy_from_slice(&hash.as_bytes()[..32]);
+    InfoHash(infohash)
 }
 
 pub fn piece_length(content_length: u64, min_size: Option<u64>, max_size: Option<u64>) -> u64 {

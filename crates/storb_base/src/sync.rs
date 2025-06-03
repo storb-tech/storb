@@ -9,7 +9,7 @@ use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{INFO_REQ_TIMEOUT, SYNC_BUFFER_SIZE};
-use crate::{BaseNeuron, LocalNodeInfo, NodeInfo};
+use crate::{BaseNeuron, LocalNodeInfo, NodeInfo, NodeUID};
 
 #[derive(Debug, Error)]
 pub enum SyncError {
@@ -19,7 +19,7 @@ pub enum SyncError {
 pub trait Synchronizable {
     fn sync_metagraph(
         &mut self,
-    ) -> impl std::future::Future<Output = Result<Vec<u16>, Box<dyn StdError + Send + Sync>>> + Send;
+    ) -> impl std::future::Future<Output = Result<Vec<NodeUID>, Box<dyn StdError + Send + Sync>>> + Send;
     fn get_remote_node_info(
         addr: reqwest::Url,
     ) -> impl std::future::Future<Output = Result<LocalNodeInfo, SyncError>> + Send;
@@ -69,7 +69,7 @@ impl Synchronizable for BaseNeuron {
     /// Synchronise the local metagraph state with chain.
     async fn sync_metagraph(
         &mut self,
-    ) -> Result<Vec<u16>, Box<dyn StdError + Send + Sync + 'static>> {
+    ) -> Result<Vec<NodeUID>, Box<dyn StdError + Send + Sync + 'static>> {
         info!("Starting sync_metagraph");
         let start = std::time::Instant::now();
         let subtensor = Self::get_subtensor_connection(
@@ -103,7 +103,7 @@ impl Synchronizable for BaseNeuron {
         info!("Got neurons from metagraph");
 
         // Check if neurons have changed or not
-        let mut changed_neurons: Vec<u16> = neurons.iter().map(|neuron| neuron.uid).collect();
+        let mut changed_neurons: Vec<NodeUID> = neurons.iter().map(|neuron| neuron.uid).collect();
 
         if original_neurons.len() < neurons.len() {
             changed_neurons = neurons
@@ -113,7 +113,7 @@ impl Synchronizable for BaseNeuron {
                 .map(|(curr, _)| curr.uid)
                 .collect();
 
-            let mut new_neurons: Vec<u16> = neurons[original_neurons.len()..]
+            let mut new_neurons: Vec<NodeUID> = neurons[original_neurons.len()..]
                 .iter()
                 .map(|neuron| neuron.uid)
                 .collect();
@@ -216,16 +216,12 @@ impl Synchronizable for BaseNeuron {
 
             let node_info = NodeInfo {
                 neuron_info: neuron_info.clone(),
-                peer_id: remote_node_info.peer_id,
                 http_address: remote_node_info.http_address,
                 quic_address: remote_node_info.quic_address,
                 version: remote_node_info.version,
             };
 
-            if let Some(peer_id) = remote_node_info.peer_id {
-                self.address_book.clone().insert(peer_id, node_info);
-                self.peer_node_uid.insert(peer_id, neuron_info.uid);
-            }
+            self.address_book.insert(neuron_info.uid, node_info.clone());
         }
 
         info!("Completed sync_metagraph in {:?}", start.elapsed());

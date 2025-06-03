@@ -19,6 +19,9 @@ settings.toml
 !settings.toml.example
 storb_data/
 
+# crsqlite
+crsqlite/
+
 # Testing
 test_dir_*
 

@@ -8,19 +8,51 @@ Validators play a crucial role in the Storb network by serving as gateways to th
 
 Have a look over the `settings.toml` file. There are various parameters there that can be modified. Alternatively, one can just set these parameters through the CLI as shown in the following steps.
 
-### Setting up database
+### Setting up databases
 
-You'll also need to set up the local database using SQLx.
+You'll also need to set up the local databases using SQLx.
+
+#### Install SQLx CLI
+cargo install sqlx-cli
+
+#### Score database
 
 ```bash
-cargo install sqlx-cli
 sqlx database create --database-url "sqlite://storb_data/database.db"
-sqlx migrate run --database-url "sqlite://storb_data/database.db"
+sqlx migrate run --source migrations/scoresdb/ --database-url "sqlite://storb_data/database.db"
+```
+#### Metadata database
+
+```bash
+sqlx database create  --database-url "sqlite://storb_data/metadata.db"
+sqlx migrate run --source migrations/metadatadb/ --database-url "sqlite://storb_data/metadata.db"
+```
+
+#### Installing cr-sqlite
+You will also need to install the cr-sqlite extension for sqlite.
+
+First, visit their releases page: https://github.com/vlcn-io/cr-sqlite/releases
+then download the latest release for your platform and extract it. For example, if you are on Linux, and running on a x86_64 platform, you would download `crsqlite-linux-x86_64.zip`
+```bash
+wget https://github.com/vlcn-io/cr-sqlite/releases/download/v0.16.3/crsqlite-linux-x86_64.zip
+unzip crsqlite-linux-x86_64.zip
+```
+
+Then, copy the `crsqlite.so` file to the `crsqlite` directory under the root directory of the repository.
+```bash
+mkdir -p /path/to/storb/repo/crsqlite
+mv /path/to/unzipped/crsqlite.so /path/to/storb/repo/crsqlite
+```
+
+Then update the `crsqlite_file` parameter in `settings.toml` to point to the location of the `crsqlite.so` file if it isn't already. For example:
+```toml
+[validator]
+crsqlite_file = "/path/to/storb/repo/crsqlite/crsqlite.so"
 ```
 
 ### Running validator
 
-- Mainnet
+#### Mainnet
 
     ```bash
     ./target/release/storb validator \
@@ -33,7 +65,7 @@ sqlx migrate run --database-url "sqlite://storb_data/database.db"
         --post-ip
     ```
 
-- Testnet
+#### Testnet
 
     ```bash
     ./target/release/storb validator \

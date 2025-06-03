@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use base::version::Version;
-use base::{BaseNeuronConfig, DhtConfig, NeuronConfig, SubtensorConfig};
+use base::{BaseNeuronConfig, NeuronConfig, SubtensorConfig};
 use clap::{value_parser, Arg, ArgAction, ArgMatches};
 use expanduser::expanduser;
 
@@ -110,22 +110,17 @@ pub fn common_args() -> Vec<Arg> {
             .help("Set the log level")
             .action(ArgAction::Set)
             .global(true),
+        // Databases
         Arg::new("db_file")
             .long("db-file")
             .value_name("path")
-            .help("Path to the database file")
+            .help("Path to the score database file")
             .action(ArgAction::Set)
             .global(true),
-        Arg::new("dht_dir")
-            .long("dht-dir")
+        Arg::new("metadatadb_file")
+            .long("metadatadb-file")
             .value_name("path")
-            .help("Path to the DHT RocksDB folder")
-            .action(ArgAction::Set)
-            .global(true),
-        Arg::new("pem_file")
-            .long("pem-file")
-            .value_name("path")
-            .help("Path to the PEM file")
+            .help("Path to the metadata database file")
             .action(ArgAction::Set)
             .global(true),
         // Subtensor
@@ -154,21 +149,6 @@ pub fn common_args() -> Vec<Arg> {
             .help("The default sync frequency for nodes")
             .action(ArgAction::Set)
             .global(true),
-        // DHT
-        Arg::new("dht.port")
-            .long("dht.port")
-            .value_name("port")
-            .value_parser(value_parser!(u16))
-            .help("DHT port")
-            .action(ArgAction::Set)
-            .global(true),
-        // set to true if you want to disable the bootstrap nodes
-        Arg::new("dht.no_bootstrap")
-            .long("dht.no-bootstrap")
-            .help("Disable bootstrap nodes")
-            .action(ArgAction::SetTrue)
-            .global(true),
-        // NOTE: dht.bootstrap_nodes can only be used in config file
     ]
 }
 
@@ -192,12 +172,6 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
         )
         .to_string(),
         insecure: args.get_flag("subtensor.insecure") || settings.subtensor.insecure,
-    };
-
-    let dht_config = DhtConfig {
-        port: *get_config_value!(args, "dht.port", u16, settings.dht.port),
-        no_bootstrap: args.get_flag("dht.no_bootstrap") || settings.dht.no_bootstrap,
-        bootstrap_nodes: settings.dht.bootstrap_nodes.clone(),
     };
 
     Ok(BaseNeuronConfig {
@@ -231,23 +205,17 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
             String,
             &settings.db_file
         ))?,
-        dht_dir: expanduser(get_config_value!(
+        metadatadb_file: expanduser(get_config_value!(
             args,
-            "dht_dir",
+            "metadatadb_file",
             String,
-            &settings.dht_dir
+            &settings.metadatadb_file
         ))?,
         neurons_dir: expanduser(get_config_value!(
             args,
             "neurons_dir",
             String,
             &settings.neurons_dir
-        ))?,
-        pem_file: expanduser(get_config_value!(
-            args,
-            "pem_file",
-            String,
-            &settings.pem_file
         ))?,
         subtensor: subtensor_config,
         neuron: NeuronConfig {
@@ -258,7 +226,6 @@ pub fn get_neuron_config(args: &ArgMatches, settings: &Settings) -> Result<BaseN
                 &settings.neuron.sync_frequency
             ),
         },
-        dht: dht_config,
         otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key)
             .to_string(),
         otel_endpoint: get_config_value!(args, "otel_endpoint", String, &settings.otel_endpoint)

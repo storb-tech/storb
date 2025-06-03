@@ -9,9 +9,10 @@ use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
+use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
 use base::{LocalNodeInfo, NeuronError};
-use constants::{SYNTHETIC_CHALLENGE_FREQUENCY, VALIDATOR_SYNC_TIMEOUT};
+use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
 use opentelemetry::global;
@@ -110,17 +111,23 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .with_unit("score")
         .build();
 
+    info!("Set up OTEL metrics exporter");
+
     tokio::spawn(async move {
         let local_validator = validator_for_sync;
         let scoring_system = local_validator.scoring_system.clone();
         let neuron = neuron.clone();
 
+        info!(
+            "Starting validator sync task with frequency: {} seconds",
+            sync_frequency
+        );
         let mut interval = time::interval(Duration::from_secs(sync_frequency));
         loop {
             interval.tick().await;
             info!("Syncing validator");
             // Wrap the sync operation in a timeout
-            match tokio::time::timeout(VALIDATOR_SYNC_TIMEOUT, async {
+            match tokio::time::timeout(NEURON_SYNC_TIMEOUT, async {
                 let start = std::time::Instant::now();
                 let sync_result = neuron.write().await.sync_metagraph().await;
                 (sync_result, start.elapsed())
@@ -160,7 +167,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                 Err(_elapsed) => {
                     error!(
                         "Sync operation timed out after {} seconds",
-                        VALIDATOR_SYNC_TIMEOUT.as_secs_f32()
+                        NEURON_SYNC_TIMEOUT.as_secs_f32()
                     );
                     error!(
                         "Current stack trace:\n{:?}",

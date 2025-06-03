@@ -6,9 +6,9 @@ use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
-use base::swarm;
-use libp2p::kad::RecordKey;
-use tokio::sync::RwLock; // Changed from std::sync::RwLock
+use base::metadata;
+use base::piece::InfoHash;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::apikey::ApiKeyManager;
@@ -121,6 +121,13 @@ pub async fn upload_file(
         return Err((StatusCode::BAD_REQUEST, "No file field found".to_string()));
     }
 
+    // get filename
+    let filename = field
+        .file_name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    debug!("Got filename: {filename}");
+
     let bytes = field.bytes().await.map_err(|e| {
         error!("Could not get bytes from the file field: {e}");
         (
@@ -136,7 +143,7 @@ pub async fn upload_file(
     }));
 
     match processor
-        .process_upload(stream, content_length, processor.validator_id)
+        .process_upload(stream, content_length, filename)
         .await
     {
         Ok(infohash) => {
@@ -230,18 +237,24 @@ pub async fn download_file(
     ]);
 
     // get tracker info
-    let key = RecordKey::new(&infohash.as_bytes().to_vec());
-    let tracker_res = swarm::dht::StorbDHT::get_tracker_entry(processor.dht_sender.clone(), key)
-        .await
-        .map_err(|e| {
-            error!("Error getting tracker entry: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            )
-        })?;
-    let tracker = tracker_res.ok_or_else(|| {
-        error!("Tracker entry not found for infohash: {}", infohash);
+    let infohash_bytes: InfoHash = match hex::decode(infohash) {
+        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+        _ => {
+            error!("Invalid infohash format: {}", infohash);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid infohash format".to_string(),
+            ));
+        }
+    };
+
+    let tracker = metadata::db::MetadataDB::get_infohash(
+        &processor.metadatadb_sender.clone(),
+        infohash_bytes,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get infohash from the database: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal server error".to_string(),
@@ -269,7 +282,7 @@ pub async fn download_file(
     drop(key_manager);
 
     // Process the download
-    match processor.process_download(infohash.clone()).await {
+    match processor.process_download(tracker).await {
         Ok(body) => {
             // Update API key usage after successful download
             api_key_manager

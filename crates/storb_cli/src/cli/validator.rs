@@ -19,6 +19,11 @@ pub fn cli() -> Command {
                 .value_name("path")
                 .help("The path to the scores state file")
                 .action(ArgAction::Set),
+            Arg::new("crsqlite_file")
+                .long("crsqlite-file")
+                .value_name("path")
+                .help("The path to the cr-sqlite lib")
+                .action(ArgAction::Set),
             Arg::new("api_keys_db")
                 .long("api-keys-db")
                 .value_name("path")
@@ -70,6 +75,12 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
         String,
         settings.validator.scores_state_file
     ))?;
+    let crsqlite_file = expanduser(get_config_value!(
+        args,
+        "crsqlite_file",
+        String,
+        settings.validator.crsqlite_file
+    ))?;
     let api_keys_db = expanduser(get_config_value!(
         args,
         "api_keys_db",
@@ -81,6 +92,7 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
     let neuron_config: BaseNeuronConfig = get_neuron_config(args, settings)?;
     let validator_config = ValidatorConfig {
         scores_state_file,
+        crsqlite_file,
         moving_average_alpha: *get_config_value!(
             args,
             "neuron.moving_average_alpha",

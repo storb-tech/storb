@@ -10,28 +10,27 @@ use crabtensor::subtensor::Subtensor;
 use crabtensor::wallet::{hotkey_location, load_key_seed, signer_from_seed, Signer};
 use crabtensor::AccountId;
 use dashmap::DashMap;
-use libp2p::{multiaddr::multiaddr, Multiaddr, PeerId};
-use memory_db::MemoryDb;
+use libp2p::{multiaddr::multiaddr, Multiaddr};
 use serde::ser::StdError;
 use subxt::utils::H256;
 use tokio::sync::RwLock;
-use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info};
 
-use crate::swarm::dht::StorbDHT;
 use crate::version::Version;
 
 pub mod constants;
 pub mod memory_db;
+pub mod metadata;
 pub mod piece;
 pub mod piece_hash;
-pub mod swarm;
 pub mod sync;
 pub mod utils;
 pub mod verification;
 pub mod version;
 
-pub type AddressBook = Arc<DashMap<PeerId, NodeInfo>>;
+// Node UID : NodeInfo
+pub type NodeUID = u16;
+pub type AddressBook = Arc<DashMap<NodeUID, NodeInfo>>;
 
 const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
@@ -54,26 +53,19 @@ impl std::fmt::Display for NeuronError {
 
 impl std::error::Error for NeuronError {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SubtensorConfig {
     pub network: String,
     pub address: String,
     pub insecure: bool,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct NeuronConfig {
     pub sync_frequency: u64,
 }
 
-#[derive(Clone)]
-pub struct DhtConfig {
-    pub port: u16,
-    pub no_bootstrap: bool,
-    pub bootstrap_nodes: Option<Vec<Multiaddr>>,
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BaseNeuronConfig {
     pub version: Version,
     pub netuid: u16,
@@ -96,35 +88,25 @@ pub struct BaseNeuronConfig {
     pub min_stake_threshold: u64,
 
     pub db_file: PathBuf,
-    pub dht_dir: PathBuf,
+    pub metadatadb_file: PathBuf,
     pub neurons_dir: PathBuf,
-    pub pem_file: PathBuf,
 
     pub subtensor: SubtensorConfig,
 
     pub neuron: NeuronConfig,
-
-    pub dht: DhtConfig,
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub neuron_info: NeuronInfoLite<AccountId>,
-    pub peer_id: Option<PeerId>,
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,
 }
 
-pub enum NodeKey {
-    Uid(u16),
-    PeerId(PeerId),
-}
-
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalNodeInfo {
-    pub uid: Option<u16>,
-    pub peer_id: Option<PeerId>,
+    pub uid: Option<NodeUID>,
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,
@@ -136,8 +118,6 @@ pub struct BaseNeuron {
     pub config: BaseNeuronConfig,
     pub neurons: Arc<RwLock<Vec<NeuronInfoLite<AccountId>>>>,
     pub address_book: AddressBook,
-    pub peer_node_uid: bimap::BiMap<PeerId, u16>,
-    pub command_sender: mpsc::Sender<swarm::dht::DhtCommand>,
     pub signer: Signer,
     pub local_node_info: LocalNodeInfo,
 }
@@ -159,10 +139,7 @@ impl BaseNeuron {
             .map_err(|e| NeuronError::SubtensorError(e.to_string()))
     }
 
-    pub async fn new(
-        config: BaseNeuronConfig,
-        mem_db: Option<Arc<MemoryDb>>,
-    ) -> Result<Self, NeuronError> {
+    pub async fn new(config: BaseNeuronConfig) -> Result<Self, NeuronError> {
         let wallet_path: PathBuf = config.wallet_path.clone();
 
         let hotkey_location: PathBuf = hotkey_location(
@@ -177,37 +154,6 @@ impl BaseNeuron {
 
         let signer = signer_from_seed(&seed).unwrap();
 
-        let mut ed_keypair = ed25519_dalek::SigningKey::from_bytes(&seed).to_keypair_bytes();
-        let libp2p_keypair =
-            match libp2p::identity::ed25519::Keypair::try_from_bytes(&mut ed_keypair) {
-                Ok(keypair) => keypair,
-                Err(_) => {
-                    return Err(NeuronError::ConfigError(
-                        "Failed to create ed25519 keypair from bytes".to_string(),
-                    ));
-                }
-            };
-
-        let mut bootstrap_nodes: Option<Vec<Multiaddr>> = None;
-
-        if !config.dht.no_bootstrap {
-            bootstrap_nodes = config.dht.bootstrap_nodes.clone();
-        }
-
-        // log no bootstrap and bootstrap nodes
-        if config.dht.no_bootstrap {
-            info!("Bootstrap is disabled, no bootstrap nodes will be used.");
-            // log bootstrap nodes
-            if let Some(nodes) = &bootstrap_nodes {
-                info!("Bootstrap nodes: {:?}", nodes);
-            }
-        }
-
-        if !config.dht.no_bootstrap && bootstrap_nodes.as_ref().map_or(0, |nodes| nodes.len()) == 0
-        {
-            panic!("Bootstrap is enabled, but no bootstrap nodes were provided. Please specify at least one bootstrap node in the settings.toml.");
-        }
-
         // try and load the neurons from disk - load state
         let neurons_arc =
             if let Ok(loaded_neurons) = Self::load_neurons_state_from_disk(&config.neurons_dir) {
@@ -220,29 +166,6 @@ impl BaseNeuron {
 
         let address_book = Arc::new(DashMap::new());
 
-        let (dht_og, command_sender) = StorbDHT::new(
-            config.dht_dir.clone(),
-            mem_db,
-            config.dht.port,
-            bootstrap_nodes,
-            libp2p_keypair.into(),
-            address_book.clone(),
-        )
-        .expect("Failed to create StorbDHT instance");
-
-        let dht = Arc::new(Mutex::new(dht_og));
-
-        let dht_locked = dht.lock().await;
-        let peer_id = *dht_locked.swarm.local_peer_id();
-        drop(dht_locked);
-        // Spawn a separate task for processing events
-        tokio::spawn(async move {
-            let mut dht_locked = dht.lock().await;
-            dht_locked.process_events().await;
-            drop(dht_locked);
-            tokio::task::yield_now().await;
-        });
-
         let external_ip: Ipv4Addr = config.external_ip.parse().expect("Invalid IP address");
 
         let local_http_address = Some(multiaddr!(Ip4(external_ip), Tcp(config.api_port)));
@@ -253,7 +176,6 @@ impl BaseNeuron {
 
         let local_node_info = LocalNodeInfo {
             uid: None,
-            peer_id: Some(peer_id),
             http_address: local_http_address,
             quic_address: local_quic_address,
             version: config.version.clone(),
@@ -261,10 +183,8 @@ impl BaseNeuron {
 
         let neuron = BaseNeuron {
             config: config.clone(),
-            command_sender,
             neurons: neurons_arc,
             address_book: address_book.clone(),
-            peer_node_uid: bimap::BiMap::new(),
             signer,
             local_node_info,
         };
@@ -305,12 +225,6 @@ impl BaseNeuron {
             info!("Successfully served axon!");
         }
 
-        info!(
-            "My peer address: /ip4/{:?}/udp/{:?}/quic-v1/p2p/{}",
-            external_ip,
-            config.dht.port,
-            peer_id.to_string()
-        );
         Ok(neuron)
     }
 
@@ -420,9 +334,8 @@ mod tests {
             load_old_nodes: false,
             min_stake_threshold: 0,
             db_file: "./test.db".into(),
-            dht_dir: "./test_dht".into(),
+            metadatadb_file: "./test.db".into(),
             neurons_dir: "./test_neurons".into(),
-            pem_file: "cert.pem".into(),
             subtensor: SubtensorConfig {
                 network: "finney".to_string(),
                 address: "wss://test.finney.opentensor.ai:443".to_string(),
@@ -430,11 +343,6 @@ mod tests {
             },
             neuron: NeuronConfig {
                 sync_frequency: 100,
-            },
-            dht: DhtConfig {
-                port: 8081,
-                no_bootstrap: true,
-                bootstrap_nodes: None,
             },
             otel_api_key: "".to_string(),
             otel_endpoint: "".to_string(),

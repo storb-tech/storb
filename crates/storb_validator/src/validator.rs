@@ -7,17 +7,16 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, piece_length, Piece};
-use base::swarm::models::ChunkDHTValue;
+use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, Piece, PieceHash};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{swarm, BaseNeuron, BaseNeuronConfig, NeuronError};
+use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
+use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
 use crabtensor::weights::set_weights_payload;
 use crabtensor::weights::NormalizedWeight;
 use futures::stream::{FuturesUnordered, StreamExt};
-use libp2p::kad::RecordKey;
 use libp2p::Multiaddr;
 use ndarray::Array1;
 use rand::rngs::StdRng;
@@ -25,8 +24,7 @@ use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
 use reqwest::StatusCode;
 use subxt::ext::codec::Compact;
-use subxt::ext::sp_core::hexdisplay::AsBytesRef;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio::task;
 use tracing::{debug, error, info, warn};
 
@@ -35,15 +33,16 @@ use crate::constants::{
     MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 use crate::quic::{create_quic_client, make_client_endpoint};
-use crate::scoring::{normalize_min_max, select_random_chunk_from_db, ScoringSystem};
+use crate::scoring::{normalize_min_max, ScoringSystem};
 use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
 #[derive(Debug)]
 struct ChallengeResult {
-    miner_uid: u16,
+    miner_uid: NodeUID,
     latency: f64,
     bytes_len: usize,
+    piece_hash: PieceHash,
     success: bool,
     error: Option<String>, // Add error field to track failure reasons
 }
@@ -81,9 +80,10 @@ impl MinerLatencyMap {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
+    pub crsqlite_file: PathBuf,
     pub moving_average_alpha: f64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
@@ -98,6 +98,7 @@ pub struct Validator {
     pub config: ValidatorConfig,
     pub neuron: Arc<RwLock<BaseNeuron>>,
     pub scoring_system: Arc<RwLock<ScoringSystem>>,
+    pub metadatadb_sender: mpsc::Sender<metadata::db::MetadataDBCommand>,
 }
 
 impl Validator {
@@ -114,14 +115,27 @@ impl Validator {
             .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
         ));
 
-        let neuron = Arc::new(RwLock::new(
-            BaseNeuron::new(neuron_config, Some(scoring_system.read().await.db.clone())).await?,
-        ));
+        let neuron = Arc::new(RwLock::new(BaseNeuron::new(neuron_config).await?));
+
+        info!("Validator initialized with config: {:?}", config);
+        // TODO(metadatadb): use config varibable to get path for crsqlite library?
+        let (mut metadatadb, metadatadb_sender) = metadata::db::MetadataDB::new(
+            &config.neuron_config.metadatadb_file,
+            &PathBuf::from(&config.crsqlite_file),
+        )
+        .map_err(|e| NeuronError::ConfigError(e.to_string()))?;
+        info!("MetadataDB initialized");
+
+        // spawn task to process metadata commands
+        tokio::spawn(async move {
+            let _ = metadatadb.process_events().await;
+        });
 
         let validator = Validator {
             config,
             neuron,
             scoring_system,
+            metadatadb_sender,
         };
         Ok(validator)
     }
@@ -159,6 +173,36 @@ impl Validator {
 
         let mut store_futures = FuturesUnordered::new();
 
+        // random .bin filename
+        let filename = format!("chunk_{}.bin", rng.gen::<u64>());
+
+        let now = Utc::now();
+
+        let metadatadb_sender = self.metadatadb_sender.clone();
+
+        // get piece hashes
+        let piece_hashes = encoded
+            .pieces
+            .iter()
+            .map(|piece| PieceHash(blake3::hash(&piece.data).as_bytes().to_owned()))
+            .collect::<Vec<_>>();
+        // TODO(infohash_data): we may want to remvoe the chunk and total size parameters
+        let infohash = get_infohash(piece_hashes);
+        let infohash_messsage = (infohash, 69420, encoded.chunk_size, 69420);
+        let infohash_message_bytes = bincode::serialize(&infohash_messsage)
+            .context("Failed to serialize infohash message")?;
+
+        let infohash_sig = sign_message(&signer, infohash_message_bytes);
+        let infohash_value = metadata::models::InfohashValue {
+            infohash,
+            name: filename,
+            length: 69420, // placeholder for total file size
+            chunk_size: encoded.chunk_size,
+            chunk_count: 69420, // placeholder for chunk count
+            creation_timestamp: now,
+            signature: infohash_sig,
+        };
+
         for piece in encoded.pieces.clone() {
             let piece_hash_raw = blake3::hash(&piece.data);
             let piece_hash = piece_hash_raw.as_bytes();
@@ -175,21 +219,17 @@ impl Validator {
                 let quic_miner_uid = quic_miner_uids[idx];
 
                 let neuron_guard = self.neuron.read().await;
-                let peer_id = neuron_guard
-                    .peer_node_uid
-                    .get_by_right(&quic_miner_uid)
-                    .ok_or("No peer ID found for the miner UID")?;
 
                 let miner_info = neuron_guard
                     .address_book
                     .clone()
-                    .get(peer_id)
+                    .get(&quic_miner_uid)
                     .ok_or("No NodeInfo found for the given miner")?
                     .clone();
                 drop(neuron_guard);
 
                 let validator = self.clone();
-                let piece_hash_copy = piece_hash.to_owned();
+                let piece_hash_copy = PieceHash(piece_hash.to_owned());
 
                 let piece_clone = piece.clone();
                 store_futures.push(task::spawn(async move {
@@ -206,31 +246,20 @@ impl Validator {
             }
         }
 
+        let mut miners_for_piece_hash: HashMap<PieceHash, Vec<Compact<NodeUID>>> = HashMap::new();
         while let Some(result) = store_futures.next().await {
             match result {
                 Ok(Ok(challenge_result)) => {
-                    let db = self.scoring_system.write().await.db.clone();
-
-                    // Update attempts count
-                    if let Err(e) = db.conn.lock().await.execute(
-                        "UPDATE miner_stats SET store_attempts = store_attempts + 1 WHERE miner_uid = ?",
-                        [challenge_result.miner_uid],
-                    ) {
-                        error!("Failed to update store attempts: {}", e);
-                    }
-
                     if challenge_result.success {
                         info!(
                             "Store challenge succeeded for miner {}",
                             challenge_result.miner_uid
                         );
-                        // Update success count
-                        if let Err(e) = db.conn.lock().await.execute(
-                            "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
-                            [challenge_result.miner_uid],
-                        ) {
-                            error!("Failed to update store successes: {}", e);
-                        }
+                        // add the miner uid to the miners_for_piece_hash
+                        miners_for_piece_hash
+                            .entry(challenge_result.piece_hash)
+                            .or_default()
+                            .push(Compact(challenge_result.miner_uid));
 
                         store_latencies.record_latency(
                             challenge_result.miner_uid,
@@ -267,10 +296,9 @@ impl Validator {
             chunk_piece_hashes.push(piece_hash);
         }
 
-        let chunk_hash = chunk_hash_raw.finalize();
-        let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
+        let chunk_hash = ChunkHash(chunk_hash_raw.finalize().as_bytes().to_owned());
+        // let chunk_key = libp2p::kad::RecordKey::new(chunk_hash.as_bytes());
 
-        // Create chunk DHT value
         let validator_id = {
             let neuron_guard = self.neuron.read().await;
             neuron_guard
@@ -279,54 +307,66 @@ impl Validator {
                 .ok_or("Failed to get validator UID")?
         };
 
-        let chunk_msg = (
-            chunk_key.clone(),
-            validator_id,
-            chunk_piece_hashes.clone(),
-            0, // chunk_idx for synthetic challenges is 0
-            encoded.k,
-            encoded.m,
-            encoded.chunk_size,
-            encoded.padlen,
-            encoded.original_chunk_size,
-        );
-
-        let chunk_msg_bytes = bincode::serialize(&chunk_msg)?;
-        let chunk_sig = sign_message(&signer, chunk_msg_bytes);
-
         let vali_id_compact = Compact(validator_id);
 
-        let chunk_dht_value = ChunkDHTValue {
-            chunk_hash: chunk_key.clone(),
-            validator_id: vali_id_compact,
-            piece_hashes: chunk_piece_hashes,
-            chunk_idx: 0,
+        let chunk_value = metadata::models::ChunkValue {
+            chunk_hash,
             k: encoded.k,
             m: encoded.m,
             chunk_size: encoded.chunk_size,
             padlen: encoded.padlen,
             original_chunk_size: encoded.original_chunk_size,
-            signature: chunk_sig,
         };
 
-        // Put chunk entry in DHT
+        // Create piece values
+        let piece_values: Vec<metadata::models::PieceValue> = encoded
+            .pieces
+            .iter()
+            .map(|piece| {
+                let piece_hash = PieceHash(blake3::hash(&piece.data).as_bytes().to_owned());
+                metadata::models::PieceValue {
+                    piece_hash,
+                    piece_size: piece.data.len() as u64,
+                    piece_type: piece.piece_type.clone(),
+                    miners: miners_for_piece_hash
+                        .get(&piece_hash)
+                        .cloned()
+                        .unwrap_or_else(|| vec![vali_id_compact]),
+                }
+            })
+            .collect();
 
-        let neuron_guard = self.neuron.read().await;
-        swarm::dht::StorbDHT::put_chunk_entry(
-            neuron_guard.command_sender.clone(),
-            chunk_key,
-            chunk_dht_value,
+        let chunks_with_pieces: Vec<(
+            metadata::models::ChunkValue,
+            Vec<metadata::models::PieceValue>,
+        )> = vec![(chunk_value, piece_values.clone())];
+
+        // attempt to insert object, show success message or error message
+        match metadata::db::MetadataDB::insert_object(
+            &metadatadb_sender,
+            infohash_value,
+            chunks_with_pieces,
         )
-        .await?;
-        drop(neuron_guard);
-
+        .await
+        {
+            Ok(_) => {
+                info!("Inserted synthetic chunk into MetadataDB");
+            }
+            Err(e) => {
+                error!("Failed to insert synthetic chunk into MetadataDB: {}", e);
+                return Err(anyhow::anyhow!(
+                    "Failed to insert synthetic chunk into MetadataDB: {}",
+                    e
+                )
+                .into());
+            }
+        }
         // wait a few seconds before running retrieval challenges
         tokio::time::sleep(Duration::from_secs_f64(
             SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
         ))
         .await;
 
-        info!("Inserted synthetic chunk into DHT");
         info!("Completed synthetic store challenges");
 
         // ----==== Synthetic retrieval challenges ====----
@@ -334,55 +374,61 @@ impl Validator {
         info!("Running synthetic retrieval challenges");
 
         // pick pieces, ask some of the miners that have the pieces
-        let db_conn = self.scoring_system.write().await.db.conn.clone();
-        let chunk_key = select_random_chunk_from_db(db_conn).await?;
-        debug!("Selected chunk key: {:?}", chunk_key);
+        let chunk_entry = match metadata::db::MetadataDB::get_random_chunk(&metadatadb_sender).await
+        {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                error!("Failed to get random chunk: {}", e);
+                return Err(anyhow::anyhow!("Failed to get random chunk: {}", e).into());
+            }
+        };
 
-        // request pieces
-        let chunk_entry = swarm::dht::StorbDHT::get_chunk_entry(
-            self.neuron.read().await.command_sender.clone(),
-            chunk_key,
+        debug!("Selected chunk key: {:?}", chunk_entry);
+
+        let challenge_pieces = match metadata::db::MetadataDB::get_pieces_by_chunk(
+            &metadatadb_sender,
+            chunk_entry.chunk_hash,
         )
-        .await?
-        .context("Chunk for the given record key was not found")?;
-        let piece_hashes = chunk_entry.piece_hashes;
+        .await
+        {
+            Ok(pieces) => pieces,
+            Err(e) => {
+                error!("Failed to get pieces for chunk: {}", e);
+                return Err(anyhow::anyhow!("Failed to get pieces for chunk: {}", e).into());
+            }
+        };
 
         let mut pieces_checked = 0;
 
-        let (dht_sender, address_book) = {
+        let address_book = {
             let neuron_guard = self.neuron.read().await;
-            (
-                neuron_guard.command_sender.clone(),
-                neuron_guard.address_book.clone(),
-            )
+            neuron_guard.address_book.clone()
         };
 
         let mut retrieval_futures = FuturesUnordered::new();
 
         while pieces_checked < MAX_CHALLENGE_PIECE_NUM {
-            let idx = rng.gen_range(0..piece_hashes.len());
+            let idx = rng.gen_range(0..challenge_pieces.len());
 
-            let piece_hash = piece_hashes[idx];
-            let piece_key = RecordKey::new(&piece_hash);
+            let chall_piece_hash = challenge_pieces[idx].piece_hash;
 
-            let piece_providers =
-                swarm::dht::StorbDHT::get_piece_providers(&dht_sender, piece_key.clone()).await?;
+            let piece_miners = challenge_pieces[idx].miners.clone();
 
-            if piece_providers.is_empty() {
+            if piece_miners.is_empty() {
                 // return Err(anyhow!("No providers found for piece {:?}", piece_key).into());
-                warn!("No providers found for piece {:?}", piece_key);
+                warn!("No miners found for piece {:?}", chall_piece_hash);
                 pieces_checked += 1;
                 continue;
             }
             // go through bimap, get QUIC addresses of miners
-            for peer_id in piece_providers {
-                let miner_info = if let Some(miner_info) = address_book.get(&peer_id) {
+            for miner_uid in piece_miners {
+                let miner_uid = miner_uid.0;
+                let miner_info = if let Some(miner_info) = address_book.get(&miner_uid) {
                     miner_info.clone()
                 } else {
-                    warn!("Miner info not found in address book for peer {}", peer_id);
+                    warn!("Miner info not found in address book for uid {}", miner_uid);
                     continue;
                 };
-                let miner_uid = miner_info.neuron_info.uid;
 
                 let miner_info_clone = miner_info.clone();
                 let signer_clone = signer.clone();
@@ -394,8 +440,8 @@ impl Validator {
                     validator
                         .run_retrieval_challenge(
                             miner_uid,
-                            piece_hash,
-                            piece_size,
+                            chall_piece_hash,
+                            piece_size as usize,
                             miner_info_clone,
                             signer_clone,
                             validator_id,
@@ -475,7 +521,7 @@ impl Validator {
 
         // record latency and response rate scores
         Ok(())
-    }
+    } // This closes the run_synthetic_challenges method
 
     /// Set weights for each miner to publish to the chain.
     pub async fn set_weights(
@@ -491,7 +537,7 @@ impl Validator {
             .iter()
             .enumerate()
             .map(|(uid, &score)| NormalizedWeight {
-                uid: uid as u16,
+                uid: uid as NodeUID,
                 weight: (score * u16::MAX as f64) as u16,
             })
             .collect();
@@ -521,10 +567,10 @@ impl Validator {
 
     async fn run_store_challenge(
         &self,
-        miner_uid: u16,
+        miner_uid: NodeUID,
         quic_addr: Multiaddr,
         piece: Piece,
-        piece_hash: [u8; 32],
+        piece_hash: PieceHash,
         miner_info: base::NodeInfo,
     ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
         let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
@@ -535,6 +581,8 @@ impl Validator {
 
         let start_time = Instant::now();
 
+        let piece_len = piece.data.len();
+
         let quic_conn = match create_quic_client(&client, socket_addr).await {
             Ok(conn) => conn,
             Err(e) => {
@@ -542,21 +590,22 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some(format!("QUIC connection failed: {}", e)),
                 })
             }
         };
 
-        let piece_len = piece.data.len();
         let scoring_clone = self.scoring_system.clone();
 
-        let hash = match upload_piece_to_miner(
+        let (hash, _) = match upload_piece_to_miner(
             self.neuron.clone(),
             miner_info,
             &quic_conn,
             piece,
             scoring_clone,
+            None,
         )
         .await
         {
@@ -566,6 +615,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: piece_len,
+                    piece_hash,
                     success: false,
                     error: Some(format!("Upload failed: {}", e)),
                 })
@@ -573,7 +623,7 @@ impl Validator {
         };
 
         let latency = start_time.elapsed().as_secs_f64();
-        let success = hash.as_bytes_ref() == piece_hash;
+        let success = hash == piece_hash;
 
         Ok(ChallengeResult {
             miner_uid,
@@ -583,6 +633,7 @@ impl Validator {
                 SYNTH_CHALLENGE_TIMEOUT
             },
             bytes_len: piece_len,
+            piece_hash,
             success,
             error: if !success {
                 Some("Hash mismatch".to_string())
@@ -594,12 +645,12 @@ impl Validator {
 
     async fn run_retrieval_challenge(
         &self,
-        miner_uid: u16,
-        piece_hash: [u8; 32],
-        piece_size: u64,
+        miner_uid: NodeUID,
+        piece_hash: PieceHash,
+        piece_size: usize,
         miner_info: base::NodeInfo,
         signer: Signer,
-        validator_id: u16,
+        validator_id: NodeUID,
     ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
         let message = VerificationMessage {
             netuid: self.config.neuron_config.netuid,
@@ -613,6 +664,8 @@ impl Validator {
             },
         };
 
+        let piece_len = piece_size;
+
         let signature = sign_message(&signer, &message);
         let payload = HandshakePayload { signature, message };
         let payload_bytes = match bincode::serialize(&payload) {
@@ -622,6 +675,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some(format!("Serialization failed: {}", e)),
                 })
@@ -647,6 +701,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some("Invalid HTTP address".to_string()),
                 })
@@ -677,6 +732,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some(format!("Request failed: {}", e)),
                 })
@@ -690,6 +746,7 @@ impl Validator {
                 miner_uid,
                 latency: SYNTH_CHALLENGE_TIMEOUT,
                 bytes_len: 0,
+                piece_hash,
                 success: false,
                 error: Some(format!("Bad status code: {}", response.status())),
             });
@@ -702,6 +759,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some(format!("Failed to read response body: {}", e)),
                 })
@@ -715,6 +773,7 @@ impl Validator {
                     miner_uid,
                     latency: SYNTH_CHALLENGE_TIMEOUT,
                     bytes_len: 0,
+                    piece_hash,
                     success: false,
                     error: Some(format!("Failed to deserialize piece: {}", e)),
                 })
@@ -722,7 +781,7 @@ impl Validator {
         };
 
         let computed_hash = blake3::hash(&piece_data);
-        let success = *computed_hash.as_bytes() == piece_hash;
+        let success = PieceHash(*computed_hash.as_bytes()) == piece_hash;
 
         Ok(ChallengeResult {
             miner_uid,
@@ -731,7 +790,8 @@ impl Validator {
             } else {
                 SYNTH_CHALLENGE_TIMEOUT
             },
-            bytes_len: piece_data.len(),
+            bytes_len: piece_len,
+            piece_hash,
             success,
             error: if !success {
                 Some("Hash verification failed".to_string())
