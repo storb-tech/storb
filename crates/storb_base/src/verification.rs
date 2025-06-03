@@ -3,17 +3,19 @@ use std::slice;
 use crabtensor::{sign::KeypairSignature, AccountId};
 use serde::{Deserialize, Serialize};
 
+use crate::NodeUID;
+
 #[derive(Debug, Deserialize, Serialize)]
 #[repr(C)]
 pub struct KeyRegistrationInfo {
-    pub uid: u16,
+    pub uid: NodeUID,
     pub account_id: AccountId,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[repr(C)]
 pub struct VerificationMessage {
-    pub netuid: u16,
+    pub netuid: NodeUID,
     pub miner: KeyRegistrationInfo,
     pub validator: KeyRegistrationInfo,
 }

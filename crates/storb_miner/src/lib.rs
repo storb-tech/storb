@@ -8,7 +8,7 @@ use axum::middleware::from_fn;
 use axum::routing::{get, post};
 use axum::Extension;
 use base::constants::NEURON_SYNC_TIMEOUT;
-use base::piece_hash::PieceHash;
+use base::piece_hash::PieceHashStr;
 use base::sync::Synchronizable;
 use base::verification::HandshakePayload;
 use base::LocalNodeInfo;
@@ -276,7 +276,7 @@ async fn main(config: MinerConfig) -> Result<()> {
                             }
 
                             let piece_hash =
-                                PieceHash::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
+                                PieceHashStr::new(hash).expect("Failed to create PieceHash"); // TODO: handle error
                             object_store
                                 .lock()
                                 .await

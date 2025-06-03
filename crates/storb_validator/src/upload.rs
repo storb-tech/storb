@@ -6,9 +6,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length};
+use base::piece::{encode_chunk, get_infohash, piece_length, InfoHash, PieceHash};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, NodeInfo};
+use base::{metadata, BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
 use futures::{Stream, TryStreamExt};
@@ -32,7 +32,7 @@ const BYTES_PER_MB: u64 = 1024 * 1024;
 
 /// Processes upload streams and distributes file pieces to available miners.
 pub(crate) struct UploadProcessor<'a> {
-    pub miner_uids: Vec<u16>,
+    pub miner_uids: Vec<NodeUID>,
     pub miner_connections: Vec<(SocketAddr, Connection)>,
     pub state: &'a ValidatorState,
 }
@@ -227,7 +227,7 @@ impl<'a> UploadProcessor<'a> {
 
         let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        let infohash: [u8; 32] = get_infohash(piece_hashes);
+        let infohash: InfoHash = get_infohash(piece_hashes);
         // convert the infohash to a hex string for logging
         let infohash_str = hex::encode(infohash);
 
@@ -324,14 +324,14 @@ async fn consume_bytes(
     scoring_system: Arc<RwLock<ScoringSystem>>,
     metadatadb_sender: mpsc::Sender<metadata::db::MetadataDBCommand>,
     mut rx: mpsc::Receiver<(u64, Vec<u8>)>,
-    miner_uids: Vec<u16>,
+    miner_uids: Vec<NodeUID>,
     miner_connections: Vec<(SocketAddr, Connection)>,
 ) -> Result<(
     Vec<(
         metadata::models::ChunkValue,
         Vec<metadata::models::PieceValue>,
     )>,
-    Vec<[u8; 32]>,
+    Vec<PieceHash>,
 )> {
     let mut chunks_with_pieces: Vec<(
         metadata::models::ChunkValue,
@@ -350,14 +350,14 @@ async fn consume_bytes(
         .iter()
         .map(|&i| miner_connections[i].clone())
         .collect();
-    let miner_uids: Vec<u16> = indices.iter().map(|&i| miner_uids[i]).collect();
+    let miner_uids: Vec<NodeUID> = indices.iter().map(|&i| miner_uids[i]).collect();
 
     while let Some((chunk_idx, chunk)) = rx.recv().await {
         // Encode the chunk using FEC
         let encoded = encode_chunk(&chunk, chunk_idx);
         let target_piece_count = encoded.pieces.len();
         // Create filled vector of length target_piece_count
-        let mut chunk_piece_hashes: Vec<[u8; 32]> = vec![[0; 32]; target_piece_count];
+        let mut chunk_piece_hashes: Vec<PieceHash> = vec![[0; 32]; target_piece_count];
         let mut chunk_hash_raw = blake3::Hasher::new();
 
         // Distribute pieces to miners
@@ -466,7 +466,7 @@ async fn consume_bytes(
         let results = futures::future::join_all(futures).await;
 
         // a map to track miners for each piece hash (piece_hash -> Vec<miner_uid>)
-        let mut miners_for_piece: HashMap<[u8; 32], Vec<u16>> = HashMap::new();
+        let mut miners_for_piece: HashMap<PieceHash, Vec<NodeUID>> = HashMap::new();
         // Process successful uploads
         for result in results {
             match result {
@@ -540,7 +540,7 @@ async fn consume_bytes(
     }
 
     // get pieces from chunks_with_pieces
-    let piece_hashes: Vec<[u8; 32]> = chunks_with_pieces
+    let piece_hashes: Vec<PieceHash> = chunks_with_pieces
         .iter()
         .flat_map(|(_, pieces)| pieces.iter().map(|p| p.piece_hash))
         .collect();
@@ -556,7 +556,7 @@ pub async fn upload_piece_to_miner(
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
     metadatadb_sender: Option<mpsc::Sender<metadata::db::MetadataDBCommand>>,
-) -> Result<([u8; 32], u16)> {
+) -> Result<(PieceHash, NodeUID)> {
     let piece_hash = *blake3::hash(&piece.data).as_bytes();
 
     // If there is a metadatadb_sender, check if the piece is already uploaded

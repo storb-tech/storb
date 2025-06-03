@@ -9,6 +9,10 @@ use crate::constants::{
     PIECE_LENGTH_SCALING,
 };
 
+pub type PieceHash = [u8; 32];
+pub type ChunkHash = [u8; 32];
+pub type InfoHash = [u8; 32];
+
 #[derive(Debug, Clone)]
 pub struct Piece {
     pub chunk_idx: u64,
@@ -57,7 +61,7 @@ pub struct EncodedChunk {
 #[derive(Serialize, Deserialize)]
 #[repr(C)]
 pub struct PieceResponse {
-    pub piece_hash: [u8; 32],
+    pub piece_hash: PieceHash,
     pub piece_data: Vec<u8>,
 }
 
@@ -88,7 +92,7 @@ pub fn serialise_piece_response(
 /// serialised data to determine where the actual payload starts.
 pub fn deserialise_piece_response(
     serialised_buf: &[u8],
-    piece_hash: &[u8; 32],
+    piece_hash: &PieceHash,
 ) -> Result<Vec<u8>, Box<bincode::Error>> {
     let bincode_opts = bincode::DefaultOptions::new()
         .with_little_endian()
@@ -109,7 +113,7 @@ pub fn deserialise_piece_response(
     }
 }
 
-pub fn get_infohash(piece_hashes: Vec<[u8; 32]>) -> [u8; 32] {
+pub fn get_infohash(piece_hashes: Vec<PieceHash>) -> InfoHash {
     // The infohash is a hash of the piece hashes
     let mut hasher = blake3::Hasher::new();
     for piece_hash in piece_hashes {

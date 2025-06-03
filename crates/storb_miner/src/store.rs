@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Error;
 use std::path::{Path, PathBuf};
 
-use base::piece_hash::PieceHash;
+use base::piece_hash::PieceHashStr;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::info;
@@ -34,7 +34,7 @@ impl ObjectStore {
     }
 
     /// Read piece data in bytes from the store
-    pub async fn read(&self, piece_hash: &PieceHash) -> Result<Vec<u8>, Error> {
+    pub async fn read(&self, piece_hash: &PieceHashStr) -> Result<Vec<u8>, Error> {
         let path = self.path.join(&piece_hash[0..2]).join(&piece_hash[2..]);
 
         let mut buffer = vec![];
@@ -45,7 +45,7 @@ impl ObjectStore {
     }
 
     /// Write piece data to the store
-    pub async fn write(&self, piece_hash: &PieceHash, data: &Vec<u8>) -> Result<PathBuf, Error> {
+    pub async fn write(&self, piece_hash: &PieceHashStr, data: &Vec<u8>) -> Result<PathBuf, Error> {
         info!("Writing piece {piece_hash} to store");
 
         let folder = self.path.join(&piece_hash[0..2]);
@@ -72,7 +72,7 @@ mod tests {
     use std::fs;
     use std::io::Error;
 
-    use base::piece_hash::PieceHash;
+    use base::piece_hash::PieceHashStr;
     use rand::Rng;
 
     use crate::store::ObjectStore;
@@ -130,7 +130,7 @@ mod tests {
     async fn test_create_file() {
         let test_dir = create_test_dir_str();
         let store = ObjectStore::new(&test_dir).unwrap();
-        let piece_hash = PieceHash::new(generate_rand_hash()).unwrap();
+        let piece_hash = PieceHashStr::new(generate_rand_hash()).unwrap();
         let data = generate_rand_bytes(1024);
 
         let piece_path = store.write(&piece_hash, &data).await.unwrap();
@@ -144,7 +144,7 @@ mod tests {
     async fn test_read_file() {
         let test_dir = create_test_dir_str();
         let store = ObjectStore::new(&test_dir).unwrap();
-        let piece_hash = PieceHash::new(generate_rand_hash()).unwrap();
+        let piece_hash = PieceHashStr::new(generate_rand_hash()).unwrap();
         let data = generate_rand_bytes(1024);
 
         let piece_path = store.write(&piece_hash, &data).await.unwrap();
@@ -162,7 +162,7 @@ mod tests {
     async fn test_overwrite_existing_file() {
         let test_dir = create_test_dir_str();
         let store = ObjectStore::new(&test_dir).unwrap();
-        let piece_hash = PieceHash::new(generate_rand_hash()).unwrap();
+        let piece_hash = PieceHashStr::new(generate_rand_hash()).unwrap();
         let data = generate_rand_bytes(1024);
         let data2 = generate_rand_bytes(1024);
 

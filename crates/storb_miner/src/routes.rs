@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::extract::{self, Query};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use base::piece_hash::{piecehash_to_bytes_raw, PieceHash};
+use base::piece_hash::{piecehash_str_to_bytes, PieceHashStr};
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
 use tracing::{debug, error, info};
@@ -169,7 +169,7 @@ pub async fn get_piece(
     let store = state.clone().object_store.clone();
     let object_store = store.lock().await;
     // If an error occurs during piece hash decode, it is bound to be a user error.
-    let piece_hash = PieceHash::new(piece_hash_query.clone()).map_err(|_| {
+    let piece_hash = PieceHashStr::new(piece_hash_query.clone()).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             bincode::serialize("The piecehash is invalid. Was it the correct length?")
@@ -186,7 +186,7 @@ pub async fn get_piece(
     })?;
 
     let serialised_data = base::piece::serialise_piece_response(&base::piece::PieceResponse {
-        piece_hash: piecehash_to_bytes_raw(&piece_hash).map_err(|err| {
+        piece_hash: piecehash_str_to_bytes(&piece_hash).map_err(|err| {
             error!("Failed to convert piece hash to raw bytes: {err}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,

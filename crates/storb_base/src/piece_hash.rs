@@ -3,9 +3,11 @@ use std::io::Write;
 use std::ops::{Deref, Index};
 use std::slice;
 
-pub struct PieceHash(String);
+use crate::piece::PieceHash;
 
-impl PieceHash {
+pub struct PieceHashStr(String);
+
+impl PieceHashStr {
     pub fn new(piece_hash: String) -> Result<Self, String> {
         if piece_hash.len() != 64 {
             return Err(format!(
@@ -17,7 +19,7 @@ impl PieceHash {
     }
 }
 
-impl<I> Index<I> for PieceHash
+impl<I> Index<I> for PieceHashStr
 where
     I: slice::SliceIndex<str>,
 {
@@ -29,7 +31,7 @@ where
     }
 }
 
-impl Deref for PieceHash {
+impl Deref for PieceHashStr {
     type Target = String;
 
     #[inline]
@@ -38,21 +40,21 @@ impl Deref for PieceHash {
     }
 }
 
-impl From<PieceHash> for String {
+impl From<PieceHashStr> for String {
     #[inline]
-    fn from(val: PieceHash) -> Self {
+    fn from(val: PieceHashStr) -> Self {
         val.0
     }
 }
 
-impl Display for PieceHash {
+impl Display for PieceHashStr {
     #[inline]
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Display::fmt(&**self, f)
     }
 }
 
-pub fn piecehash_to_bytes_raw(piecehash: &PieceHash) -> Result<[u8; 32], String> {
+pub fn piecehash_str_to_bytes(piecehash: &PieceHashStr) -> Result<PieceHash, String> {
     let final_piece_hash = hex::decode(piecehash.as_str())
         .map_err(|err| format!("Failed to decode piecehash into hex: {err}"))?;
     let mut piece_hash_bytes = [0u8; 32];

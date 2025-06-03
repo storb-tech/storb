@@ -29,7 +29,8 @@ pub mod verification;
 pub mod version;
 
 // Node UID : NodeInfo
-pub type AddressBook = Arc<DashMap<u16, NodeInfo>>;
+pub type NodeUID = u16;
+pub type AddressBook = Arc<DashMap<NodeUID, NodeInfo>>;
 
 const SUBTENSOR_SERVING_RATE_LIMIT_EXCEEDED: &str = "Custom error: 12";
 
@@ -105,7 +106,7 @@ pub struct NodeInfo {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalNodeInfo {
-    pub uid: Option<u16>,
+    pub uid: Option<NodeUID>,
     pub http_address: Option<Multiaddr>,
     pub quic_address: Option<Multiaddr>,
     pub version: Version,

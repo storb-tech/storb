@@ -7,6 +7,7 @@ use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use base::metadata;
+use base::piece::InfoHash;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
@@ -236,7 +237,7 @@ pub async fn download_file(
     ]);
 
     // get tracker info
-    let infohash_bytes: [u8; 32] = match hex::decode(infohash) {
+    let infohash_bytes: InfoHash = match hex::decode(infohash) {
         Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
         _ => {
             error!("Invalid infohash format: {}", infohash);

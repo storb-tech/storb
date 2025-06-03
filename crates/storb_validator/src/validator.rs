@@ -7,10 +7,10 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context};
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, Piece};
+use base::piece::{encode_chunk, get_infohash, piece_length, Piece, PieceHash};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError};
+use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
@@ -40,10 +40,10 @@ use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
 #[derive(Debug)]
 struct ChallengeResult {
-    miner_uid: u16,
+    miner_uid: NodeUID,
     latency: f64,
     bytes_len: usize,
-    piece_hash: [u8; 32],
+    piece_hash: PieceHash,
     success: bool,
     error: Option<String>, // Add error field to track failure reasons
 }
@@ -247,7 +247,7 @@ impl Validator {
             }
         }
 
-        let mut miners_for_piece_hash: HashMap<[u8; 32], Vec<Compact<u16>>> = HashMap::new();
+        let mut miners_for_piece_hash: HashMap<PieceHash, Vec<Compact<NodeUID>>> = HashMap::new();
         while let Some(result) = store_futures.next().await {
             match result {
                 Ok(Ok(challenge_result)) => {
@@ -538,7 +538,7 @@ impl Validator {
             .iter()
             .enumerate()
             .map(|(uid, &score)| NormalizedWeight {
-                uid: uid as u16,
+                uid: uid as NodeUID,
                 weight: (score * u16::MAX as f64) as u16,
             })
             .collect();
@@ -568,10 +568,10 @@ impl Validator {
 
     async fn run_store_challenge(
         &self,
-        miner_uid: u16,
+        miner_uid: NodeUID,
         quic_addr: Multiaddr,
         piece: Piece,
-        piece_hash: [u8; 32],
+        piece_hash: PieceHash,
         miner_info: base::NodeInfo,
     ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
         let client = make_client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
@@ -646,12 +646,12 @@ impl Validator {
 
     async fn run_retrieval_challenge(
         &self,
-        miner_uid: u16,
-        piece_hash: [u8; 32],
+        miner_uid: NodeUID,
+        piece_hash: PieceHash,
         piece_size: usize,
         miner_info: base::NodeInfo,
         signer: Signer,
-        validator_id: u16,
+        validator_id: NodeUID,
     ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
         let message = VerificationMessage {
             netuid: self.config.neuron_config.netuid,

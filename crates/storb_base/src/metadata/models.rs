@@ -7,7 +7,10 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use subxt::ext::codec::Compact;
 
-use crate::piece::PieceType;
+use crate::{
+    piece::{ChunkHash, InfoHash, PieceHash, PieceType},
+    NodeUID,
+};
 
 // Newtype wrapper for DateTime<Utc>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -40,7 +43,7 @@ impl ToSql for SqlDateTime {
 /// Contains metadata for a chunk including its hash, associated piece hashes,
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkValue {
-    pub chunk_hash: [u8; 32],
+    pub chunk_hash: ChunkHash,
     pub k: u64,
     pub m: u64,
     pub chunk_size: u64,
@@ -54,7 +57,7 @@ pub struct ChunkValue {
 /// including its infohash, size parameters, and a cryptographic signature of the data blob owner.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfohashValue {
-    pub infohash: [u8; 32],
+    pub infohash: InfoHash,
     pub name: String,
     pub length: u64,
     pub chunk_size: u64,
@@ -68,20 +71,20 @@ pub struct InfohashValue {
 /// Contains the piece hash, indices indicating its position, its type,
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceValue {
-    pub piece_hash: [u8; 32],
+    pub piece_hash: PieceHash,
     pub piece_size: u64,
     pub piece_type: PieceType,
     // TODO: shouldn't this be a set instead of a vector?
-    pub miners: Vec<Compact<u16>>,
+    pub miners: Vec<Compact<NodeUID>>,
 }
 
 /// Represents a piece challenge history entry
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PieceChallengeHistory {
     pub piece_repair_hash: [u8; 32],
-    pub piece_hash: [u8; 32],
-    pub chunk_hash: [u8; 32],
-    pub validator_id: Compact<u16>,
+    pub piece_hash: PieceHash,
+    pub chunk_hash: ChunkHash,
+    pub validator_id: Compact<NodeUID>,
     pub timestamp: DateTime<Utc>,
     pub signature: KeypairSignature,
 }
@@ -90,10 +93,10 @@ pub struct PieceChallengeHistory {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkChallengeHistory {
     pub challenge_hash: [u8; 32],
-    pub chunk_hash: [u8; 32],
-    pub validator_id: Compact<u16>,
-    pub miners_challenged: Vec<Compact<u16>>,
-    pub miners_successful: Vec<Compact<u16>>,
+    pub chunk_hash: ChunkHash,
+    pub validator_id: Compact<NodeUID>,
+    pub miners_challenged: Vec<Compact<NodeUID>>,
+    pub miners_successful: Vec<Compact<NodeUID>>,
     // reference to the piece repair hash if any
     pub piece_repair_hash: [u8; 32],
     pub timestamp: DateTime<Utc>,

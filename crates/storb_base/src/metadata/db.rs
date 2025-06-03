@@ -12,7 +12,12 @@ use tracing::{debug, error};
 use super::models::{
     ChunkChallengeHistory, ChunkValue, InfohashValue, PieceChallengeHistory, SqlDateTime,
 };
-use crate::{constants::DB_MPSC_BUFFER_SIZE, metadata::models::PieceValue};
+use crate::{
+    constants::DB_MPSC_BUFFER_SIZE,
+    metadata::models::PieceValue,
+    piece::{ChunkHash, InfoHash, PieceHash},
+    NodeUID,
+};
 
 #[derive(Debug)]
 pub enum MetadataDBError {
@@ -65,11 +70,11 @@ pub enum MetadataDBCommand {
         response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
     },
     GetPiece {
-        piece_hash: [u8; 32],
+        piece_hash: PieceHash,
         response_sender: mpsc::Sender<Result<PieceValue, MetadataDBError>>,
     },
     GetPiecesByChunk {
-        chunk_hash: [u8; 32],
+        chunk_hash: ChunkHash,
         response_sender: mpsc::Sender<Result<Vec<PieceValue>, MetadataDBError>>,
     },
     GetChunksByInfohash {
@@ -77,7 +82,7 @@ pub enum MetadataDBCommand {
         response_sender: mpsc::Sender<Result<Vec<ChunkValue>, MetadataDBError>>,
     },
     GetInfohash {
-        infohash: [u8; 32],
+        infohash: InfoHash,
         response_sender: mpsc::Sender<Result<InfohashValue, MetadataDBError>>,
     },
     GetPieceRepairHistory {
@@ -464,7 +469,7 @@ impl MetadataDB {
                                     row.get(0)
                                 })
                                 .map_err(MetadataDBError::Database)?;
-                            let mut existing_miners: Vec<Compact<u16>> =
+                            let mut existing_miners: Vec<Compact<NodeUID>> =
                                 serde_json::from_str(&existing_miners).map_err(|e| {
                                     MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
                                         0,
@@ -566,7 +571,7 @@ impl MetadataDB {
 
     pub async fn handle_get_piece(
         &self,
-        piece_hash: &[u8; 32],
+        piece_hash: &PieceHash,
         response_sender: mpsc::Sender<Result<PieceValue, MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
@@ -621,7 +626,7 @@ impl MetadataDB {
 
     pub async fn get_piece(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
-        piece_hash: [u8; 32],
+        piece_hash: PieceHash,
     ) -> Result<PieceValue, MetadataDBError> {
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
@@ -647,7 +652,7 @@ impl MetadataDB {
 
     pub async fn handle_get_pieces_by_chunk(
         &self,
-        chunk_hash: &[u8; 32],
+        chunk_hash: &ChunkHash,
         response_sender: mpsc::Sender<Result<Vec<PieceValue>, MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
@@ -706,7 +711,7 @@ impl MetadataDB {
 
     pub async fn get_pieces_by_chunk(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
-        chunk_hash: [u8; 32],
+        chunk_hash: ChunkHash,
     ) -> Result<Vec<PieceValue>, MetadataDBError> {
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
@@ -811,7 +816,7 @@ impl MetadataDB {
 
     pub async fn handle_get_infohash(
         &self,
-        infohash: &[u8; 32],
+        infohash: &InfoHash,
         response_sender: mpsc::Sender<Result<InfohashValue, MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
@@ -865,7 +870,7 @@ impl MetadataDB {
 
     pub async fn get_infohash(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
-        infohash: [u8; 32],
+        infohash: InfoHash,
     ) -> Result<InfohashValue, MetadataDBError> {
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
