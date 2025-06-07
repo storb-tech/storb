@@ -93,6 +93,11 @@ pub enum MetadataDBCommand {
         challenge_hash: [u8; 32],
         response_sender: mpsc::Sender<Result<ChunkChallengeHistory, MetadataDBError>>,
     },
+    SyncDB {
+        outgoing: mpsc::Sender<Vec<u8>>,
+        incoming: mpsc::Receiver<Vec<u8>>,
+        response: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
 }
 
 pub struct MetadataDB {
@@ -1135,6 +1140,41 @@ impl MetadataDB {
         }
     }
 
+    async fn handle_sync_db(
+        &self,
+        mut outgoing: mpsc::Sender<Vec<u8>>,
+        mut incoming: mpsc::Receiver<Vec<u8>>,
+        response: mpsc::Sender<Result<(), MetadataDBError>>,
+    ) {
+        let pool = Arc::clone(&self.pool);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<(), MetadataDBError> {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare("SELECT crsql_changes();")?;
+            let change_sets: Vec<Vec<u8>> = stmt
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+
+            for cs in change_sets {
+                outgoing.blocking_send(cs).map_err(|_| {
+                    MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults)
+                })?;
+            }
+
+            while let Some(peer_cs) = incoming.blocking_recv() {
+                // apply each change‐set
+                conn.execute("SELECT crsql_changeset_apply(?1);", params![peer_cs])?;
+            }
+
+            Ok(())
+        })
+        .await
+        .and_then(|r| r) // propagate rusqlite errors
+        .map_err(|e| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults));
+
+        let _ = response.send(result).await;
+    }
+
     /// Processes db events and commands.
     ///
     /// This asynchronous function continuously processes db events and commands,
@@ -1257,6 +1297,14 @@ impl MetadataDB {
                     {
                         error!("Error getting chunk challenge history: {:?}", e);
                     }
+                }
+                MetadataDBCommand::SyncDB {
+                    outgoing,
+                    incoming,
+                    response,
+                } => {
+                    debug!("Starting DB sync with peer");
+                    self.handle_sync_db(outgoing, incoming, response).await;
                 }
             }
         }

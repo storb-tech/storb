@@ -168,7 +168,7 @@ impl Synchronizable for BaseNeuron {
 
             // Skip invalid IPs/ports
             if neuron_ip == 0 {
-                warn!(
+                trace!(
                     "Invalid IP for neuron {:?}. Node has never been started",
                     neuron_info.uid
                 );
@@ -176,14 +176,14 @@ impl Synchronizable for BaseNeuron {
             }
 
             if neuron_port == 0 {
-                error!("Invalid port for neuron: {:?}", neuron_info.uid);
+                warn!("Invalid port for neuron: {:?}", neuron_info.uid);
                 continue;
             }
 
             let ip = Ipv4Addr::from((neuron_ip & 0xffff_ffff) as u32);
             let url_raw = format!("http://{}:{}/info", ip, neuron_port);
             let url = reqwest::Url::parse(&url_raw).map_err(|e| {
-                error!("Failed to parse URL: {:?}", e);
+                warn!("Failed to parse URL: {:?}", e);
                 SyncError::GetNodeInfoError(format!("Failed to parse URL: {:?}", e))
             })?;
 

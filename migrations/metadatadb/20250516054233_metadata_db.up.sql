@@ -74,3 +74,12 @@ CREATE INDEX IF NOT EXISTS idx_chunk_pieces_by_chunk ON chunk_pieces(chunk_hash)
 CREATE INDEX IF NOT EXISTS idx_tracker_chunks_by_infohash ON tracker_chunks(infohash);
 CREATE INDEX IF NOT EXISTS idx_piece_repair_by_piece ON piece_repair_history(piece_hash);
 CREATE INDEX IF NOT EXISTS idx_chunk_challenge_by_chunk ON chunk_challenge_history(chunk_hash);
+
+-- crsql supported tables
+SELECT crsql_as_crr('infohashes');
+SELECT crsql_as_crr('chunks');
+SELECT crsql_as_crr('tracker_chunks');
+SELECT crsql_as_crr('pieces');
+SELECT crsql_as_crr('chunk_pieces');
+SELECT crsql_as_crr('piece_repair_history');
+SELECT crsql_as_crr('chunk_challenge_history');
