@@ -115,7 +115,7 @@ impl MetadataDB {
 
         if !crsqlite_lib.exists() {
             return Err(MetadataDBError::InvalidPath(format!(
-                "CR-Sqlite extension library path does not exist: {}",
+                "cr-sqlite extension library path does not exist: {}",
                 crsqlite_lib.display()
             )));
         }
