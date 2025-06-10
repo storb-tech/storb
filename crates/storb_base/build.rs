@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{Cursor, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
 
@@ -29,7 +29,7 @@ fn main() {
 }
 
 /// Downloads the cr-sqlite library based on the target OS and architecture.
-fn download_crsqlite(lib_dir: &PathBuf) -> PathBuf {
+fn download_crsqlite(lib_dir: &Path) -> PathBuf {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
@@ -93,7 +93,7 @@ fn download_crsqlite(lib_dir: &PathBuf) -> PathBuf {
     lib_path
 }
 
-fn extract_zip(data: &[u8], lib_dir: &PathBuf, lib_name: &str) {
+fn extract_zip(data: &[u8], lib_dir: &Path, lib_name: &str) {
     let cursor = Cursor::new(data);
     let mut archive = ZipArchive::new(cursor).unwrap();
 
