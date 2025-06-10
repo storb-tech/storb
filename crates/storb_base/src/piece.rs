@@ -65,7 +65,7 @@ impl TryFrom<Vec<u8>> for InfoHash {
 }
 
 impl ToSql for PieceHash {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(&self.0[..]))
     }
 }
@@ -84,7 +84,7 @@ impl FromSql for PieceHash {
 }
 
 impl ToSql for ChunkHash {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(&self.0[..]))
     }
 }
@@ -103,7 +103,7 @@ impl FromSql for ChunkHash {
 }
 
 impl ToSql for InfoHash {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         Ok(ToSqlOutput::from(&self.0[..]))
     }
 }

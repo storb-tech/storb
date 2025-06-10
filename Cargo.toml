@@ -76,9 +76,11 @@ tracing-subscriber = { version = "0.3.19", features = [
     "registry",
     "std",
 ] }
+ureq = "3.0.11"
 utoipa = "5"
 uuid = "1.12.1"
 zfec-rs = { git = "https://github.com/thornleywalker/zfec-rs.git", rev = "3f3a3720def2294dc62e65f614862f1a7ddd3187" }
+zip = "4.0.0"
 
 [workspace.lints.clippy]
 uninlined_format_args = "allow"

@@ -27,7 +27,7 @@ impl FromSql for SqlDateTime {
 }
 
 impl ToSql for SqlDateTime {
-    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput> {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
         let timestamp =
             self.0
                 .timestamp_nanos_opt()
