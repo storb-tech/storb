@@ -53,7 +53,6 @@ struct ChallengeResult {
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
     pub crsqlite_file: PathBuf,
-    pub moving_average_alpha: f64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
     pub otel_api_key: String,
@@ -75,13 +74,9 @@ impl Validator {
         let neuron_config = config.neuron_config.clone();
 
         let scoring_system = Arc::new(RwLock::new(
-            ScoringSystem::new(
-                &config.neuron_config.db_file,
-                &config.scores_state_file,
-                config.moving_average_alpha,
-            )
-            .await
-            .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
+            ScoringSystem::new(&config.neuron_config.db_file, &config.scores_state_file)
+                .await
+                .map_err(|err| NeuronError::ConfigError(err.to_string()))?,
         ));
 
         let neuron = Arc::new(RwLock::new(BaseNeuron::new(neuron_config).await?));
@@ -434,6 +429,17 @@ impl Validator {
                         ) {
                             error!("Failed to update retrieval successes: {}", e);
                         }
+                        let mut scoring_system_guard = self.scoring_system.write().await;
+                        scoring_system_guard
+                            .update_alpha_beta_db(
+                                challenge_result.miner_uid,
+                                challenge_result.latency,
+                                true,
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                error!("Failed to update alpha/beta in DB: {}", e);
+                            });
                     } else {
                         error!(
                             "Retrieval challenge failed for miner {}: {}",
@@ -442,6 +448,17 @@ impl Validator {
                                 .error
                                 .unwrap_or_else(|| "Unknown error".to_string())
                         );
+                        let mut scoring_system_guard = self.scoring_system.write().await;
+                        scoring_system_guard
+                            .update_alpha_beta_db(
+                                challenge_result.miner_uid,
+                                challenge_result.latency,
+                                false,
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                error!("Failed to update alpha/beta in DB: {}", e);
+                            });
                     }
                 }
                 Ok(Err(e)) => error!("Retrieval challenge error: {}", e),

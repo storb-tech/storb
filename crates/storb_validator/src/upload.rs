@@ -584,18 +584,6 @@ pub async fn upload_piece_to_miner(
     }
 
     let miner_uid = miner_info.neuron_info.uid;
-    // Track request
-    if let Err(e) = scoring_system
-        .write()
-        .await
-        .increment_request_counter(miner_uid as usize)
-        .await
-    {
-        error!(
-            "Failed to increment request counter for miner {}: {}",
-            miner_uid, e
-        );
-    }
 
     let upload_result =
         upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;
@@ -622,6 +610,15 @@ pub async fn upload_piece_to_miner(
             "UPDATE miner_stats SET store_successes = store_successes + 1, total_successes = total_successes + 1 WHERE miner_uid = ?",
             [miner_uid],
         )?;
+        let mut scoring_system_guard = scoring_system.write().await;
+        scoring_system_guard
+            .update_alpha_beta_db(miner_uid, 1.0, true)
+            .await?;
+    } else {
+        let mut scoring_system_guard = scoring_system.write().await;
+        scoring_system_guard
+            .update_alpha_beta_db(miner_uid, 1.0, false)
+            .await?;
     }
 
     Ok((piece_hash, miner_uid))

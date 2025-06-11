@@ -42,8 +42,6 @@ crsqlite_file = "crsqlite/crsqlite.so"
 [validator.neuron]
 num_concurrent_forwards = 1
 disable_set_weights = false
-moving_average_alpha = 0.1
-response_time_alpha = 0.1
 
 [validator.query]
 batch_size = 20

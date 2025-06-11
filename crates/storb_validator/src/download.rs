@@ -81,9 +81,11 @@ impl DownloadProcessor {
                 .ok_or_else(|| anyhow!("Miner {:?} not found in local address book", miner_uid))?
                 .clone();
 
-            let scoring_system = scoring_system.clone();
-            let db = scoring_system.write().await.db.clone();
-            drop(scoring_system);
+            let scoring_system_clone = scoring_system.clone();
+            let db = scoring_system_clone.write().await.db.clone();
+            drop(scoring_system_clone);
+
+            let scoring_system = Arc::clone(&scoring_system);
 
             let signer = Arc::new(signer.clone());
 
@@ -93,10 +95,23 @@ impl DownloadProcessor {
             let fut = async move {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
-                let req_client = reqwest::Client::builder()
-                    .timeout(timeout_duration)
-                    .build()
-                    .context("Failed to build reqwest client")?;
+                let req_client = match reqwest::Client::builder().timeout(timeout_duration).build()
+                {
+                    Ok(client) => client,
+                    Err(e) => {
+                        let mut scoring_system_rw = scoring_system.write().await;
+                        scoring_system_rw
+                            .update_alpha_beta_db(miner_uid, 1.0, false)
+                            .await
+                            .unwrap(); // TODO(scoring): error handle
+                        drop(scoring_system_rw);
+                        error!(
+                            "Failed to create HTTP client for miner {:?}: {}",
+                            miner_uid, e
+                        );
+                        return Err(anyhow!("Failed to create HTTP client: {}", e));
+                    }
+                };
 
                 let message = VerificationMessage {
                     netuid: node_info.neuron_info.netuid,
@@ -119,7 +134,7 @@ impl DownloadProcessor {
                     timeout_duration.as_millis()
                 );
 
-                let url = node_info
+                let url = match node_info
                     .http_address
                     .as_ref()
                     .and_then(base::utils::multiaddr_to_socketaddr)
@@ -131,14 +146,33 @@ impl DownloadProcessor {
                             hex::encode(piece_hash),
                             hex::encode(payload_bytes)
                         )
-                    })
-                    .ok_or_else(|| anyhow!("Invalid HTTP address in node_info"))?;
+                    }) {
+                    Some(url) => url,
+                    None => {
+                        let mut scoring_system_rw = scoring_system.write().await;
+                        scoring_system_rw
+                            .update_alpha_beta_db(miner_uid, 1.0, false)
+                            .await
+                            .unwrap(); // TODO(scoring): error handle
+                        drop(scoring_system_rw);
+                        error!("Miner {:?} has no valid HTTP address", miner_uid);
+                        return Err(anyhow!("Miner has no valid HTTP address"));
+                    }
+                };
 
-                let node_response = req_client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to query node")?;
+                let node_response = match req_client.get(&url).send().await {
+                    Ok(response) => response,
+                    Err(e) => {
+                        let mut scoring_system_rw = scoring_system.write().await;
+                        scoring_system_rw
+                            .update_alpha_beta_db(miner_uid, 1.0, false)
+                            .await
+                            .unwrap(); // TODO(scoring): error handle
+                        drop(scoring_system_rw);
+                        error!("Failed to send request to miner {:?}: {}", miner_uid, e);
+                        return Err(anyhow!("Failed to send request to miner: {}", e));
+                    }
+                };
 
                 trace!("Node response from {:?}: {:?}", miner_uid, node_response);
 
@@ -159,12 +193,30 @@ impl DownloadProcessor {
                     // show first few as readable bytes
                     String::from_utf8_lossy(&body_bytes[..std::cmp::min(100, body_bytes.len())])
                 );
-                let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
-                    .context("Failed to deserialise piece response")?;
+
+                let piece_data =
+                    match base::piece::deserialise_piece_response(&body_bytes, &piece_hash) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            let mut scoring_system_rw = scoring_system.write().await;
+                            scoring_system_rw
+                                .update_alpha_beta_db(miner_uid, 1.0, false)
+                                .await
+                                .unwrap(); // TODO(scoring): error handle
+                            drop(scoring_system_rw);
+                            bail!("Failed to deserialize piece response: {}", e);
+                        }
+                    };
 
                 // Check status of response
                 if response_status != StatusCode::OK {
                     let err_msg = bincode::deserialize::<String>(&piece_data[..])?;
+                    let mut scoring_system_rw = scoring_system.write().await;
+                    scoring_system_rw
+                        .update_alpha_beta_db(miner_uid, 1.0, false)
+                        .await
+                        .unwrap(); // TODO(scoring): error handle
+                    drop(scoring_system_rw);
                     bail!(
                         "Response returned with status code {}: {}",
                         response_status,
@@ -175,12 +227,24 @@ impl DownloadProcessor {
                 // Verify the integrity of the piece_data using Blake3.
                 let computed_hash = blake3::hash(&piece_data);
                 if computed_hash.as_bytes() != piece_hash.as_ref() {
+                    let mut scoring_system_rw = scoring_system.write().await;
+                    scoring_system_rw
+                        .update_alpha_beta_db(miner_uid, 1.0, false)
+                        .await
+                        .unwrap(); // TODO(scoring): error handle
+                    drop(scoring_system_rw);
                     bail!("Hash mismatch for miner {:?}", miner_uid);
                 }
 
                 // Update the scoring system with the successful retrieval.
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
+                let mut scoring_system_rw = scoring_system.write().await;
+                scoring_system_rw
+                    .update_alpha_beta_db(miner_uid, 1.0, true)
+                    .await
+                    .unwrap(); // TODO(scoring): error handle
+                drop(scoring_system_rw);
 
                 Ok(piece_data)
             };

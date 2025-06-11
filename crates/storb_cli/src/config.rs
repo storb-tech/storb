@@ -29,8 +29,6 @@ pub struct Miner {
 pub struct ValidatorNeuron {
     pub num_concurrent_forwards: u64,
     pub disable_set_weights: bool,
-    pub moving_average_alpha: f64,
-    pub response_time_alpha: f64,
 }
 
 #[allow(unused)]
