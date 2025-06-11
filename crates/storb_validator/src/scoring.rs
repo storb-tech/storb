@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,90 +13,18 @@ use crate::constants::{MIN_REQUESTS_FOR_SCORE, STATS_RESET_THRESHOLD, Z_SCORE, Z
 /// ScoreState stores the scores for each miner.
 ///
 /// The final EMA score consists of the weighted sum of the normalized response
-/// rate, latency, and challenge scores.
+/// rate and challenge scores.
 ///
-/// The latency scores are stored in the score state file, although response rate
-/// and challenge statistics are stored in a separate SQLite database. Those stats
-/// are calculated then saved into the EMA score.
+/// The response rate /// and challenge statistics are stored in an SQLite database.
+/// Those stats are calculated then saved into the EMA score.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoreState {
     /// The current exponential moving average (EMA) score of the miners.
     pub ema_scores: Array1<f64>,
-    /// The EMA score of retrieve latencies.
-    pub retrieve_latency_scores: Array1<f64>,
-    /// The EMA score of store latencies.
-    pub store_latency_scores: Array1<f64>,
-    /// Combination of retrieve and store scores.
-    pub final_latency_scores: Array1<f64>,
     /// Previous EMA scores before reset, used as baseline
     pub previous_scores: Array1<f64>,
     /// Request counters per miner
     pub request_counters: Array1<u32>,
-}
-
-impl ScoreState {
-    fn normalize_latencies(latencies: &HashMap<u16, f64>) -> HashMap<u16, f64> {
-        if latencies.is_empty() {
-            return HashMap::new();
-        }
-
-        // Find min and max latencies
-        let mut min_latency = f64::MAX;
-        let mut max_latency = f64::MIN;
-
-        for &latency in latencies.values() {
-            min_latency = min_latency.min(latency);
-            max_latency = max_latency.max(latency);
-        }
-
-        // Normalize and invert (so faster = higher score)
-        let range = max_latency - min_latency;
-        latencies
-            .iter()
-            .map(|(&uid, &latency)| {
-                let normalized = if range > 0.0 {
-                    1.0 - ((latency - min_latency) / range)
-                } else {
-                    1.0
-                };
-                (uid, normalized)
-            })
-            .collect()
-    }
-
-    pub fn update_latency_scores(
-        &mut self,
-        store_latencies: HashMap<u16, f64>,
-        retrieval_latencies: HashMap<u16, f64>,
-        alpha: f64,
-    ) {
-        // Get normalized scores
-        let normalized_store = Self::normalize_latencies(&store_latencies);
-        let normalized_retrieval = Self::normalize_latencies(&retrieval_latencies);
-
-        // Update arrays with new EMA scores
-        for (uid, score) in normalized_store {
-            if uid < self.store_latency_scores.len() as u16 {
-                // EMA = alpha * new_value + (1 - alpha) * previous_ema
-                let old_score = self.store_latency_scores[uid as usize];
-                self.store_latency_scores[uid as usize] = alpha * score + (1.0 - alpha) * old_score;
-            }
-        }
-
-        for (uid, score) in normalized_retrieval {
-            if uid < self.retrieve_latency_scores.len() as u16 {
-                let old_score = self.retrieve_latency_scores[uid as usize];
-                self.retrieve_latency_scores[uid as usize] =
-                    alpha * score + (1.0 - alpha) * old_score;
-            }
-        }
-
-        // Update final latency scores (50/50 weight between store and retrieve)
-        for i in 0..self.final_latency_scores.len() {
-            self.final_latency_scores[i] =
-                0.5 * self.store_latency_scores[i] + 0.5 * self.retrieve_latency_scores[i];
-        }
-    }
 }
 
 pub struct ScoringSystem {
@@ -189,9 +116,6 @@ impl ScoringSystem {
 
         let state = ScoreState {
             ema_scores: array![],
-            retrieve_latency_scores: array![],
-            store_latency_scores: array![],
-            final_latency_scores: array![],
             previous_scores: array![],
             request_counters: array![],
         };
@@ -285,12 +209,6 @@ impl ScoringSystem {
             let state = &self.state;
 
             let mut new_ema_scores = extend_array(&state.ema_scores, neuron_count);
-            let mut new_retrieve_latency_scores =
-                extend_array(&state.retrieve_latency_scores, neuron_count);
-            let mut new_store_latency_scores =
-                extend_array(&state.store_latency_scores, neuron_count);
-            let mut new_final_latency_scores =
-                extend_array(&state.final_latency_scores, neuron_count);
             let mut new_previous_scores = extend_array(&state.previous_scores, neuron_count);
             let mut new_request_counters =
                 extend_array(&state.request_counters.mapv(|x| x as f64), neuron_count)
@@ -300,9 +218,6 @@ impl ScoringSystem {
             for uid in uids_to_update.iter() {
                 let uid = *uid as usize;
                 new_ema_scores[uid] = 0.0;
-                new_retrieve_latency_scores[uid] = 0.0;
-                new_store_latency_scores[uid] = 0.0;
-                new_final_latency_scores[uid] = 0.0;
                 new_previous_scores[uid] = 0.0;
                 new_request_counters[uid] = 0;
 
@@ -313,9 +228,6 @@ impl ScoringSystem {
             }
 
             self.state.ema_scores = new_ema_scores;
-            self.state.retrieve_latency_scores = new_retrieve_latency_scores;
-            self.state.store_latency_scores = new_store_latency_scores;
-            self.state.final_latency_scores = new_final_latency_scores;
             self.state.previous_scores = new_previous_scores;
             self.state.request_counters = new_request_counters;
         } else {
@@ -323,9 +235,6 @@ impl ScoringSystem {
             for uid in uids_to_update.iter() {
                 let uid = *uid as usize;
                 self.state.ema_scores[uid] = 0.0;
-                self.state.retrieve_latency_scores[uid] = 0.0;
-                self.state.store_latency_scores[uid] = 0.0;
-                self.state.final_latency_scores[uid] = 0.0;
                 self.state.previous_scores[uid] = 0.0;
                 self.state.request_counters[uid] = 0;
 
@@ -408,20 +317,10 @@ impl ScoringSystem {
             response_rate_scores[i] = 0.0;
         }
 
-        // Calculate final EMA scores: 75% weight for response rates (store/retrieval success)
-        // and 25% weight for latency performance. Response rates prioritized as they indicate
-        // basic miner availability and reliability.
-        state.ema_scores =
-            0.75 * response_rate_scores.clone() + 0.25 * state.final_latency_scores.clone();
+        state.ema_scores = response_rate_scores.clone();
 
         info!("response rate scores: {}", response_rate_scores);
         info!("new scores: {}", state.ema_scores);
-        info!(
-            "new retrieve_latency_scores: {}",
-            state.retrieve_latency_scores
-        );
-        info!("new store_latency_scores: {}", state.store_latency_scores);
-        info!("new final_latency_scores: {}", state.final_latency_scores);
 
         match self.save_state() {
             Ok(_) => info!("Saved state successfully"),

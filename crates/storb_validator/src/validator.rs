@@ -38,6 +38,8 @@ use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
 
 #[derive(Debug)]
+// TODO: remove latency and bytes_len from ChallengeResult?
+#[allow(dead_code)]
 struct ChallengeResult {
     miner_uid: NodeUID,
     latency: f64,
@@ -45,39 +47,6 @@ struct ChallengeResult {
     piece_hash: PieceHash,
     success: bool,
     error: Option<String>, // Add error field to track failure reasons
-}
-
-#[derive(Default)]
-struct LatencyStats {
-    weighted_latency: f64,
-    total_bytes: usize,
-}
-
-#[derive(Default)]
-struct MinerLatencyMap {
-    stats: HashMap<u16, LatencyStats>,
-}
-
-impl MinerLatencyMap {
-    fn record_latency(&mut self, miner_uid: u16, latency: f64, bytes_len: usize) {
-        let stats = self.stats.entry(miner_uid).or_default();
-        stats.weighted_latency += latency * bytes_len as f64;
-        stats.total_bytes += bytes_len;
-    }
-
-    fn get_all_latencies(&self) -> HashMap<u16, f64> {
-        self.stats
-            .iter()
-            .map(|(&uid, stats)| {
-                let avg = if stats.total_bytes > 0 {
-                    stats.weighted_latency / stats.total_bytes as f64
-                } else {
-                    0.0
-                };
-                (uid, avg)
-            })
-            .collect()
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -157,8 +126,6 @@ impl Validator {
         }
 
         let mut rng: StdRng = SeedableRng::from_entropy();
-        let mut store_latencies = MinerLatencyMap::default();
-        let mut retrieval_latencies = MinerLatencyMap::default();
 
         // ----==== Synthetic store challenges ====----
 
@@ -260,12 +227,6 @@ impl Validator {
                             .entry(challenge_result.piece_hash)
                             .or_default()
                             .push(Compact(challenge_result.miner_uid));
-
-                        store_latencies.record_latency(
-                            challenge_result.miner_uid,
-                            challenge_result.latency,
-                            challenge_result.bytes_len,
-                        );
                     } else {
                         error!(
                             "Store challenge failed for miner {}: {}",
@@ -273,11 +234,6 @@ impl Validator {
                             challenge_result
                                 .error
                                 .unwrap_or_else(|| "Unknown error".to_string())
-                        );
-                        store_latencies.record_latency(
-                            challenge_result.miner_uid,
-                            SYNTH_CHALLENGE_TIMEOUT,
-                            challenge_result.bytes_len,
                         );
                     }
                 }
@@ -478,12 +434,6 @@ impl Validator {
                         ) {
                             error!("Failed to update retrieval successes: {}", e);
                         }
-
-                        retrieval_latencies.record_latency(
-                            challenge_result.miner_uid,
-                            challenge_result.latency,
-                            challenge_result.bytes_len,
-                        );
                     } else {
                         error!(
                             "Retrieval challenge failed for miner {}: {}",
@@ -492,11 +442,6 @@ impl Validator {
                                 .error
                                 .unwrap_or_else(|| "Unknown error".to_string())
                         );
-                        retrieval_latencies.record_latency(
-                            challenge_result.miner_uid,
-                            SYNTH_CHALLENGE_TIMEOUT,
-                            challenge_result.bytes_len,
-                        );
                     }
                 }
                 Ok(Err(e)) => error!("Retrieval challenge error: {}", e),
@@ -504,22 +449,6 @@ impl Validator {
             }
         }
 
-        let store_avg_latencies = store_latencies.get_all_latencies();
-        let retrieval_avg_latencies = retrieval_latencies.get_all_latencies();
-        let moving_average_alpha = { self.scoring_system.read().await.moving_average_alpha };
-
-        // Update scoring system with new latencies using EMA
-        self.scoring_system
-            .write()
-            .await
-            .state
-            .update_latency_scores(
-                store_avg_latencies,
-                retrieval_avg_latencies,
-                moving_average_alpha,
-            );
-
-        // record latency and response rate scores
         Ok(())
     } // This closes the run_synthetic_challenges method
 
