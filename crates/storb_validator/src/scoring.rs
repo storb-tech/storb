@@ -9,6 +9,8 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
+use crate::constants::{ALPHA, BETA};
+
 /// ScoreState stores the scores for each miner.
 ///
 /// The final EMA score consists of the weighted sum of the normalized response
@@ -97,8 +99,8 @@ impl ScoringSystem {
             state,
             state_file: scoring_state_file.to_path_buf(),
             // TODO(scoring): make these configurable
-            initial_alpha: 500.0,
-            initial_beta: 1000.0,
+            initial_alpha: ALPHA,
+            initial_beta: BETA,
             lambda: 0.99, // forgetting factor for challenges
         };
 
@@ -134,15 +136,15 @@ impl ScoringSystem {
         // TODO(scoring): set the alpha and beta to be configurable/constants?
         conn.execute(
             "UPDATE miner_stats SET 
-                alpha = 500.0,
-                beta = 1000.0,
+                alpha = ?1,
+                beta = ?2,
                 store_successes = 0,
                 store_attempts = 0,
                 retrieval_successes = 0,
                 retrieval_attempts = 0,
                 total_successes = 0
-            WHERE miner_uid = ?",
-            [uid],
+            WHERE miner_uid = ?3",
+            params![self.initial_alpha, self.initial_beta, uid],
         )?;
         debug!("Reset stats for UID {} in database", uid);
         Ok(())
@@ -239,14 +241,14 @@ impl ScoringSystem {
                     [miner_uid],
                     |row| row.get(0),
                 )
-                .unwrap_or(500.0);
+                .unwrap_or(self.initial_alpha);
             let beta: f64 = conn
                 .query_row(
                     "SELECT beta FROM miner_stats WHERE miner_uid = ?",
                     [miner_uid],
                     |row| row.get(0),
                 )
-                .unwrap_or(1000.0);
+                .unwrap_or(self.initial_beta);
 
             response_rate_scores[miner_uid] = alpha / (alpha + beta);
         }
