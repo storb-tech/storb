@@ -9,7 +9,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{ALPHA, BETA};
+use crate::constants::{INITIAL_ALPHA, INITIAL_BETA};
 
 /// ScoreState stores the scores for each miner.
 ///
@@ -98,9 +98,8 @@ impl ScoringSystem {
             db,
             state,
             state_file: scoring_state_file.to_path_buf(),
-            // TODO(scoring): make these configurable
-            initial_alpha: ALPHA,
-            initial_beta: BETA,
+            initial_alpha: INITIAL_ALPHA,
+            initial_beta: INITIAL_BETA,
             lambda: 0.99, // forgetting factor for challenges
         };
 
@@ -133,7 +132,6 @@ impl ScoringSystem {
     async fn reset_miner_stats(&self, uid: usize) -> Result<(), rusqlite::Error> {
         let db = self.db.clone();
         let conn = db.conn.lock().await;
-        // TODO(scoring): set the alpha and beta to be configurable/constants?
         conn.execute(
             "UPDATE miner_stats SET 
                 alpha = ?1,
@@ -157,7 +155,6 @@ impl ScoringSystem {
         success: bool,
     ) -> Result<(), rusqlite::Error> {
         let conn = self.db.conn.lock().await;
-        // TODO(scoring): set the alpha and beta to be configurable/constants?
         // get current alpha and beta from the database
         let (alpha, beta): (f64, f64) = conn.query_row(
             "SELECT alpha, beta FROM miner_stats WHERE miner_uid = ?",

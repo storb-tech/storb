@@ -16,5 +16,7 @@ pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 10; // maximum number of miners
 pub const INFO_API_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
 pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
 
-pub const ALPHA: f64 = 500.0;
-pub const BETA: f64 = 1000.0;
+// Initial values for alpha and beta used in the scoring system
+// These were empirically derived to minimise reliable node churn
+pub const INITIAL_ALPHA: f64 = 500.0;
+pub const INITIAL_BETA: f64 = 1000.0;

@@ -103,7 +103,7 @@ impl DownloadProcessor {
                         scoring_system_rw
                             .update_alpha_beta_db(miner_uid, 1.0, false)
                             .await
-                            .unwrap(); // TODO(scoring): error handle
+                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                         drop(scoring_system_rw);
                         error!(
                             "Failed to create HTTP client for miner {:?}: {}",
@@ -153,7 +153,7 @@ impl DownloadProcessor {
                         scoring_system_rw
                             .update_alpha_beta_db(miner_uid, 1.0, false)
                             .await
-                            .unwrap(); // TODO(scoring): error handle
+                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                         drop(scoring_system_rw);
                         error!("Miner {:?} has no valid HTTP address", miner_uid);
                         return Err(anyhow!("Miner has no valid HTTP address"));
@@ -167,7 +167,7 @@ impl DownloadProcessor {
                         scoring_system_rw
                             .update_alpha_beta_db(miner_uid, 1.0, false)
                             .await
-                            .unwrap(); // TODO(scoring): error handle
+                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                         drop(scoring_system_rw);
                         error!("Failed to send request to miner {:?}: {}", miner_uid, e);
                         return Err(anyhow!("Failed to send request to miner: {}", e));
@@ -202,7 +202,7 @@ impl DownloadProcessor {
                             scoring_system_rw
                                 .update_alpha_beta_db(miner_uid, 1.0, false)
                                 .await
-                                .unwrap(); // TODO(scoring): error handle
+                                .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                             drop(scoring_system_rw);
                             bail!("Failed to deserialize piece response: {}", e);
                         }
@@ -215,7 +215,7 @@ impl DownloadProcessor {
                     scoring_system_rw
                         .update_alpha_beta_db(miner_uid, 1.0, false)
                         .await
-                        .unwrap(); // TODO(scoring): error handle
+                        .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                     drop(scoring_system_rw);
                     bail!(
                         "Response returned with status code {}: {}",
@@ -231,7 +231,7 @@ impl DownloadProcessor {
                     scoring_system_rw
                         .update_alpha_beta_db(miner_uid, 1.0, false)
                         .await
-                        .unwrap(); // TODO(scoring): error handle
+                        .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                     drop(scoring_system_rw);
                     bail!("Hash mismatch for miner {:?}", miner_uid);
                 }
@@ -243,7 +243,7 @@ impl DownloadProcessor {
                 scoring_system_rw
                     .update_alpha_beta_db(miner_uid, 1.0, true)
                     .await
-                    .unwrap(); // TODO(scoring): error handle
+                    .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                 drop(scoring_system_rw);
 
                 Ok(piece_data)
