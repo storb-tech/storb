@@ -13,13 +13,10 @@ pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synth
 pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
 pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 10; // maximum number of miners to challenge
 
-// Define the confidence level (e.g., 95%)
-// Z-score for 95% confidence interval (two-sided) is approximately 1.96
-pub const Z_SCORE: f64 = 1.96;
-pub const Z_SQUARED: f64 = Z_SCORE * Z_SCORE; // Pre-calculated
-
 pub const INFO_API_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
 pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
 
-pub const STATS_RESET_THRESHOLD: u32 = 2500;
-pub const MIN_REQUESTS_FOR_SCORE: u32 = 50; // Minimum requests before using new Wilson score
+// Initial values for alpha and beta used in the scoring system
+// These were empirically derived to minimise reliable node churn
+pub const INITIAL_ALPHA: f64 = 500.0;
+pub const INITIAL_BETA: f64 = 1000.0;

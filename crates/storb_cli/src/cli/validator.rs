@@ -39,16 +39,6 @@ pub fn cli() -> Command {
                 .long("neuron.disable-set-weights")
                 .help("Disable weight setting")
                 .action(ArgAction::SetTrue),
-            Arg::new("neuron.moving_average_alpha")
-                .long("neuron.moving-average-alpha")
-                .value_name("alpha")
-                .help("Moving average alpha parameter, how much to add of the new observation")
-                .action(ArgAction::Set),
-            Arg::new("neuron.response_time_alpha")
-                .long("neuron.response-time-alpha")
-                .value_name("alpha")
-                .help("Moving average alpha parameter for response time scores")
-                .action(ArgAction::Set),
             // Query settings
             Arg::new("query.batch_size")
                 .long("query.batch-size")
@@ -93,12 +83,6 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
     let validator_config = ValidatorConfig {
         scores_state_file,
         crsqlite_file,
-        moving_average_alpha: *get_config_value!(
-            args,
-            "neuron.moving_average_alpha",
-            f64,
-            &settings.validator.neuron.moving_average_alpha
-        ),
         neuron_config,
         api_keys_db,
         otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key)

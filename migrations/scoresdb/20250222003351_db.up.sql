@@ -1,6 +1,8 @@
 -- Table for miner stats --
 CREATE TABLE miner_stats (
     miner_uid INTEGER PRIMARY KEY,
+    alpha FLOAT DEFAULT 500.0,
+    beta FLOAT DEFAULT 1000.0,
     challenge_successes INTEGER DEFAULT 0,
     challenge_attempts INTEGER DEFAULT 0,
     retrieval_successes INTEGER DEFAULT 0,
