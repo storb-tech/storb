@@ -1,6 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use base::{
+    piece::{ChunkHash, InfoHash, PieceHash},
+    NodeUID,
+};
 use crabtensor::sign::KeypairSignature;
 use r2d2::Pool;
 use r2d2_sqlite::{rusqlite::params, SqliteConnectionManager};
@@ -12,12 +16,7 @@ use tracing::{debug, error};
 use super::models::{
     ChunkChallengeHistory, ChunkValue, InfohashValue, PieceChallengeHistory, SqlDateTime,
 };
-use crate::{
-    constants::DB_MPSC_BUFFER_SIZE,
-    metadata::models::PieceValue,
-    piece::{ChunkHash, InfoHash, PieceHash},
-    NodeUID,
-};
+use crate::{constants::DB_MPSC_BUFFER_SIZE, metadata::models::PieceValue};
 
 #[derive(Debug)]
 pub enum MetadataDBError {
@@ -240,6 +239,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn insert_piece_repair_history(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         piece_repair_history: PieceChallengeHistory,
@@ -320,6 +320,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn insert_chunk_challenge_history(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         chunk_challenge_history: ChunkChallengeHistory,
@@ -1015,6 +1016,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_piece_repair_history(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         piece_repair_hash: [u8; 32],
@@ -1109,6 +1111,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_chunk_challenge_history(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         challenge_hash: [u8; 32],
@@ -1268,15 +1271,13 @@ impl MetadataDB {
 mod tests {
     use std::path::PathBuf;
 
+    use base::piece::PieceType;
     use chrono::Utc;
     use subxt::ext::codec::Compact;
     use tempfile::NamedTempFile;
 
     use super::*;
-    use crate::{
-        metadata::models::{ChunkValue, InfohashValue, PieceValue},
-        piece::PieceType,
-    };
+    use crate::metadata::models::{ChunkValue, InfohashValue, PieceValue};
 
     // Helper function to create a test database with schema
     fn setup_test_db(temp_file: &NamedTempFile) -> PathBuf {

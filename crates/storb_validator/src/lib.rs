@@ -28,6 +28,7 @@ use validator::{Validator, ValidatorConfig};
 pub mod apikey;
 mod constants;
 mod download;
+mod metadata;
 mod middleware;
 mod quic;
 mod routes;

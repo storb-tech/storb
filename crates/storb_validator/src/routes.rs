@@ -6,13 +6,13 @@ use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
-use base::metadata;
 use base::piece::InfoHash;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
+use crate::metadata;
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
 

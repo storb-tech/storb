@@ -1,3 +1,7 @@
+use base::{
+    piece::{ChunkHash, InfoHash, PieceHash, PieceType},
+    NodeUID,
+};
 use chrono::{DateTime, Utc};
 use crabtensor::sign::KeypairSignature;
 use rusqlite::{
@@ -6,11 +10,6 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use subxt::ext::codec::Compact;
-
-use crate::{
-    piece::{ChunkHash, InfoHash, PieceHash, PieceType},
-    NodeUID,
-};
 
 // Newtype wrapper for DateTime<Utc>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
