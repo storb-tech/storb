@@ -25,9 +25,12 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
+use crate::routes::get_crsqlite_changes;
+
 pub mod apikey;
 mod constants;
 mod download;
+mod metadata;
 mod middleware;
 mod quic;
 mod routes;
@@ -244,6 +247,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(Extension(info_api_rate_limit_state))
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .route(
+            "/db_changes",
+            get(get_crsqlite_changes), // TODO(syncing): Add db change rate limiting middleware?
+        )
         .with_state(ValidatorState {
             validator: validator.clone(),
             local_node_info: validator.neuron.read().await.local_node_info.clone(),

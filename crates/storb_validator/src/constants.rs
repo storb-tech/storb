@@ -1,5 +1,8 @@
 use std::time::Duration;
 
+/// Buffer size for the metadatadb's MPSC channel.
+pub const DB_MPSC_BUFFER_SIZE: usize = 100;
+
 // TODO: should we increase min required miners?
 // TODO: should we use it in consume_bytes to determine number of miners to distribute to?
 // NOTE: see: https://github.com/storb-tech/storb/issues/66
