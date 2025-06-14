@@ -16,7 +16,10 @@ use tracing::{debug, error};
 use super::models::{
     ChunkChallengeHistory, ChunkValue, InfohashValue, PieceChallengeHistory, SqlDateTime,
 };
-use crate::{constants::DB_MPSC_BUFFER_SIZE, metadata::models::PieceValue};
+use crate::{
+    constants::DB_MPSC_BUFFER_SIZE,
+    metadata::models::{CrSqliteChanges, CrSqliteValue, PieceValue},
+};
 
 #[derive(Debug)]
 pub enum MetadataDBError {
@@ -52,6 +55,11 @@ impl From<r2d2::Error> for MetadataDBError {
 }
 
 pub enum MetadataDBCommand {
+    GetCrSqliteChanges {
+        min_db_version: u64,
+        site_id_disclude: Vec<u8>,
+        response_sender: mpsc::Sender<Result<Vec<CrSqliteChanges>, MetadataDBError>>,
+    },
     InsertObject {
         infohash_value: InfohashValue,
         chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
@@ -138,6 +146,20 @@ impl MetadataDB {
             Self::validate_database(&conn)?;
         }
 
+        // Upgrade all the tables crrs
+        {
+            let conn = pool.get()?;
+            conn.execute_batch(
+                "SELECT crsql_as_crr('infohashes');
+                 SELECT crsql_as_crr('chunks');
+                 SELECT crsql_as_crr('tracker_chunks');
+                 SELECT crsql_as_crr('pieces');
+                 SELECT crsql_as_crr('chunk_pieces');
+                 SELECT crsql_as_crr('piece_repair_history');
+                 SELECT crsql_as_crr('chunk_challenge_history');",
+            )?;
+        }
+
         let (command_sender, command_receiver) =
             mpsc::channel::<MetadataDBCommand>(DB_MPSC_BUFFER_SIZE);
 
@@ -202,6 +224,86 @@ impl MetadataDB {
         }
         Ok(())
     }
+
+    pub async fn handle_get_crsqlite_changes(
+        &self,
+        min_db_version: u64,
+        site_id_disclude: Vec<u8>,
+        response_sender: mpsc::Sender<Result<Vec<CrSqliteChanges>, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let site_id_disclude = site_id_disclude.clone();
+
+        let changes = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT `table`, pk, val, col_version, db_version, site_id, cl, seq
+                 FROM crsql_changes
+                 WHERE db_version >= ?1 AND site_id NOT IN (?2)
+                 ORDER BY db_version DESC",
+            )?;
+
+            let mut rows = stmt.query(params![min_db_version, site_id_disclude])?;
+            let mut changes = Vec::new();
+            while let Some(row) = rows.next()? {
+                changes.push(CrSqliteChanges {
+                    table: row.get(0)?,
+                    pk: CrSqliteValue::from(row.get_ref(1)?),
+                    val: CrSqliteValue::from(row.get_ref(2)?),
+                    col_version: row.get(3)?,
+                    db_version: row.get(4)?,
+                    site_id: row.get::<_, Vec<u8>>(5)?,
+                    cl: row.get(6)?,
+                    seq: row.get(7)?,
+                });
+            }
+            Ok::<Vec<CrSqliteChanges>, MetadataDBError>(changes)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(changes)).await.is_err() {
+            error!("Failed to send crsqlite changes response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_crsqlite_changes(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        min_db_version: u64,
+        site_id_disclude: Vec<u8>,
+    ) -> Result<Vec<CrSqliteChanges>, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<Vec<CrSqliteChanges>, MetadataDBError>>(1);
+
+        // Send the command to get crsqlite changes
+        command_sender
+            .send(MetadataDBCommand::GetCrSqliteChanges {
+                min_db_version,
+                site_id_disclude,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    // #[allow(dead_code)]
+    // pub async fn insert_changes(
+    //     command_sender: &mpsc::Sender<MetadataDBCommand>,
+    //     cr_sqlite_changes: CrSqliteChanges,
+    // ) {
+    // }
 
     pub async fn handle_insert_piece_repair_history(
         &self,
@@ -1145,6 +1247,23 @@ impl MetadataDB {
     pub async fn process_events(&mut self) {
         while let Some(command) = self.command_receiver.recv().await {
             match command {
+                MetadataDBCommand::GetCrSqliteChanges {
+                    min_db_version,
+                    site_id_disclude,
+                    response_sender,
+                } => {
+                    debug!("Handling request for crsqlite changes");
+                    if let Err(e) = self
+                        .handle_get_crsqlite_changes(
+                            min_db_version,
+                            site_id_disclude,
+                            response_sender,
+                        )
+                        .await
+                    {
+                        error!("Error retrieving crsqlite changes: {:?}", e);
+                    }
+                }
                 MetadataDBCommand::InsertObject {
                     infohash_value,
                     chunks_with_pieces,
@@ -1974,7 +2093,7 @@ mod tests {
         .await
         .expect("Failed to insert third object");
 
-        // Verify miners are still the same
+        // Query the piece from the third chunk to verify miners were not changed
         let pieces_chunk3 = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([7u8; 32]))
             .await
             .expect("Failed to get pieces from third chunk");

@@ -42,6 +42,65 @@ pub async fn node_info(
     Ok((StatusCode::OK, serialized_local_node_info))
 }
 
+/// Router function to get crsqlite changes for syncing
+#[utoipa::path(
+    get,
+    path = "/db_changes",
+    responses(
+        (status = 200, description = "Successfully got crsqlite changes", body = String),
+        (status = 500, description = "Internal server error", body = String)
+    ),
+    tag = "DBChanges"
+)]
+pub async fn get_crsqlite_changes(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // TODO(syncing): Add verification step to check if request is from a validator?
+    debug!("Got crsqlite changes request");
+    let min_db_version = params
+        .get("min_db_version")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let site_id_disclude = params
+        .get("site_id_disclude")
+        .map(|s| hex::decode(s).unwrap_or_default())
+        .unwrap_or_default();
+
+    debug!(
+        "Getting crsqlite changes with min_db_version: {}, site_id_disclude: {}",
+        min_db_version,
+        hex::encode(&site_id_disclude)
+    );
+
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let changes = metadata::db::MetadataDB::get_crsqlite_changes(
+        &command_sender,
+        min_db_version,
+        site_id_disclude,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get crsqlite changes: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    // serialize the changes
+    let changes = bincode::serialize(&changes).map_err(|e| {
+        error!("Failed to serialize crsqlite changes: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to serialize changes".to_string(),
+        )
+    })?;
+
+    Ok((StatusCode::OK, changes))
+}
+
 #[utoipa::path(
     post,
     path = "/file",

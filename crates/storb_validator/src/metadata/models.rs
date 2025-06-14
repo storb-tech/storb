@@ -4,6 +4,7 @@ use base::{
 };
 use chrono::{DateTime, Utc};
 use crabtensor::sign::KeypairSignature;
+use rusqlite::types::ValueRef;
 use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput},
     ToSql,
@@ -88,7 +89,7 @@ pub struct PieceChallengeHistory {
     pub signature: KeypairSignature,
 }
 
-// Represents a chunk challenge history entry
+/// Represents a chunk challenge history entry
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkChallengeHistory {
     pub challenge_hash: [u8; 32],
@@ -100,4 +101,38 @@ pub struct ChunkChallengeHistory {
     pub piece_repair_hash: [u8; 32],
     pub timestamp: DateTime<Utc>,
     pub signature: KeypairSignature,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CrSqliteValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl From<ValueRef<'_>> for CrSqliteValue {
+    fn from(value_ref: ValueRef<'_>) -> Self {
+        match value_ref {
+            ValueRef::Null => CrSqliteValue::Null,
+            ValueRef::Integer(i) => CrSqliteValue::Integer(i),
+            ValueRef::Real(f) => CrSqliteValue::Real(f),
+            ValueRef::Text(t) => CrSqliteValue::Text(String::from_utf8_lossy(t).to_string()),
+            ValueRef::Blob(b) => CrSqliteValue::Blob(b.to_vec()),
+        }
+    }
+}
+
+/// Represents the changes in the SQLite database
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrSqliteChanges {
+    pub table: String,
+    pub pk: CrSqliteValue,
+    pub val: CrSqliteValue,
+    pub col_version: u64,
+    pub db_version: u64,
+    pub site_id: Vec<u8>,
+    pub cl: u64,
+    pub seq: u64,
 }

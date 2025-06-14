@@ -13034,7 +13034,6 @@ dependencies = [
  "rusqlite",
  "rustls",
  "serde",
- "serde_json",
  "subxt",
  "tempfile",
  "thiserror 2.0.11",
