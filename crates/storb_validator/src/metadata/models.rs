@@ -1,16 +1,16 @@
+use base::{
+    piece::{ChunkHash, InfoHash, PieceHash, PieceType},
+    NodeUID,
+};
 use chrono::{DateTime, Utc};
 use crabtensor::sign::KeypairSignature;
+use rusqlite::types::ValueRef;
 use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput},
     ToSql,
 };
 use serde::{Deserialize, Serialize};
 use subxt::ext::codec::Compact;
-
-use crate::{
-    piece::{ChunkHash, InfoHash, PieceHash, PieceType},
-    NodeUID,
-};
 
 // Newtype wrapper for DateTime<Utc>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub struct PieceChallengeHistory {
     pub signature: KeypairSignature,
 }
 
-// Represents a chunk challenge history entry
+/// Represents a chunk challenge history entry
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkChallengeHistory {
     pub challenge_hash: [u8; 32],
@@ -101,4 +101,52 @@ pub struct ChunkChallengeHistory {
     pub piece_repair_hash: [u8; 32],
     pub timestamp: DateTime<Utc>,
     pub signature: KeypairSignature,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum CrSqliteValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl From<ValueRef<'_>> for CrSqliteValue {
+    fn from(value_ref: ValueRef<'_>) -> Self {
+        match value_ref {
+            ValueRef::Null => CrSqliteValue::Null,
+            ValueRef::Integer(i) => CrSqliteValue::Integer(i),
+            ValueRef::Real(f) => CrSqliteValue::Real(f),
+            ValueRef::Text(t) => CrSqliteValue::Text(String::from_utf8_lossy(t).to_string()),
+            ValueRef::Blob(b) => CrSqliteValue::Blob(b.to_vec()),
+        }
+    }
+}
+
+// write impl for converting CrSqliteValue to a sqlite value
+impl ToSql for CrSqliteValue {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        match self {
+            CrSqliteValue::Null => Ok(ToSqlOutput::from(rusqlite::types::Null)),
+            CrSqliteValue::Integer(i) => Ok(ToSqlOutput::from(*i)),
+            CrSqliteValue::Real(f) => Ok(ToSqlOutput::from(*f)),
+            CrSqliteValue::Text(t) => Ok(ToSqlOutput::from(t.clone())),
+            CrSqliteValue::Blob(b) => Ok(ToSqlOutput::from(b.clone())),
+        }
+    }
+}
+
+/// Represents the changes in the SQLite database
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CrSqliteChanges {
+    pub table: String,
+    pub pk: CrSqliteValue,
+    pub cid: String,
+    pub val: CrSqliteValue,
+    pub col_version: u64,
+    pub db_version: u64,
+    pub site_id: Vec<u8>,
+    pub cl: u64,
+    pub seq: u64,
 }

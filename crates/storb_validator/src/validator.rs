@@ -10,7 +10,7 @@ use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, Piece, PieceHash};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
+use base::{BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::sign_message;
 use crabtensor::wallet::Signer;
@@ -32,6 +32,7 @@ use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHALLENGE_MINER_NUM, MAX_SYNTH_CHUNK_SIZE,
     MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
+use crate::metadata;
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, ScoringSystem};
 use crate::upload::upload_piece_to_miner;
@@ -53,6 +54,7 @@ struct ChallengeResult {
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
     pub crsqlite_file: PathBuf,
+    pub sync_stake_threshold: u64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
     pub otel_api_key: String,

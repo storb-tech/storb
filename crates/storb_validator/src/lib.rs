@@ -12,7 +12,7 @@ use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
 use base::{LocalNodeInfo, NeuronError};
-use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
+use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
 use opentelemetry::global;
@@ -25,9 +25,13 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
+use crate::metadata::sync::sync_metadata_db;
+use crate::routes::get_crsqlite_changes;
+
 pub mod apikey;
 mod constants;
 mod download;
+mod metadata;
 mod middleware;
 mod quic;
 mod routes;
@@ -72,6 +76,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let neuron = validator.neuron.clone();
 
     let validator_for_sync = validator.clone();
+    let validator_for_metadatadb = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
@@ -207,6 +212,18 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
+    // Spawn background metadata database syncing task with metadata::sync::sync_metadata_db
+    tokio::spawn(async move {
+        info!("Starting metadata DB sync task");
+        loop {
+            match sync_metadata_db(validator_for_metadatadb.clone()).await {
+                Ok(_) => info!("Metadata DB sync completed successfully"),
+                Err(err) => error!("Metadata DB sync failed: {}", err),
+            }
+            time::sleep(Duration::from_secs(METADATADB_SYNC_FREQUENCY)).await;
+        }
+    });
+
     let vali_clone = validator_for_backup.clone();
     // Spawn background backup task
     tokio::spawn(async move {
@@ -244,6 +261,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(Extension(info_api_rate_limit_state))
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .route(
+            "/db_changes",
+            get(get_crsqlite_changes), // TODO(syncing): Add db change rate limiting middleware?
+        )
         .with_state(ValidatorState {
             validator: validator.clone(),
             local_node_info: validator.neuron.read().await.local_node_info.clone(),

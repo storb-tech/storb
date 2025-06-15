@@ -2,69 +2,69 @@
 
 -- infohashes
 CREATE TABLE IF NOT EXISTS infohashes (
-  infohash            BLOB            PRIMARY KEY,
-  name                VARCHAR(4096)   NOT NULL,
-  length              INTEGER         NOT NULL,
-  chunk_size          INTEGER         NOT NULL,
-  chunk_count         INTEGER         NOT NULL,
-  creation_timestamp  DATETIME        NOT NULL,
-  signature           TEXT            NOT NULL
+  infohash            BLOB            PRIMARY KEY NOT NULL DEFAULT '',
+  name                VARCHAR(4096)   NOT NULL DEFAULT 'default',
+  length              INTEGER         NOT NULL DEFAULT 0,
+  chunk_size          INTEGER         NOT NULL DEFAULT 0,
+  chunk_count         INTEGER         NOT NULL DEFAULT 0,
+  creation_timestamp  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  signature           TEXT            NOT NULL DEFAULT ''
 );
 
 -- Chunks
 CREATE TABLE IF NOT EXISTS chunks (
-  chunk_hash           BLOB      PRIMARY KEY,
-  k                    INTEGER   NOT NULL,
-  m                    INTEGER   NOT NULL,
-  chunk_size           INTEGER   NOT NULL,
-  padlen               INTEGER   NOT NULL,
-  original_chunk_size  INTEGER   NOT NULL
+  chunk_hash           BLOB      PRIMARY KEY NOT NULL DEFAULT '',
+  k                    INTEGER   NOT NULL DEFAULT 0,
+  m                    INTEGER   NOT NULL DEFAULT 0,
+  chunk_size           INTEGER   NOT NULL DEFAULT 0,
+  padlen               INTEGER   NOT NULL DEFAULT 0,
+  original_chunk_size  INTEGER   NOT NULL DEFAULT 0
 );
 
 -- Chunk‑tracker mapping 
 CREATE TABLE IF NOT EXISTS tracker_chunks (
-  infohash   BLOB    NOT NULL  REFERENCES infohashes(infohash),
-  chunk_idx  INTEGER NOT NULL,
-  chunk_hash BLOB    NOT NULL  REFERENCES chunks(chunk_hash),
+  infohash   BLOB    NOT NULL DEFAULT '',
+  chunk_idx  INTEGER NOT NULL DEFAULT 0,
+  chunk_hash BLOB    NOT NULL DEFAULT '',
   PRIMARY KEY (infohash, chunk_idx)
 );
 
 -- Pieces
 CREATE TABLE IF NOT EXISTS pieces (
-  piece_hash   BLOB      PRIMARY KEY,
-  piece_size   INTEGER   NOT NULL,
-  piece_type   INTEGER   NOT NULL,
-  miners       TEXT      NOT NULL
+  piece_hash   BLOB      PRIMARY KEY NOT NULL DEFAULT '',
+  piece_size   INTEGER   NOT NULL DEFAULT 0,
+  piece_type   INTEGER   NOT NULL DEFAULT 0, -- 0: normal, 1: parity
+  miners       TEXT      NOT NULL DEFAULT '' -- JSON array of miner IDs
 );
 
 -- Piece‑chunk mapping 
 CREATE TABLE IF NOT EXISTS chunk_pieces (
-  chunk_hash  BLOB    NOT NULL  REFERENCES chunks(chunk_hash),
-  piece_idx   INTEGER NOT NULL,
-  piece_hash  BLOB    NOT NULL  REFERENCES pieces(piece_hash),
+  chunk_hash  BLOB    NOT NULL DEFAULT '',
+  piece_idx   INTEGER NOT NULL DEFAULT 0,
+  piece_hash  BLOB    NOT NULL DEFAULT '',
   PRIMARY KEY (chunk_hash, piece_idx)
 );
 
 -- Piece‑repair history
 CREATE TABLE IF NOT EXISTS piece_repair_history (
-  piece_repair_hash  BLOB      PRIMARY KEY,
-  piece_hash         BLOB      NOT NULL,
-  chunk_hash         BLOB      NOT NULL  REFERENCES chunks(chunk_hash),
-  validator_id       INTEGER   NOT NULL,
-  timestamp          DATETIME  NOT NULL,
-  signature          TEXT      NOT NULL
+  piece_repair_hash  BLOB      PRIMARY KEY NOT NULL DEFAULT '',
+  piece_hash         BLOB      NOT NULL DEFAULT '',
+  chunk_hash         BLOB      NOT NULL DEFAULT '',
+  validator_id       INTEGER   NOT NULL DEFAULT 0,
+  timestamp          DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  signature          TEXT      NOT NULL DEFAULT ''
 );
 
 -- Chunk‑challenge history
 CREATE TABLE IF NOT EXISTS chunk_challenge_history (
-  challenge_hash     BLOB      PRIMARY KEY,
-  chunk_hash         BLOB      NOT NULL  REFERENCES chunks(chunk_hash),
-  validator_id       INTEGER   NOT NULL,
-  miners_challenged  TEXT      NOT NULL,
-  miners_successful  TEXT      NOT NULL,
-  piece_repair_hash      BLOB      REFERENCES piece_repair_history(piece_repair_hash),
-  timestamp          DATETIME  NOT NULL,
-  signature          TEXT      NOT NULL
+  challenge_hash     BLOB      PRIMARY KEY NOT NULL DEFAULT '',
+  chunk_hash         BLOB      NOT NULL DEFAULT '',
+  validator_id       INTEGER   NOT NULL DEFAULT 0,
+  miners_challenged  TEXT      NOT NULL DEFAULT '', -- JSON array of miner IDs
+  miners_successful  TEXT      NOT NULL DEFAULT '', -- JSON array of miner IDs
+  piece_repair_hash  BLOB,
+  timestamp          DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  signature          TEXT      NOT NULL DEFAULT ''
 );
 
 -- Indexes

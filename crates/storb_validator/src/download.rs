@@ -8,15 +8,16 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base::constants::MIN_BANDWIDTH;
-use base::metadata::db::MetadataDBCommand;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, AddressBook, BaseNeuron};
+use base::{AddressBook, BaseNeuron};
 use crabtensor::sign::sign_message;
 use futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, trace};
 
+use crate::metadata;
+use crate::metadata::db::MetadataDBCommand;
 use crate::scoring::ScoringSystem;
 use crate::ValidatorState;
 

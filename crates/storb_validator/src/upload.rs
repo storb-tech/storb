@@ -8,7 +8,7 @@ use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, InfoHash, PieceHash};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, NodeInfo, NodeUID};
+use base::{BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
 use futures::{Stream, TryStreamExt};
@@ -22,6 +22,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
+use crate::metadata;
 use crate::quic::establish_miner_connections;
 use crate::scoring::ScoringSystem;
 use crate::utils::get_id_quic_uids;
