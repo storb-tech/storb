@@ -54,6 +54,7 @@ struct ChallengeResult {
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
     pub crsqlite_file: PathBuf,
+    pub sync_stake_threshold: u64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
     pub otel_api_key: String,

@@ -24,6 +24,11 @@ pub fn cli() -> Command {
                 .value_name("path")
                 .help("The path to the cr-sqlite lib")
                 .action(ArgAction::Set),
+            Arg::new("sync_stake_threshold")
+                .long("sync-stake-threshold")
+                .value_name("amount")
+                .help("The minimum stake amount for a neuron to be synced")
+                .action(ArgAction::Set),
             Arg::new("api_keys_db")
                 .long("api-keys-db")
                 .value_name("path")
@@ -71,6 +76,12 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
         String,
         settings.validator.crsqlite_file
     ))?;
+    let sync_stake_threshold = *get_config_value!(
+        args,
+        "sync_stake_threshold",
+        u64,
+        settings.validator.sync_stake_threshold
+    );
     let api_keys_db = expanduser(get_config_value!(
         args,
         "api_keys_db",
@@ -83,6 +94,7 @@ pub fn exec(args: &ArgMatches, settings: &Settings) -> Result<()> {
     let validator_config = ValidatorConfig {
         scores_state_file,
         crsqlite_file,
+        sync_stake_threshold,
         neuron_config,
         api_keys_db,
         otel_api_key: get_config_value!(args, "otel_api_key", String, &settings.otel_api_key)

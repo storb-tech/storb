@@ -12,7 +12,7 @@ use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
 use base::{LocalNodeInfo, NeuronError};
-use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
+use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
 use opentelemetry::global;
@@ -25,6 +25,7 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
+use crate::metadata::sync::sync_metadata_db;
 use crate::routes::get_crsqlite_changes;
 
 pub mod apikey;
@@ -75,6 +76,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let neuron = validator.neuron.clone();
 
     let validator_for_sync = validator.clone();
+    let validator_for_metadatadb = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
@@ -207,6 +209,18 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                 Ok(_) => debug!("Synthetic challenges ran successfully"),
                 Err(err) => error!("Synthetic challenges failed to run: {err}"),
             };
+        }
+    });
+
+    // Spawn background metadata database syncing task with metadata::sync::sync_metadata_db
+    tokio::spawn(async move {
+        info!("Starting metadata DB sync task");
+        loop {
+            match sync_metadata_db(validator_for_metadatadb.clone()).await {
+                Ok(_) => info!("Metadata DB sync completed successfully"),
+                Err(err) => error!("Metadata DB sync failed: {}", err),
+            }
+            time::sleep(Duration::from_secs(METADATADB_SYNC_FREQUENCY)).await;
         }
     });
 

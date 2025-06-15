@@ -124,11 +124,25 @@ impl From<ValueRef<'_>> for CrSqliteValue {
     }
 }
 
+// write impl for converting CrSqliteValue to a sqlite value
+impl ToSql for CrSqliteValue {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        match self {
+            CrSqliteValue::Null => Ok(ToSqlOutput::from(rusqlite::types::Null)),
+            CrSqliteValue::Integer(i) => Ok(ToSqlOutput::from(*i)),
+            CrSqliteValue::Real(f) => Ok(ToSqlOutput::from(*f)),
+            CrSqliteValue::Text(t) => Ok(ToSqlOutput::from(t.clone())),
+            CrSqliteValue::Blob(b) => Ok(ToSqlOutput::from(b.clone())),
+        }
+    }
+}
+
 /// Represents the changes in the SQLite database
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrSqliteChanges {
     pub table: String,
     pub pk: CrSqliteValue,
+    pub cid: String,
     pub val: CrSqliteValue,
     pub col_version: u64,
     pub db_version: u64,

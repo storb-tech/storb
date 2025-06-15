@@ -55,6 +55,16 @@ impl From<r2d2::Error> for MetadataDBError {
 }
 
 pub enum MetadataDBCommand {
+    GetSiteId {
+        response_sender: mpsc::Sender<Result<Vec<u8>, MetadataDBError>>,
+    },
+    GetDBVersion {
+        response_sender: mpsc::Sender<Result<u64, MetadataDBError>>,
+    },
+    InsertCrSqliteChanges {
+        changes: Vec<CrSqliteChanges>,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
     GetCrSqliteChanges {
         min_db_version: u64,
         site_id_disclude: Vec<u8>,
@@ -225,6 +235,162 @@ impl MetadataDB {
         Ok(())
     }
 
+    pub async fn handle_get_site_id(
+        &self,
+        response_sender: mpsc::Sender<Result<Vec<u8>, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+
+        let site_id = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let site_id: Vec<u8> =
+                conn.query_row("SELECT site_id FROM crsql_site_id", [], |row| row.get(0))?;
+            Ok::<Vec<u8>, MetadataDBError>(site_id)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(site_id)).await.is_err() {
+            error!("Failed to send site ID response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_site_id(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+    ) -> Result<Vec<u8>, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<Vec<u8>, MetadataDBError>>(1);
+
+        // Send the command to get site ID
+        command_sender
+            .send(MetadataDBCommand::GetSiteId { response_sender })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_get_db_version(
+        &self,
+        response_sender: mpsc::Sender<Result<u64, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+
+        let db_version = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let version: u64 = conn.query_row("SELECT crsql_db_version()", [], |row| row.get(0))?;
+            Ok::<u64, MetadataDBError>(version)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(db_version)).await.is_err() {
+            error!("Failed to send DB version response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_db_version(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+    ) -> Result<u64, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<u64, MetadataDBError>>(1);
+
+        // Send the command to get DB version
+        command_sender
+            .send(MetadataDBCommand::GetDBVersion { response_sender })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_insert_crsqlite_changes(
+        &self,
+        changes: Vec<CrSqliteChanges>,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let changes = changes.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+
+            for change in changes {
+                tx.execute(
+                    "INSERT INTO crsql_changes (`table`, pk, cid, val, col_version, db_version, site_id, cl, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        change.table,
+                        change.pk,
+                        change.cid,
+                        change.val,
+                        change.col_version,
+                        change.db_version,
+                        change.site_id,
+                        change.cl,
+                        change.seq
+                    ],
+                )?;
+            }
+
+            tx.commit()?;
+            Ok::<(), MetadataDBError>(())
+        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(())).await.is_err() {
+            error!("Failed to send insert changes response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn insert_crsqlite_changes(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        changes: Vec<CrSqliteChanges>,
+    ) -> Result<(), MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
+
+        // Send the command to insert crsqlite changes
+        command_sender
+            .send(MetadataDBCommand::InsertCrSqliteChanges {
+                changes,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
     pub async fn handle_get_crsqlite_changes(
         &self,
         min_db_version: u64,
@@ -237,9 +403,9 @@ impl MetadataDB {
         let changes = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT `table`, pk, val, col_version, db_version, site_id, cl, seq
+                "SELECT `table`, pk, cid, val, col_version, db_version, site_id, cl, seq
                  FROM crsql_changes
-                 WHERE db_version >= ?1 AND site_id NOT IN (?2)
+                 WHERE db_version > ?1 AND site_id NOT IN (?2)
                  ORDER BY db_version DESC",
             )?;
 
@@ -249,12 +415,13 @@ impl MetadataDB {
                 changes.push(CrSqliteChanges {
                     table: row.get(0)?,
                     pk: CrSqliteValue::from(row.get_ref(1)?),
-                    val: CrSqliteValue::from(row.get_ref(2)?),
-                    col_version: row.get(3)?,
-                    db_version: row.get(4)?,
-                    site_id: row.get::<_, Vec<u8>>(5)?,
-                    cl: row.get(6)?,
-                    seq: row.get(7)?,
+                    cid: row.get(2)?,
+                    val: CrSqliteValue::from(row.get_ref(3)?),
+                    col_version: row.get(4)?,
+                    db_version: row.get(5)?,
+                    site_id: row.get(6)?,
+                    cl: row.get(7)?,
+                    seq: row.get(8)?,
                 });
             }
             Ok::<Vec<CrSqliteChanges>, MetadataDBError>(changes)
@@ -297,13 +464,6 @@ impl MetadataDB {
             )),
         }
     }
-
-    // #[allow(dead_code)]
-    // pub async fn insert_changes(
-    //     command_sender: &mpsc::Sender<MetadataDBCommand>,
-    //     cr_sqlite_changes: CrSqliteChanges,
-    // ) {
-    // }
 
     pub async fn handle_insert_piece_repair_history(
         &self,
@@ -1247,6 +1407,34 @@ impl MetadataDB {
     pub async fn process_events(&mut self) {
         while let Some(command) = self.command_receiver.recv().await {
             match command {
+                MetadataDBCommand::GetDBVersion { response_sender } => {
+                    debug!("Handling request for DB version");
+                    if let Err(e) = self.handle_get_db_version(response_sender).await {
+                        error!("Error retrieving DB version: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetSiteId { response_sender } => {
+                    debug!("Handling request for site ID");
+                    if let Err(e) = self.handle_get_site_id(response_sender).await {
+                        error!("Error retrieving site ID: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::InsertCrSqliteChanges {
+                    changes,
+                    response_sender,
+                } => {
+                    // Small preview of changes
+                    debug!(
+                        "Inserting crsqlite changes: {:?}...",
+                        changes.iter().take(3).collect::<Vec<_>>()
+                    );
+                    if let Err(e) = self
+                        .handle_insert_crsqlite_changes(changes, response_sender)
+                        .await
+                    {
+                        error!("Error inserting crsqlite changes: {:?}", e);
+                    }
+                }
                 MetadataDBCommand::GetCrSqliteChanges {
                     min_db_version,
                     site_id_disclude,
