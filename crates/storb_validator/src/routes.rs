@@ -16,6 +16,8 @@ use crate::metadata;
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
 
+// TODO: add route for deleting a file
+
 /// Router function to get information on a given node
 #[utoipa::path(
     get,

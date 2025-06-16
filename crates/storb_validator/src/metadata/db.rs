@@ -5,9 +5,11 @@ use base::{
     piece::{ChunkHash, InfoHash, PieceHash},
     NodeUID,
 };
-use crabtensor::sign::KeypairSignature;
+use chrono::Utc;
+use crabtensor::{sign::KeypairSignature, AccountId};
 use r2d2::Pool;
 use r2d2_sqlite::{rusqlite::params, SqliteConnectionManager};
+use rand::RngCore;
 use rusqlite::{Connection, Result};
 use subxt::ext::codec::Compact;
 use tokio::sync::mpsc;
@@ -18,7 +20,9 @@ use super::models::{
 };
 use crate::{
     constants::DB_MPSC_BUFFER_SIZE,
-    metadata::models::{CrSqliteChanges, CrSqliteValue, PieceValue},
+    metadata::models::{
+        CrSqliteChanges, CrSqliteValue, DeleteInfohashRequest, PieceValue, SqlAccountId,
+    },
 };
 
 #[derive(Debug)]
@@ -28,6 +32,11 @@ pub enum MetadataDBError {
     InvalidPath(String),
     MissingTable(String),
     ExtensionLoad(String),
+    InvalidSignature,   // Add this
+    UnauthorizedAccess, // Add this
+    InfohashNotFound,   // Add this
+    InvalidNonce,       // Add this
+    NonceExpired,       // Add this
 }
 
 impl std::fmt::Display for MetadataDBError {
@@ -38,6 +47,11 @@ impl std::fmt::Display for MetadataDBError {
             MetadataDBError::InvalidPath(path) => write!(f, "Invalid path: {}", path),
             MetadataDBError::MissingTable(table) => write!(f, "Missing table: {}", table),
             MetadataDBError::ExtensionLoad(msg) => write!(f, "Extension load error: {}", msg),
+            MetadataDBError::InvalidSignature => write!(f, "Invalid signature"),
+            MetadataDBError::UnauthorizedAccess => write!(f, "Unauthorized access"),
+            MetadataDBError::InfohashNotFound => write!(f, "Infohash not found"),
+            MetadataDBError::InvalidNonce => write!(f, "Invalid or expired nonce"),
+            MetadataDBError::NonceExpired => write!(f, "Nonce has expired"),
         }
     }
 }
@@ -109,6 +123,32 @@ pub enum MetadataDBCommand {
     GetChunkChallengeHistory {
         challenge_hash: [u8; 32],
         response_sender: mpsc::Sender<Result<ChunkChallengeHistory, MetadataDBError>>,
+    },
+    DeleteInfohash {
+        delete_request: DeleteInfohashRequest,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
+    GetInfohashesByOwner {
+        owner_account_id: AccountId,
+        response_sender: mpsc::Sender<Result<Vec<InfohashValue>, MetadataDBError>>,
+    },
+    VerifyOwnership {
+        infohash: InfoHash,
+        owner_account_id: AccountId,
+        response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
+    },
+    GenerateNonce {
+        account_id: AccountId,
+        response_sender: mpsc::Sender<Result<[u8; 32], MetadataDBError>>,
+    },
+    ValidateAndConsumeNonce {
+        account_id: AccountId,
+        nonce: [u8; 32],
+        response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
+    },
+    CleanupExpiredNonces {
+        max_age_hours: u64,
+        response_sender: mpsc::Sender<Result<u64, MetadataDBError>>, // Returns number of cleaned up nonces
     },
 }
 
@@ -609,6 +649,204 @@ impl MetadataDB {
         }
     }
 
+    pub async fn handle_generate_nonce(
+        &self,
+        account_id: &AccountId,
+        response_sender: mpsc::Sender<Result<[u8; 32], MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let account_id = account_id.clone();
+
+        let nonce = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+
+            // Generate a cryptographically secure random nonce
+            let mut nonce = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut nonce);
+
+            // Store the nonce in the database
+            let account_id_clone = account_id.clone();
+            conn.execute(
+                "INSERT INTO account_nonces (account_id, nonce, timestamp) VALUES (?1, ?2, ?3)",
+                params![
+                    SqlAccountId(account_id),
+                    nonce.to_vec(),
+                    SqlDateTime(Utc::now())
+                ],
+            )?;
+
+            debug!(
+                "Generated nonce for account {}: {}",
+                account_id_clone,
+                hex::encode(nonce)
+            );
+
+            Ok::<[u8; 32], MetadataDBError>(nonce)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(nonce)).await.is_err() {
+            error!("Failed to send generate nonce response");
+        }
+        Ok(())
+    }
+
+    pub async fn generate_nonce(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        account_id: AccountId,
+    ) -> Result<[u8; 32], MetadataDBError> {
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<[u8; 32], MetadataDBError>>(1);
+
+        command_sender
+            .send(MetadataDBCommand::GenerateNonce {
+                account_id,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_validate_and_consume_nonce(
+        &self,
+        account_id: &AccountId,
+        nonce: &[u8; 32],
+        response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let account_id = account_id.clone();
+        let nonce = *nonce;
+
+        debug!(
+            "Validating nonce for account {}: {}",
+            account_id,
+            hex::encode(nonce)
+        );
+
+        let is_valid = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+
+            // Check if the nonce exists for this account and is not expired (within 1 hour)
+            let nonce_exists: Result<bool, _> = tx.query_row(
+                "SELECT 1 FROM account_nonces 
+                 WHERE account_id = ?1 AND nonce = ?2
+                 ORDER BY timestamp DESC",
+                // TODO(syncing): is checking for the timestamp necessary here?
+                //  AND timestamp > datetime('now', '-1 hour')",
+                params![SqlAccountId(account_id.clone()), nonce.to_vec()],
+                |_| Ok(true),
+            );
+
+            match nonce_exists {
+                Ok(_) => {
+                    // Nonce is valid, consume it (delete it to prevent reuse)
+                    debug!("Valid nonce found for account: {}, deleting it", account_id);
+                    tx.execute(
+                        "DELETE FROM account_nonces WHERE account_id = ?1 AND nonce = ?2",
+                        params![SqlAccountId(account_id.clone()), nonce.to_vec()],
+                    )?;
+                    tx.commit()?;
+                    Ok::<bool, MetadataDBError>(true)
+                }
+                Err(_) => {
+                    // Nonce doesn't exist or is expired
+                    Ok::<bool, MetadataDBError>(false)
+                }
+            }
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(is_valid)).await.is_err() {
+            error!("Failed to send validate nonce response");
+        }
+        debug!("Nonce validation result: {}", is_valid);
+        Ok(())
+    }
+
+    pub async fn validate_and_consume_nonce(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        account_id: AccountId,
+        nonce: &[u8; 32],
+    ) -> Result<bool, MetadataDBError> {
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<bool, MetadataDBError>>(1);
+
+        command_sender
+            .send(MetadataDBCommand::ValidateAndConsumeNonce {
+                account_id,
+                nonce: *nonce,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    pub async fn handle_cleanup_expired_nonces(
+        &self,
+        max_age_hours: u64,
+        response_sender: mpsc::Sender<Result<u64, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+
+        let deleted_count = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+
+            let rows_affected = conn.execute(
+                "DELETE FROM account_nonces WHERE timestamp < datetime('now', '-' || ?1 || ' hours')",
+                params![max_age_hours],
+            )?;
+
+            Ok::<u64, MetadataDBError>(rows_affected as u64)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(deleted_count)).await.is_err() {
+            error!("Failed to send cleanup nonces response");
+        }
+        Ok(())
+    }
+
+    pub async fn cleanup_expired_nonces(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        max_age_hours: u64,
+    ) -> Result<u64, MetadataDBError> {
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<u64, MetadataDBError>>(1);
+
+        command_sender
+            .send(MetadataDBCommand::CleanupExpiredNonces {
+                max_age_hours,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
     // Inserts all the metadata for the object in bulk and sends result via response_sender
     pub async fn handle_insert_object(
         &self,
@@ -623,23 +861,22 @@ impl MetadataDB {
             let conn = pool.get()?;
             let tx = conn.unchecked_transaction()?;
 
-            // Insert infohash
-            // If it already exists, it will be ignored due to the unique constraint
+            // Insert infohash with owner and nonce
             match tx.execute(
-                "INSERT INTO infohashes (infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO infohashes (infohash, name, length, chunk_size, chunk_count, owner_account_id, creation_timestamp, signature) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     infohash_value.infohash,
                     infohash_value.name,
                     infohash_value.length,
                     infohash_value.chunk_size,
                     infohash_value.chunk_count,
+                    infohash_value.owner_account_id,
                     SqlDateTime(infohash_value.creation_timestamp),
                     infohash_value.signature.0.to_vec()
                 ],
             ) {
                 Ok(_) => {}
                 Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
-                    // Ignore if infohash already exists
                     debug!("Infohash {} already exists, skipping insert", hex::encode(infohash_value.infohash));
                 }
                 Err(e) => return Err(MetadataDBError::Database(e)),
@@ -647,7 +884,8 @@ impl MetadataDB {
 
             // Prepare statements for better performance with multiple inserts
             let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) 
+                 ON CONFLICT(chunk_hash) DO UPDATE SET ref_count = ref_count + 1"
             )?;
 
             let mut tracker_chunk_stmt = tx.prepare(
@@ -655,7 +893,10 @@ impl MetadataDB {
             )?;
 
             let mut piece_stmt = tx.prepare(
-                "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners) VALUES (?1, ?2, ?3, ?4)"
+                "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners, ref_count) VALUES (?1, ?2, ?3, ?4, 1)
+                 ON CONFLICT(piece_hash) DO UPDATE SET 
+                   miners = ?4,
+                   ref_count = ref_count + 1"
             )?;
 
             let mut chunk_pieces_stmt = tx.prepare(
@@ -807,11 +1048,45 @@ impl MetadataDB {
     pub async fn insert_object(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         infohash_value: InfohashValue,
+        nonce: &[u8; 32],
         chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
     ) -> Result<(), MetadataDBError> {
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
             mpsc::channel::<Result<(), MetadataDBError>>(1);
+
+        // First validate the nonce
+        let nonce_valid = Self::validate_and_consume_nonce(
+            // We need access to the command sender here - this needs to be passed in or restructured
+            &(command_sender.clone()),
+            infohash_value.owner_account_id.0.clone(),
+            nonce,
+        )
+        .await
+        .unwrap_or(false);
+
+        if !nonce_valid {
+            if response_sender
+                .send(Err(MetadataDBError::InvalidNonce))
+                .await
+                .is_err()
+            {
+                error!("Failed to send invalid nonce error response");
+            }
+            return Ok(());
+        }
+
+        // Verify signature after nonce validation
+        if !infohash_value.verify_signature(nonce) {
+            if response_sender
+                .send(Err(MetadataDBError::InvalidSignature))
+                .await
+                .is_err()
+            {
+                error!("Failed to send invalid signature error response");
+            }
+            return Ok(());
+        }
 
         // Send the command to insert the object
         command_sender
@@ -1100,12 +1375,13 @@ impl MetadataDB {
                     length: row.get(2)?,
                     chunk_size: row.get(3)?,
                     chunk_count: row.get(4)?,
-                    creation_timestamp: row.get::<_, SqlDateTime>(5)?.0,
+                    owner_account_id: row.get::<_, SqlAccountId>(5)?,
+                    creation_timestamp: row.get::<_, SqlDateTime>(6)?.0,
                     signature: {
-                        let vec = row.get::<_, Vec<u8>>(6)?;
+                        let vec = row.get::<_, Vec<u8>>(7)?;
                         let arr: [u8; 64] = vec.try_into().map_err(|_| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                6,
+                                7,
                                 rusqlite::types::Type::Blob,
                                 Box::new(std::io::Error::new(
                                     std::io::ErrorKind::InvalidData,
@@ -1400,10 +1676,270 @@ impl MetadataDB {
         }
     }
 
+    pub async fn handle_delete_infohash(
+        &self,
+        delete_request: &DeleteInfohashRequest,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let delete_request = delete_request.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+
+            // Verify ownership
+            let owner_check: Result<SqlAccountId, _> = tx.query_row(
+                "SELECT owner_account_id FROM infohashes WHERE infohash = ?1",
+                params![delete_request.infohash],
+                |row| row.get(0),
+            );
+
+            match owner_check {
+                Ok(owner) if owner.0 == delete_request.owner_account_id => {
+                    // Owner verified, proceed with deletion
+                }
+                Ok(_) => {
+                    return Err(MetadataDBError::UnauthorizedAccess);
+                }
+                Err(_) => {
+                    return Err(MetadataDBError::InfohashNotFound);
+                }
+            }
+
+            // Get all chunks for this infohash before deletion
+            let chunk_hashes = {
+                let mut chunk_stmt =
+                    tx.prepare("SELECT chunk_hash FROM tracker_chunks WHERE infohash = ?1")?;
+                let chunk_hashes: Result<Vec<ChunkHash>, _> = chunk_stmt
+                    .query_map(params![delete_request.infohash], |row| row.get(0))?
+                    .collect();
+                chunk_hashes?
+            };
+
+            // Delete the infohash
+            tx.execute(
+                "DELETE FROM infohashes WHERE infohash = ?1",
+                params![delete_request.infohash],
+            )?;
+
+            // Delete tracker_chunks mappings
+            tx.execute(
+                "DELETE FROM tracker_chunks WHERE infohash = ?1",
+                params![delete_request.infohash],
+            )?;
+
+            // Garbage collection: decrement reference counts and clean up
+            for chunk_hash in chunk_hashes {
+                // Get all pieces for this chunk before potentially deleting it
+                let mut piece_stmt =
+                    tx.prepare("SELECT piece_hash FROM chunk_pieces WHERE chunk_hash = ?1")?;
+                let piece_hashes: Result<Vec<PieceHash>, _> = piece_stmt
+                    .query_map(params![chunk_hash], |row| row.get(0))?
+                    .collect();
+                let piece_hashes = piece_hashes?;
+
+                // Decrement chunk reference count
+                tx.execute(
+                    "UPDATE chunks SET ref_count = ref_count - 1 WHERE chunk_hash = ?1",
+                    params![chunk_hash],
+                )?;
+
+                // Check if chunk should be deleted
+                let chunk_ref_count: i64 = tx.query_row(
+                    "SELECT ref_count FROM chunks WHERE chunk_hash = ?1",
+                    params![chunk_hash],
+                    |row| row.get(0),
+                )?;
+
+                if chunk_ref_count <= 0 {
+                    // Delete chunk and its piece mappings
+                    tx.execute(
+                        "DELETE FROM chunk_pieces WHERE chunk_hash = ?1",
+                        params![chunk_hash],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM chunks WHERE chunk_hash = ?1",
+                        params![chunk_hash],
+                    )?;
+
+                    // Decrement piece reference counts
+                    for piece_hash in piece_hashes {
+                        tx.execute(
+                            "UPDATE pieces SET ref_count = ref_count - 1 WHERE piece_hash = ?1",
+                            params![piece_hash],
+                        )?;
+
+                        // Check if piece should be deleted
+                        let piece_ref_count: i64 = tx.query_row(
+                            "SELECT ref_count FROM pieces WHERE piece_hash = ?1",
+                            params![piece_hash],
+                            |row| row.get(0),
+                        )?;
+
+                        if piece_ref_count <= 0 {
+                            tx.execute(
+                                "DELETE FROM pieces WHERE piece_hash = ?1",
+                                params![piece_hash],
+                            )?;
+                        }
+                    }
+                }
+            }
+
+            tx.commit()?;
+            Ok::<(), MetadataDBError>(())
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(())).await.is_err() {
+            error!("Failed to send delete response");
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub async fn delete_infohash(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        delete_request: DeleteInfohashRequest,
+        nonce: &[u8; 32],
+    ) -> Result<(), MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
+
+        // First validate the nonce
+        let nonce_valid = Self::validate_and_consume_nonce(
+            // Same issue here - needs architectural change
+            &(command_sender.clone()),
+            delete_request.clone().owner_account_id,
+            nonce,
+        )
+        .await
+        .unwrap_or(false);
+
+        if !nonce_valid {
+            if response_sender
+                .send(Err(MetadataDBError::InvalidNonce))
+                .await
+                .is_err()
+            {
+                error!("Failed to send invalid nonce error response");
+            }
+            return Ok(());
+        }
+
+        // Verify signature after nonce validation
+        if !delete_request.verify_signature() {
+            if response_sender
+                .send(Err(MetadataDBError::InvalidSignature))
+                .await
+                .is_err()
+            {
+                error!("Failed to send invalid signature error response");
+            }
+            return Ok(());
+        }
+
+        command_sender
+            .send(MetadataDBCommand::DeleteInfohash {
+                delete_request,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    // Add handlers for the new commands
+    pub async fn handle_get_infohashes_by_owner(
+        &self,
+        owner_account_id: &AccountId,
+        response_sender: mpsc::Sender<Result<Vec<InfohashValue>, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let owner_account_id = SqlAccountId(owner_account_id.clone());
+
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare(
+                "SELECT infohash, name, length, chunk_size, chunk_count, owner_account_id, creation_timestamp, signature FROM infohashes WHERE owner_account_id = ?1"
+            )?;
+
+            let infohashes: Result<Vec<InfohashValue>, _> = stmt.query_map(
+                params![owner_account_id],
+                |row| {
+                    Ok(InfohashValue {
+                        infohash: row.get(0)?,
+                        name: row.get(1)?,
+                        length: row.get(2)?,
+                        chunk_size: row.get(3)?,
+                        chunk_count: row.get(4)?,
+                        owner_account_id: row.get(5)?,
+                        creation_timestamp: row.get::<_, SqlDateTime>(6)?.0,
+                        signature: KeypairSignature::from_raw({
+                            let sig_bytes: Vec<u8> = row.get(7)?;
+                            let mut sig_array = [0u8; 64];
+                            if sig_bytes.len() == 64 {
+                                sig_array.copy_from_slice(&sig_bytes);
+                            }
+                            sig_array
+                        }),
+                    })
+                }
+            )?.collect();
+
+            infohashes.map_err(MetadataDBError::from)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send get infohashes by owner response");
+        }
+        Ok(())
+    }
+
+    pub async fn handle_verify_ownership(
+        &self,
+        infohash: &InfoHash,
+        owner_account_id: &AccountId,
+        response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let infohash = *infohash;
+        let owner_account_id = owner_account_id.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let owner_check: Result<SqlAccountId, _> = conn.query_row(
+                "SELECT owner_account_id FROM infohashes WHERE infohash = ?1",
+                params![infohash],
+                |row| row.get(0),
+            );
+
+            match owner_check {
+                Ok(owner) => Ok::<bool, MetadataDBError>(owner.0 == owner_account_id),
+                Err(_) => Ok::<bool, MetadataDBError>(false),
+            }
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(result)).await.is_err() {
+            error!("Failed to send verify ownership response");
+        }
+        Ok(())
+    }
+
     /// Processes db events and commands.
-    ///
-    /// This asynchronous function continuously processes db events and commands,
-    /// handling inserts, updates, and queries as they come in.
     pub async fn process_events(&mut self) {
         while let Some(command) = self.command_receiver.recv().await {
             match command {
@@ -1568,6 +2104,80 @@ impl MetadataDB {
                         error!("Error getting chunk challenge history: {:?}", e);
                     }
                 }
+                MetadataDBCommand::DeleteInfohash {
+                    delete_request,
+                    response_sender,
+                } => {
+                    debug!("Handling delete infohash request");
+                    if let Err(e) = self
+                        .handle_delete_infohash(&delete_request, response_sender)
+                        .await
+                    {
+                        error!("Error deleting infohash: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetInfohashesByOwner {
+                    owner_account_id,
+                    response_sender,
+                } => {
+                    debug!("Handling get infohashes by owner request");
+                    if let Err(e) = self
+                        .handle_get_infohashes_by_owner(&owner_account_id, response_sender)
+                        .await
+                    {
+                        error!("Error getting infohashes by owner: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::VerifyOwnership {
+                    infohash,
+                    owner_account_id,
+                    response_sender,
+                } => {
+                    debug!("Handling verify ownership request");
+                    if let Err(e) = self
+                        .handle_verify_ownership(&infohash, &owner_account_id, response_sender)
+                        .await
+                    {
+                        error!("Error verifying ownership: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GenerateNonce {
+                    account_id,
+                    response_sender,
+                } => {
+                    debug!("Handling generate nonce request");
+                    if let Err(e) = self
+                        .handle_generate_nonce(&account_id, response_sender)
+                        .await
+                    {
+                        error!("Error generating nonce: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::ValidateAndConsumeNonce {
+                    account_id,
+                    nonce,
+                    response_sender,
+                } => {
+                    debug!("Handling validate nonce request");
+                    if let Err(e) = self
+                        .handle_validate_and_consume_nonce(&account_id, &nonce, response_sender)
+                        .await
+                    {
+                        error!("Error validating nonce: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::CleanupExpiredNonces {
+                    max_age_hours,
+                    response_sender,
+                } => {
+                    debug!("Handling cleanup expired nonces request");
+                    if let Err(e) = self
+                        .handle_cleanup_expired_nonces(max_age_hours, response_sender)
+                        .await
+                    {
+                        error!("Error cleaning up expired nonces: {:?}", e);
+                    }
+                }
             }
         }
     }
@@ -1580,6 +2190,7 @@ mod tests {
 
     use base::piece::PieceType;
     use chrono::Utc;
+    use crabtensor::{sign::sign_message, wallet::signer_from_seed};
     use subxt::ext::codec::Compact;
     use tempfile::NamedTempFile;
 
@@ -1695,6 +2306,17 @@ mod tests {
         )
         .expect("Failed to create chunk_challenge_history table");
 
+        conn.execute(
+            "CREATE TABLE account_nonces (
+                account_id BLOB NOT NULL,
+                nonce BLOB NOT NULL,
+                timestamp DATETIME NOT NULL,
+                PRIMARY KEY (account_id, nonce)
+            )",
+            [],
+        )
+        .expect("Failed to create account_nonces table");
+
         // Return the database path
         db_path
     }
@@ -1714,14 +2336,35 @@ mod tests {
 
         // Create test data
         let infohash = InfoHash([1u8; 32]);
+
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = signer.account_id().clone();
+
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone())
+            .await
+            .expect("Failed to generate nonce");
+
+        // sign the infohash value details with the dummy account
         let infohash_value = InfohashValue {
-            infohash,
-            name: "test_object".to_string(),
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
+            owner_account_id: SqlAccountId(dummy_account_id),
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
         };
 
         let chunk = ChunkValue {
@@ -1745,6 +2388,7 @@ mod tests {
         MetadataDB::insert_object(
             &command_sender,
             infohash_value.clone(),
+            &nonce,
             vec![(chunk.clone(), vec![piece])],
         )
         .await
@@ -1801,16 +2445,33 @@ mod tests {
             db.process_events().await;
         });
 
-        // Create test data
-        let infohash = InfoHash([1u8; 32]);
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         let infohash_value = InfohashValue {
-            infohash,
-            name: "test_object".to_string(),
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
+            owner_account_id: dummy_account_id,
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
         };
 
         let chunk = ChunkValue {
@@ -1830,9 +2491,14 @@ mod tests {
         };
 
         // Insert the object
-        MetadataDB::insert_object(&command_sender, infohash_value, vec![(chunk, vec![piece])])
-            .await
-            .expect("Failed to insert object");
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value,
+            &nonce,
+            vec![(chunk, vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
 
         // Query a random chunk
         let random_chunk = MetadataDB::get_random_chunk(&command_sender)
@@ -1858,16 +2524,32 @@ mod tests {
             db.process_events().await;
         });
 
-        // Create test data
-        let infohash = InfoHash([1u8; 32]);
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         let infohash_value = InfohashValue {
-            infohash,
-            name: "test_object".to_string(),
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
+            owner_account_id: dummy_account_id,
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
         };
 
         let chunk = ChunkValue {
@@ -1887,9 +2569,14 @@ mod tests {
         };
 
         // Insert the object
-        MetadataDB::insert_object(&command_sender, infohash_value, vec![(chunk, vec![piece])])
-            .await
-            .expect("Failed to insert object");
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value,
+            &nonce,
+            vec![(chunk, vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
 
         // Query the piece by its hash
         let queried_piece = MetadataDB::get_piece(&command_sender, PieceHash([3u8; 32]))
@@ -1950,16 +2637,32 @@ mod tests {
             db.process_events().await;
         });
 
-        // First create and insert a chunk that the piece repair history will reference
-        let infohash = InfoHash([1u8; 32]);
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         let infohash_value = InfohashValue {
-            infohash,
-            name: "test_object".to_string(),
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
+            owner_account_id: dummy_account_id,
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
         };
 
         let chunk = ChunkValue {
@@ -1979,9 +2682,14 @@ mod tests {
         };
 
         // Insert the object first to create the chunk
-        MetadataDB::insert_object(&command_sender, infohash_value, vec![(chunk, vec![piece])])
-            .await
-            .expect("Failed to insert object");
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value.clone(),
+            &nonce,
+            vec![(chunk, vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
 
         // Create test data for piece repair history
         let piece_repair_hash = [4u8; 32];
@@ -1991,7 +2699,7 @@ mod tests {
             chunk_hash: ChunkHash([2u8; 32]), // References the chunk we just inserted
             validator_id: Compact(1),
             timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
         };
 
         // Insert the piece repair history
@@ -2028,16 +2736,32 @@ mod tests {
             db.process_events().await;
         });
 
-        // First create and insert a chunk that the chunk challenge history will reference
-        let infohash = InfoHash([1u8; 32]);
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         let infohash_value = InfohashValue {
-            infohash,
-            name: "test_object".to_string(),
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 4,
+            owner_account_id: dummy_account_id,
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
         };
 
         let chunk = ChunkValue {
@@ -2057,9 +2781,14 @@ mod tests {
         };
 
         // Insert the object first to create the chunk
-        MetadataDB::insert_object(&command_sender, infohash_value, vec![(chunk, vec![piece])])
-            .await
-            .expect("Failed to insert object");
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value.clone(),
+            &nonce,
+            vec![(chunk, vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
 
         // First insert a piece repair history that the chunk challenge history will reference
         let piece_repair_hash = [4u8; 32];
@@ -2069,7 +2798,7 @@ mod tests {
             chunk_hash: ChunkHash([2u8; 32]), // References the chunk we just inserted
             validator_id: Compact(1),
             timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
         };
 
         // Insert the piece repair history first
@@ -2087,7 +2816,7 @@ mod tests {
             miners_successful: vec![Compact(1)],
             piece_repair_hash, // References the piece repair history we just inserted
             timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
         };
 
         // Insert the chunk challenge history
@@ -2134,14 +2863,32 @@ mod tests {
 
         // Create first object with a piece that has miners [1, 2]
         let infohash1 = InfoHash([1u8; 32]);
+        // Create dummy account
+        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         let infohash_value1 = InfohashValue {
             infohash: infohash1,
             name: "test_object_1".to_string(),
             length: 1000,
             chunk_size: 256,
             chunk_count: 1,
+            owner_account_id: dummy_account_id.clone(),
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([0u8; 64]),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value1.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value1 = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value1
         };
 
         let chunk1 = ChunkValue {
@@ -2164,10 +2911,16 @@ mod tests {
         MetadataDB::insert_object(
             &command_sender,
             infohash_value1,
+            &nonce,
             vec![(chunk1, vec![piece1])],
         )
         .await
         .expect("Failed to insert first object");
+
+        // generate another nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
 
         // Verify initial miners
         let initial_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([2u8; 32]))
@@ -2184,8 +2937,17 @@ mod tests {
             length: 2000,
             chunk_size: 256,
             chunk_count: 1,
+            owner_account_id: dummy_account_id.clone(),
             creation_timestamp: Utc::now(),
-            signature: KeypairSignature::from_raw([1u8; 64]),
+            signature: KeypairSignature::from_raw([1; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value2.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value2 = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value2
         };
 
         let chunk2 = ChunkValue {
@@ -2208,6 +2970,7 @@ mod tests {
         MetadataDB::insert_object(
             &command_sender,
             infohash_value2,
+            &nonce,
             vec![(chunk2, vec![piece2])],
         )
         .await
@@ -2244,6 +3007,11 @@ mod tests {
         // Verify that both pieces have the same miners (since they're the same piece)
         assert_eq!(pieces_chunk1[0].miners, pieces_chunk2[0].miners);
 
+        // generate another nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
         // Test edge case: inserting the same piece again with duplicate miners should not change anything
         let infohash3 = InfoHash([6u8; 32]);
         let infohash_value3 = InfohashValue {
@@ -2252,8 +3020,17 @@ mod tests {
             length: 3000,
             chunk_size: 256,
             chunk_count: 1,
+            owner_account_id: dummy_account_id.clone(),
             creation_timestamp: Utc::now(),
             signature: KeypairSignature::from_raw([2u8; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value3.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value3 = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value3
         };
 
         let chunk3 = ChunkValue {
@@ -2276,6 +3053,7 @@ mod tests {
         MetadataDB::insert_object(
             &command_sender,
             infohash_value3,
+            &nonce,
             vec![(chunk3, vec![piece3])],
         )
         .await

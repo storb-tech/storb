@@ -74,7 +74,7 @@ async fn get_crsql_changes(
 }
 
 pub async fn sync_metadata_db(validator: Arc<Validator>) -> Result<(), SyncError> {
-    info!("Starting metadata DB sync task");
+    info!("Syncing MetadataDB...");
     let neuron = validator.neuron.read().await;
 
     let validator_uid = neuron

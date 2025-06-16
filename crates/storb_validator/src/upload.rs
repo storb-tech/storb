@@ -6,7 +6,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, InfoHash, PieceHash};
+use base::piece::{
+    encode_chunk, get_infohash_with_identity, piece_length, ChunkHash, InfoHash, PieceHash,
+};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
@@ -23,6 +25,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::metadata;
+use crate::metadata::models::SqlAccountId;
 use crate::quic::establish_miner_connections;
 use crate::scoring::ScoringSystem;
 use crate::utils::get_id_quic_uids;
@@ -228,21 +231,53 @@ impl<'a> UploadProcessor<'a> {
 
         let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        let infohash: InfoHash = get_infohash(piece_hashes);
+        // TODO(syncing): use the user's account ID
+        // for now, we use the validator's account ID
+        // Get the validator's account ID for the infohash
+        let validator_account_id = {
+            let validator_guard = self.state.validator.neuron.read().await;
+            validator_guard.signer.account_id().clone()
+        };
+
+        // Generate a nonce for this upload operation
+        let nonce = match metadata::db::MetadataDB::generate_nonce(
+            &self.state.validator.metadatadb_sender,
+            validator_account_id.clone(),
+        )
+        .await
+        {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                error!("Failed to generate nonce: {}", e);
+                return Err(anyhow::anyhow!("Failed to generate nonce for upload"));
+            }
+        };
+
+        let infohash: InfoHash = get_infohash_with_identity(piece_hashes, &validator_account_id);
         // convert the infohash to a hex string for logging
         let infohash_str = hex::encode(infohash);
 
-        // Put tracker entry into local database
+        // Create signature for the infohash value with nonce
         let infohash_value = metadata::models::InfohashValue {
             infohash,
-            name: filename,
+            name: filename.clone(),
             length: total_size,
             chunk_size,
             chunk_count: chunks_with_pieces.len() as u64,
+            owner_account_id: SqlAccountId(validator_account_id),
             creation_timestamp: now,
-            // TODO: use the signature of the data blob owner
-            // empty signature for now
-            signature: KeypairSignature::from_raw([0; 64]),
+            signature: KeypairSignature::from_raw([0; 64]), // Placeholder, will be signed below
+        };
+
+        // Sign the infohash value (which now includes the nonce)
+        let message = infohash_value.get_signature_message(&nonce);
+        let validator_guard = self.state.validator.neuron.read().await;
+        let signature = crabtensor::sign::sign_message(&validator_guard.signer, message);
+        drop(validator_guard);
+
+        let signed_infohash_value = metadata::models::InfohashValue {
+            signature,
+            ..infohash_value
         };
 
         // display chunks_with_pieces
@@ -257,7 +292,8 @@ impl<'a> UploadProcessor<'a> {
 
         metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
-            infohash_value,
+            signed_infohash_value,
+            &nonce,
             chunks_with_pieces,
         )
         .await

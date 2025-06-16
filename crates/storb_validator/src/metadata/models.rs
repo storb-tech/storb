@@ -3,7 +3,7 @@ use base::{
     NodeUID,
 };
 use chrono::{DateTime, Utc};
-use crabtensor::sign::KeypairSignature;
+use crabtensor::{sign::KeypairSignature, AccountId};
 use rusqlite::types::ValueRef;
 use rusqlite::{
     types::{FromSql, FromSqlResult, ToSqlOutput},
@@ -51,10 +51,7 @@ pub struct ChunkValue {
     pub original_chunk_size: u64,
 }
 
-/// Represents a tracker entry
-///
-/// This struct holds the information required to track a file,
-/// including its infohash, size parameters, and a cryptographic signature of the data blob owner.
+/// Represents a tracker entry with identity and nonce for replay protection
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfohashValue {
     pub infohash: InfoHash,
@@ -62,8 +59,29 @@ pub struct InfohashValue {
     pub length: u64,
     pub chunk_size: u64,
     pub chunk_count: u64,
+    pub owner_account_id: SqlAccountId,
     pub creation_timestamp: DateTime<Utc>,
     pub signature: KeypairSignature,
+}
+
+impl InfohashValue {
+    /// Verify that the signature is valid for this infohash value
+    pub fn verify_signature(&self, nonce: &[u8; 32]) -> bool {
+        let message = self.get_signature_message(nonce);
+        crabtensor::sign::verify_signature(&self.owner_account_id.0, &self.signature, message)
+    }
+
+    /// Get the message that should be signed for this infohash
+    pub fn get_signature_message(&self, nonce: &[u8; 32]) -> Vec<u8> {
+        let mut message = Vec::new();
+        message.extend_from_slice(self.name.as_bytes());
+        message.extend_from_slice(&self.length.to_le_bytes());
+        message.extend_from_slice(&self.chunk_size.to_le_bytes());
+        message.extend_from_slice(&self.chunk_count.to_le_bytes());
+        message.extend_from_slice(self.owner_account_id.as_ref().as_ref());
+        message.extend_from_slice(nonce); // Include nonce in signature
+        message
+    }
 }
 
 /// Represents a piece entry
@@ -149,4 +167,83 @@ pub struct CrSqliteChanges {
     pub site_id: Vec<u8>,
     pub cl: u64,
     pub seq: u64,
+}
+
+// Add delete operation models with nonce
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeleteInfohashRequest {
+    pub infohash: InfoHash,
+    pub owner_account_id: AccountId,
+    pub nonce: [u8; 32], // Add nonce for replay protection
+    pub signature: KeypairSignature,
+}
+
+impl DeleteInfohashRequest {
+    pub fn verify_signature(&self) -> bool {
+        let message = self.get_signature_message();
+        crabtensor::sign::verify_signature(&self.owner_account_id, &self.signature, message)
+    }
+
+    pub fn get_signature_message(&self) -> Vec<u8> {
+        let mut message = Vec::new();
+        message.extend_from_slice(b"DELETE:");
+        message.extend_from_slice(self.infohash.as_ref());
+        message.extend_from_slice(self.owner_account_id.as_ref());
+        message.extend_from_slice(&self.nonce); // Include nonce in signature
+        message
+    }
+}
+
+// Newtype wrapper for AccountId
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlAccountId(pub AccountId);
+
+impl From<&AccountId> for SqlAccountId {
+    fn from(id: &AccountId) -> Self {
+        SqlAccountId(id.clone())
+    }
+}
+
+impl AsRef<AccountId> for SqlAccountId {
+    fn as_ref(&self) -> &AccountId {
+        &self.0
+    }
+}
+
+impl ToSql for SqlAccountId {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(ToSqlOutput::from(&self.0 .0[..]))
+    }
+}
+
+impl FromSql for SqlAccountId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> FromSqlResult<Self> {
+        match value {
+            ValueRef::Blob(b) => {
+                if b.len() == 32 {
+                    let mut array = [0u8; 32];
+                    array.copy_from_slice(b);
+                    Ok(SqlAccountId(AccountId::from(array)))
+                } else {
+                    Err(rusqlite::types::FromSqlError::InvalidBlobSize {
+                        expected_size: 32,
+                        blob_size: b.len(),
+                    })
+                }
+            }
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        }
+    }
+}
+
+// Add nonce management models
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NonceRequest {
+    pub account_id: AccountId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NonceResponse {
+    pub nonce: [u8; 32],
+    pub timestamp: DateTime<Utc>,
 }
