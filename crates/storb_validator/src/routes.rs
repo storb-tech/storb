@@ -7,6 +7,9 @@ use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use base::piece::InfoHash;
+use crabtensor::AccountId;
+use subxt::ext::sp_core::crypto::Ss58Codec;
+use subxt::ext::sp_runtime::AccountId32;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
@@ -103,6 +106,61 @@ pub async fn get_crsqlite_changes(
     Ok((StatusCode::OK, changes))
 }
 
+// route for generating a nonce for a given account_id
+#[utoipa::path(
+    post,
+    path = "/nonce",
+    responses(
+        (status = 200, description = "Successfully got nonce", body = String),
+        (status = 500, description = "Internal server error", body = String)
+    ),
+    params(
+        ("account_id" = String, Query, description = "The account ID to generate a nonce for."),
+    ),
+    tag = "Nonce"
+)]
+#[axum::debug_handler]
+pub async fn generate_nonce(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let account_id = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+    debug!("Generating nonce for account_id: {}", account_id);
+    let metadatadb_sender = state.validator.metadatadb_sender.clone();
+    // create an AccountId from the ss58 string account_id
+    let acc_id: AccountId = match AccountId32::from_string(account_id) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
+    let nonce = metadata::db::MetadataDB::generate_nonce(&metadatadb_sender, acc_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to generate nonce: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+    let nonce_str = hex::encode(nonce);
+    debug!(
+        "Generated nonce: {} for account id: {}",
+        nonce_str, account_id
+    );
+    Ok((StatusCode::OK, nonce_str))
+}
+
 #[utoipa::path(
     post,
     path = "/file",
@@ -117,9 +175,16 @@ pub async fn get_crsqlite_changes(
 pub async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
+    // Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // let signature = params.get("signature").ok_or_else(|| {
+    //     (
+    //         StatusCode::BAD_REQUEST,
+    //         "Missing signature parameter".to_string(),
+    //     )
+    // })?;
     let content_length = headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
