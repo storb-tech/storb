@@ -6,63 +6,68 @@ The subnet can be used as shown below:
 
 ![overview](../assets/overview.png)
 
-Uploading files
+### Uploading files
 
-- Client hits a validator endpoint to upload a file. This can be done by sending a file to its http endpoint:
+Before performing in write operations, a user must first generate and sign a nonce with a sr25519 keypair and supply it in the relevant endpoints. 
+In the future a client cli tool and/or SDK will be created to make this process much more seamless and automatic.
+
+#### Generate nonce
+
+- Generate a nonce for your account id (formatted as an ss58 address). For example:
+    ```bash
+    curl -X GET http://{ip}:{port}/nonce?account_id=5HeHkTeToUHmoZisZcoQDF1aJFR1Q8bZJY18FVqTV6fr8kvA" -H "X-API-Key: API_KEY"
+    ```
+- This will then return a nonce. For example:
+```
+fc52edb98e03d5e45381f7dd9e85353b84c5a4b419daf5efe0298ccbfd1d938c
+```
+- Using the polkadot js frontend to sign this would output:
+```
+0xe23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82
+```
+
+- Which without the hex prefix "0x" would be:
+```
+e23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82
+```
+
+#### Uploading file
+
+- Client hits a validator endpoint to upload a file. This can be done by sending a file to its http endpoint, and supplying it with the signature we previously obtained:
 
     ```bash
-    curl -X POST http://{ip}:{port}/file -F "file=@{path/to/file}"
+    curl -X POST http://{ip}:{port}/file?account_id=5HeHkTeToUHmoZisZcoQDF1aJFR1Q8bZJY18FVqTV6fr8kvA?signature=e23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82 -F "file=@{path/to/file}" -H "X-API-Key: API_KEY"
     ```
 
 - The validator splits up the file into erasure-coded pieces that are then distributed to miners.
-- The validator distributes the file metadata to other neurons through a DHT.
 - Returns an infohash which can be used by user to download the file from the network:
 
     ```
     4e44d931392d68ec0318f09d48267d05c4a8d9fe852832adeeaefc47a892d23c
     ```
 
-Retrieving files
+### Retrieving files
 
 - Client requests for a file through a validator. Also done through its http endpoint:
 
     ```bash
-    curl -X GET http://{ip}:{port}/file?infohash={infohash}
+    curl -X GET http://{ip}:{port}/file?infohash={infohash} -H "X-API-Key: API_KEY"
     ```
 
-- The validator uses the DHT to determine where the file pieces are stored then requests the pieces from the miners.
+- The validator uses its metadata db to determine where the file pieces are stored then requests the pieces from the miners.
 - The validator reconstructs the file with the pieces and sends it back to the client.
+
+### Deleting files
+
+- Client requests to delete a file through a validator:
+    ```bash
+    curl -X DELETE http://{ip}:{port}/file?infohash={infohash}?account_id={account_id}?signature={signature} -H "X-API-Key: API_KEY"
+    ```
+- The validator deletes the file pieces from the miners and removes the metadata from its database.
 
 ## Scoring Mechanism
 
-![scoring](../assets/weight-scoring.png)
-
-Scoring is made up of multiple components:
-
-- **Latency**: Miners are scored based on how quickly they respond to storage and retrieval requests.
-- **Response Rate**: Reliable miners are the name of the game. The less a miner responds with valid data to storage and retrieval requests, the lower it is scored.
-- **Data validation**: There's no point in having a miner with low latency and high response rates if the data they return is invalid. To ensure that miners are consistently returning the correct data, the integrity of the data they return is also taken into account.
-
-### Window-Based Scoring
-
-The scoring system uses a sliding window approach to ensure scores remain current and representative:
-
-- **Stats Reset**: After every 2,500 requests to a miner, their statistics (storage successes, storage attempts, retrieval successes, retrieval attempts) are reset
-- **Score History**: Before resetting stats, the current score is stored as a "previous score" to maintain historical performance context
-- **Score Calculation**: 
-  - For miners with fewer than 50 requests in the current window, their previous score is used
-  - For miners with sufficient requests, the score is calculated as:
-    - 70% weight on current window performance
-    - 30% weight on previous historical score
-  - The final score combines:
-    - 75% weight on response rates (storage/retrieval success)
-    - 25% weight on latency performance
-
-This window-based approach ensures that:
-- Scores reflect recent performance more heavily than historical data
-- Miners can't coast on past performance indefinitely
-- New or recently reset miners have a grace period using their previous score
-- Performance is evaluated over a meaningful sample size of requests
+Our scoring mechanism uses a Bayesian approach to score the reliability of miners. For a succint overview of our scoring system please read our [litepaper](https://github.com/storb-tech/storb-research/blob/main/papers/Bayesian%20Scoring%20Litepaper.pdf)
 
 ## Chunking and Piecing
 
@@ -70,8 +75,8 @@ Files are split into erasure-coded chunks, and subsequently split into pieces an
 
 ![chunk](../assets/chunk.png)
 
-## DHT for File Metadata
+## Sqlite + cr-sqlite for File Metadata and Syncing
 
-File metadata — which is useful for querying miners for pieces, and, eventually, reconstructing files — is replicated and stored across neurons in the subnet in the form of a DHT.
+File metadata — which is useful for querying miners for pieces, and, eventually, reconstructing files — is stored across validators in the subnet in the form of sqlite databases, all of which are synced with the help of [cr-sqlite](https://github.com/vlcn-io/cr-sqlite)
 
 ![metadata](../assets/metadata.png)
