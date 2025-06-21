@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
@@ -27,7 +27,7 @@ use validator::{Validator, ValidatorConfig};
 
 // use crate::constants::NONCE_CLEANUP_FREQUENCY;
 use crate::metadata::sync::sync_metadata_db;
-use crate::routes::{generate_nonce, get_crsqlite_changes};
+use crate::routes::{delete_file, generate_nonce, get_crsqlite_changes};
 
 pub mod apikey;
 mod constants;
@@ -276,6 +276,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let protected_routes = Router::new()
         .route("/file", post(upload_file))
         .route("/file", get(download_file))
+        .route("/file", delete(delete_file))
         .route("/nonce", post(generate_nonce))
         .route_layer(from_fn(require_api_key));
 

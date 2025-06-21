@@ -18,6 +18,7 @@ use tracing::{debug, error, info};
 use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
 use crate::metadata;
+use crate::metadata::models::{InfohashValue, SqlAccountId};
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
 
@@ -491,6 +492,142 @@ pub async fn download_file(
             ))
         }
     }
+}
+
+// /delete Route for deleting an infohash
+#[utoipa::path(
+    delete,
+    path = "/file",
+    responses(
+        (status = 200, description = "File deleted successfully", body = String),
+        (status = 400, description = "Bad request - missing infohash parameter", body = String),
+        (status = 500, description = "Internal server error during deletion", body = String)
+    ),
+    params(
+        ("infohash" = String, Query, description = "The infohash of the file to delete."),
+    ),
+    tag = "Delete"
+)]
+#[axum::debug_handler]
+pub async fn delete_file(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let infohash = params.get("infohash").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing infohash parameter".to_string(),
+        )
+    })?;
+
+    let signature = params.get("signature").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing signature parameter".to_string(),
+        )
+    })?;
+    let account_id_str = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+
+    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
+    let signature = match hex::decode(signature) {
+        Ok(sig) => KeypairSignature::from_slice(sig.as_slice()).map_err(|e| {
+            error!("Failed to parse signature: {}: {:?}", signature, e);
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            )
+        })?,
+        Err(e) => {
+            error!("Failed to decode signature hex: {}: {}", signature, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            ));
+        }
+    };
+
+    debug!("Got delete request for infohash: {}", infohash);
+
+    // Decode the infohash
+    let infohash_bytes: InfoHash = match hex::decode(infohash) {
+        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+        _ => {
+            error!("Invalid infohash format: {}", infohash);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid infohash format".to_string(),
+            ));
+        }
+    };
+    debug!("Decoded infohash: {:?}", infohash_bytes);
+
+    // Create infohash value
+    // TODO(delete): Make it so that we pass something else other than a "dummy" infohash value for deletions
+    let infohash_value = InfohashValue {
+        infohash: infohash_bytes,
+        name: "dummy".to_string(), // Placeholder, not used in deletion
+        length: 0,                 // Placeholder, not used in deletion
+        chunk_size: 0,             // Placeholder, not used in deletion
+        chunk_count: 0,            // Placeholder, not used in deletion
+        owner_account_id: SqlAccountId(account_id),
+        creation_timestamp: chrono::Utc::now(), // placeholder, not used in deletion
+        signature,
+    };
+
+    // Get nonce from the database given the account_id
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let nonce = metadata::db::MetadataDB::get_nonce(
+        &command_sender,
+        infohash_value.clone().owner_account_id.0,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get nonce: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+    debug!("Got nonce: {:?}", nonce);
+
+    // Delete the infohash
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let result = match metadata::db::MetadataDB::delete_infohash(
+        &command_sender,
+        infohash_value.clone(),
+        &nonce,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!("Successfully deleted infohash: {}", infohash);
+            Ok((StatusCode::OK, "File deleted successfully".to_string()))
+        }
+        Err(e) => {
+            error!("Failed to delete infohash: {}: {}", infohash, e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error during deletion".to_string(),
+            ))
+        }
+    };
+
+    result
 }
 
 async fn get_api_key(headers: &HeaderMap) -> Option<String> {
