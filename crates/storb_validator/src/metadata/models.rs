@@ -74,11 +74,6 @@ impl InfohashValue {
     /// Get the message that should be signed for this infohash
     pub fn get_signature_message(&self, nonce: &[u8; 32]) -> Vec<u8> {
         let mut message = Vec::new();
-        message.extend_from_slice(self.name.as_bytes());
-        message.extend_from_slice(&self.length.to_le_bytes());
-        message.extend_from_slice(&self.chunk_size.to_le_bytes());
-        message.extend_from_slice(&self.chunk_count.to_le_bytes());
-        message.extend_from_slice(self.owner_account_id.as_ref().as_ref());
         message.extend_from_slice(nonce); // Include nonce in signature
         message
     }

@@ -13,6 +13,7 @@ use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMess
 use base::{BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
+use crabtensor::AccountId;
 use futures::{Stream, TryStreamExt};
 use quinn::Connection;
 use rand::rngs::StdRng;
@@ -171,6 +172,8 @@ impl<'a> UploadProcessor<'a> {
         stream: S,
         total_size: u64,
         filename: String,
+        account_id: AccountId,
+        signature: KeypairSignature,
     ) -> Result<String>
     where
         S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
@@ -195,6 +198,21 @@ impl<'a> UploadProcessor<'a> {
                 }
                 Ok(())
             })
+        };
+
+        // get nonce from MetadatDB
+        let nonce = match metadata::db::MetadataDB::get_nonce(
+            &self.state.validator.metadatadb_sender,
+            account_id.clone(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                error!("Failed to get nonce: {}", e);
+                return Err(e);
+            }
         };
 
         // Spawn consumer task
@@ -231,29 +249,7 @@ impl<'a> UploadProcessor<'a> {
 
         let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        // TODO(syncing): use the user's account ID
-        // for now, we use the validator's account ID
-        // Get the validator's account ID for the infohash
-        let validator_account_id = {
-            let validator_guard = self.state.validator.neuron.read().await;
-            validator_guard.signer.account_id().clone()
-        };
-
-        // Generate a nonce for this upload operation
-        let nonce = match metadata::db::MetadataDB::generate_nonce(
-            &self.state.validator.metadatadb_sender,
-            validator_account_id.clone(),
-        )
-        .await
-        {
-            Ok(nonce) => nonce,
-            Err(e) => {
-                error!("Failed to generate nonce: {}", e);
-                return Err(anyhow::anyhow!("Failed to generate nonce for upload"));
-            }
-        };
-
-        let infohash: InfoHash = get_infohash_with_identity(piece_hashes, &validator_account_id);
+        let infohash: InfoHash = get_infohash_with_identity(piece_hashes, &account_id);
         // convert the infohash to a hex string for logging
         let infohash_str = hex::encode(infohash);
 
@@ -264,16 +260,10 @@ impl<'a> UploadProcessor<'a> {
             length: total_size,
             chunk_size,
             chunk_count: chunks_with_pieces.len() as u64,
-            owner_account_id: SqlAccountId(validator_account_id),
+            owner_account_id: SqlAccountId(account_id.clone()),
             creation_timestamp: now,
             signature: KeypairSignature::from_raw([0; 64]), // Placeholder, will be signed below
         };
-
-        // Sign the infohash value (which now includes the nonce)
-        let message = infohash_value.get_signature_message(&nonce);
-        let validator_guard = self.state.validator.neuron.read().await;
-        let signature = crabtensor::sign::sign_message(&validator_guard.signer, message);
-        drop(validator_guard);
 
         let signed_infohash_value = metadata::models::InfohashValue {
             signature,

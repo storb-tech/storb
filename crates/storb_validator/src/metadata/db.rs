@@ -137,6 +137,10 @@ pub enum MetadataDBCommand {
         owner_account_id: AccountId,
         response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
     },
+    GetNonce {
+        account_id: AccountId,
+        response_sender: mpsc::Sender<Result<[u8; 32], MetadataDBError>>,
+    },
     GenerateNonce {
         account_id: AccountId,
         response_sender: mpsc::Sender<Result<[u8; 32], MetadataDBError>>,
@@ -649,6 +653,60 @@ impl MetadataDB {
         }
     }
 
+    pub async fn handle_get_nonce(
+        &self,
+        account_id: &AccountId,
+        response_sender: mpsc::Sender<Result<[u8; 32], MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+        let account_id = account_id.clone();
+
+        let nonce = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let nonce: Vec<u8> = conn.query_row(
+                "SELECT nonce FROM account_nonces WHERE account_id = ?1 ORDER BY timestamp DESC LIMIT 1",
+                params![SqlAccountId(account_id)],
+                |row| row.get(0),
+            )?;
+
+            if nonce.len() != 32 {
+                return Err(MetadataDBError::InvalidNonce);
+            }
+
+            Ok::<[u8; 32], MetadataDBError>(nonce.try_into().unwrap())
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        if response_sender.send(Ok(nonce)).await.is_err() {
+            error!("Failed to send get nonce response");
+        }
+        Ok(())
+    }
+
+    pub async fn get_nonce(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        account_id: AccountId,
+    ) -> Result<[u8; 32], MetadataDBError> {
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<[u8; 32], MetadataDBError>>(1);
+
+        command_sender
+            .send(MetadataDBCommand::GetNonce {
+                account_id,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
     pub async fn handle_generate_nonce(
         &self,
         account_id: &AccountId,
@@ -824,6 +882,7 @@ impl MetadataDB {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn cleanup_expired_nonces(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         max_age_hours: u64,
@@ -2139,6 +2198,15 @@ impl MetadataDB {
                         .await
                     {
                         error!("Error verifying ownership: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetNonce {
+                    account_id,
+                    response_sender,
+                } => {
+                    debug!("Handling get nonce request");
+                    if let Err(e) = self.handle_get_nonce(&account_id, response_sender).await {
+                        error!("Error getting nonce: {:?}", e);
                     }
                 }
                 MetadataDBCommand::GenerateNonce {

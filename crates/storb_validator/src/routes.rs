@@ -7,8 +7,10 @@ use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use base::piece::InfoHash;
+use crabtensor::sign::KeypairSignature;
 use crabtensor::AccountId;
 use subxt::ext::sp_core::crypto::Ss58Codec;
+use subxt::ext::sp_core::ByteArray;
 use subxt::ext::sp_runtime::AccountId32;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
@@ -175,16 +177,57 @@ pub async fn generate_nonce(
 pub async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
-    // Query(params): Query<HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // let signature = params.get("signature").ok_or_else(|| {
-    //     (
-    //         StatusCode::BAD_REQUEST,
-    //         "Missing signature parameter".to_string(),
-    //     )
-    // })?;
+    let sig_str = params.get("signature").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing signature parameter".to_string(),
+        )
+    })?;
+
+    debug!("Got upload request with signature: {}", sig_str);
+
+    // let slice = bytes.as_slice();
+    // KeypairSignature::from_slice(data);
+    let signature = match hex::decode(sig_str) {
+        // get from slice if OK
+        Ok(sig) => KeypairSignature::from_slice(sig.as_slice()).map_err(|e| {
+            error!("Failed to parse signature: {}: {:?}", sig_str, e);
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            )
+        })?,
+        Err(e) => {
+            error!("Failed to decode signature hex: {}: {}", sig_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            ));
+        }
+    };
+
+    let account_id_str = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+
+    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
     let content_length = headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -269,7 +312,7 @@ pub async fn upload_file(
     }));
 
     match processor
-        .process_upload(stream, content_length, filename)
+        .process_upload(stream, content_length, filename, account_id, signature)
         .await
     {
         Ok(infohash) => {
