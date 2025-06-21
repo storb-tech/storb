@@ -164,31 +164,6 @@ pub struct CrSqliteChanges {
     pub seq: u64,
 }
 
-// Add delete operation models with nonce
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DeleteInfohashRequest {
-    pub infohash: InfoHash,
-    pub owner_account_id: AccountId,
-    pub nonce: [u8; 32], // Add nonce for replay protection
-    pub signature: KeypairSignature,
-}
-
-impl DeleteInfohashRequest {
-    pub fn verify_signature(&self) -> bool {
-        let message = self.get_signature_message();
-        crabtensor::sign::verify_signature(&self.owner_account_id, &self.signature, message)
-    }
-
-    pub fn get_signature_message(&self) -> Vec<u8> {
-        let mut message = Vec::new();
-        message.extend_from_slice(b"DELETE:");
-        message.extend_from_slice(self.infohash.as_ref());
-        message.extend_from_slice(self.owner_account_id.as_ref());
-        message.extend_from_slice(&self.nonce); // Include nonce in signature
-        message
-    }
-}
-
 // Newtype wrapper for AccountId
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SqlAccountId(pub AccountId);

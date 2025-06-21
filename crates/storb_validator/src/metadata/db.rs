@@ -20,9 +20,7 @@ use super::models::{
 };
 use crate::{
     constants::DB_MPSC_BUFFER_SIZE,
-    metadata::models::{
-        CrSqliteChanges, CrSqliteValue, DeleteInfohashRequest, PieceValue, SqlAccountId,
-    },
+    metadata::models::{CrSqliteChanges, CrSqliteValue, PieceValue, SqlAccountId},
 };
 
 #[derive(Debug)]
@@ -125,7 +123,7 @@ pub enum MetadataDBCommand {
         response_sender: mpsc::Sender<Result<ChunkChallengeHistory, MetadataDBError>>,
     },
     DeleteInfohash {
-        delete_request: DeleteInfohashRequest,
+        infohash_value: InfohashValue,
         response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
     },
     GetInfohashesByOwner {
@@ -795,7 +793,7 @@ impl MetadataDB {
 
             // Check if the nonce exists for this account and is not expired (within 1 hour)
             let nonce_exists: Result<bool, _> = tx.query_row(
-                "SELECT 1 FROM account_nonces 
+                "SELECT 1 FROM account_nonces
                  WHERE account_id = ?1 AND nonce = ?2
                  ORDER BY timestamp DESC",
                 // TODO(syncing): is checking for the timestamp necessary here?
@@ -943,7 +941,7 @@ impl MetadataDB {
 
             // Prepare statements for better performance with multiple inserts
             let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1) 
+                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
                  ON CONFLICT(chunk_hash) DO UPDATE SET ref_count = ref_count + 1"
             )?;
 
@@ -951,9 +949,9 @@ impl MetadataDB {
                 "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
             )?;
 
-            let mut piece_stmt = tx.prepare(
+            let piece_stmt = tx.prepare(
                 "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners, ref_count) VALUES (?1, ?2, ?3, ?4, 1)
-                 ON CONFLICT(piece_hash) DO UPDATE SET 
+                 ON CONFLICT(piece_hash) DO UPDATE SET
                    miners = ?4,
                    ref_count = ref_count + 1"
             )?;
@@ -1009,29 +1007,30 @@ impl MetadataDB {
                             Box::new(e),
                         ))
                     })?;
-                    // Insert piece
-                    // If it already exists, update the miners
-                    // make sure to check if a miner uid already exists in the miners list
-                    // if it does, just dont insert that particular miner uid
-                    // TODO: this is so cooked lmao
-                    match piece_stmt.execute(params![
-                        piece.piece_hash,
-                        piece.piece_size,
-                        piece.piece_type.clone() as u8,
-                        miners
-                    ]) {
-                        Ok(_) => {}
+
+                    // First try to insert the piece normally
+                    let insert_result = tx.execute(
+                        "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners, ref_count) VALUES (?1, ?2, ?3, ?4, 1)",
+                        params![
+                            piece.piece_hash,
+                            piece.piece_size,
+                            piece.piece_type.clone() as u8,
+                            miners
+                        ]
+                    );
+
+                    match insert_result {
+                        Ok(_) => {
+                            // Piece inserted successfully
+                        }
                         Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
-                            // Read The miners from the database
-                            // Check to see if any of the miners we want to insert are already in the database
-                            let mut existing_miners_stmt = conn.prepare(
+                            // Piece already exists, need to merge miners and update ref_count
+                            let existing_miners: String = tx.query_row(
                                 "SELECT miners FROM pieces WHERE piece_hash = ?1",
-                            )?;
-                            let existing_miners: String = existing_miners_stmt
-                                .query_row(params![piece.piece_hash], |row| {
-                                    row.get(0)
-                                })
-                                .map_err(MetadataDBError::Database)?;
+                                params![piece.piece_hash],
+                                |row| row.get(0)
+                            ).map_err(MetadataDBError::Database)?;
+
                             let mut existing_miners: Vec<Compact<NodeUID>> =
                                 serde_json::from_str(&existing_miners).map_err(|e| {
                                     MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
@@ -1040,13 +1039,15 @@ impl MetadataDB {
                                         Box::new(e),
                                     ))
                                 })?;
+
                             // Add new miners to the existing miners
                             for miner in &piece.miners {
                                 if !existing_miners.contains(miner) {
                                     existing_miners.push(*miner);
                                 }
                             }
-                            // Update the piece with the new miners
+
+                            // Update the piece with the new miners and increment ref_count
                             let updated_miners = serde_json::to_string(&existing_miners).map_err(
                                 |e| {
                                     MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
@@ -1056,11 +1057,11 @@ impl MetadataDB {
                                     ))
                                 },
                             )?;
-                            conn.execute(
-                                "UPDATE pieces SET miners = ?1 WHERE piece_hash = ?2",
+
+                            tx.execute(
+                                "UPDATE pieces SET miners = ?1, ref_count = ref_count + 1 WHERE piece_hash = ?2",
                                 params![updated_miners, piece.piece_hash],
-                            )
-                            .map_err(MetadataDBError::Database)?;
+                            ).map_err(MetadataDBError::Database)?;
                         }
                         Err(e) => return Err(MetadataDBError::Database(e)),
                     }
@@ -1422,7 +1423,7 @@ impl MetadataDB {
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
-                "SELECT infohash, name, length, chunk_size, chunk_count, creation_timestamp, signature
+                "SELECT infohash, name, length, chunk_size, chunk_count, owner_account_id, creation_timestamp, signature
                  FROM infohashes
                  WHERE infohash = ?1",
             )?;
@@ -1737,131 +1738,101 @@ impl MetadataDB {
 
     pub async fn handle_delete_infohash(
         &self,
-        delete_request: &DeleteInfohashRequest,
+        infohash_value: InfohashValue,
         response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
-        let delete_request = delete_request.clone();
+        let infohash_value = infohash_value.clone();
 
         tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let tx = conn.unchecked_transaction()?;
 
-            // Verify ownership
-            let owner_check: Result<SqlAccountId, _> = tx.query_row(
-                "SELECT owner_account_id FROM infohashes WHERE infohash = ?1",
-                params![delete_request.infohash],
-                |row| row.get(0),
-            );
-
-            match owner_check {
-                Ok(owner) if owner.0 == delete_request.owner_account_id => {
-                    // Owner verified, proceed with deletion
-                }
-                Ok(_) => {
-                    return Err(MetadataDBError::UnauthorizedAccess);
-                }
-                Err(_) => {
-                    return Err(MetadataDBError::InfohashNotFound);
-                }
-            }
-
-            // Get all chunks for this infohash before deletion
-            let chunk_hashes = {
-                let mut chunk_stmt =
-                    tx.prepare("SELECT chunk_hash FROM tracker_chunks WHERE infohash = ?1")?;
-                let chunk_hashes: Result<Vec<ChunkHash>, _> = chunk_stmt
-                    .query_map(params![delete_request.infohash], |row| row.get(0))?
-                    .collect();
-                chunk_hashes?
-            };
-
-            // Delete the infohash
-            tx.execute(
-                "DELETE FROM infohashes WHERE infohash = ?1",
-                params![delete_request.infohash],
+            // First, update the ref counts for chunks and pieces BEFORE deleting tracker_chunks
+            let mut chunk_stmt = tx.prepare(
+                "UPDATE chunks SET ref_count = ref_count - 1 WHERE chunk_hash IN (
+                    SELECT chunk_hash FROM tracker_chunks WHERE infohash = ?1
+                )",
             )?;
+            chunk_stmt
+                .execute(params![infohash_value.infohash])
+                .map_err(MetadataDBError::Database)?;
+            drop(chunk_stmt);
 
-            // Delete tracker_chunks mappings
-            tx.execute(
-                "DELETE FROM tracker_chunks WHERE infohash = ?1",
-                params![delete_request.infohash],
+            let mut piece_stmt = tx.prepare(
+                "UPDATE pieces SET ref_count = ref_count - 1 WHERE piece_hash IN (
+                    SELECT piece_hash FROM chunk_pieces WHERE chunk_hash IN (
+                        SELECT chunk_hash FROM tracker_chunks WHERE infohash = ?1
+                    )
+                )",
             )?;
+            piece_stmt
+                .execute(params![infohash_value.infohash])
+                .map_err(MetadataDBError::Database)?;
+            drop(piece_stmt);
 
-            // Garbage collection: decrement reference counts and clean up
-            for chunk_hash in chunk_hashes {
-                // Get all pieces for this chunk before potentially deleting it
-                let mut piece_stmt =
-                    tx.prepare("SELECT piece_hash FROM chunk_pieces WHERE chunk_hash = ?1")?;
-                let piece_hashes: Result<Vec<PieceHash>, _> = piece_stmt
-                    .query_map(params![chunk_hash], |row| row.get(0))?
-                    .collect();
-                let piece_hashes = piece_hashes?;
+            // Now delete the tracker chunks associated with this infohash
+            let mut tracker_stmt = tx.prepare("DELETE FROM tracker_chunks WHERE infohash = ?1")?;
+            tracker_stmt
+                .execute(params![infohash_value.infohash])
+                .map_err(MetadataDBError::Database)?;
+            drop(tracker_stmt);
 
-                // Decrement chunk reference count
-                tx.execute(
-                    "UPDATE chunks SET ref_count = ref_count - 1 WHERE chunk_hash = ?1",
-                    params![chunk_hash],
-                )?;
+            // Delete the infohash entry from the database
+            let mut stmt =
+                tx.prepare("DELETE FROM infohashes WHERE infohash = ?1 AND owner_account_id = ?2")?;
+            stmt.execute(params![
+                infohash_value.infohash,
+                infohash_value.owner_account_id.clone()
+            ])
+            .map_err(MetadataDBError::Database)?;
+            drop(stmt);
 
-                // Check if chunk should be deleted
-                let chunk_ref_count: i64 = tx.query_row(
-                    "SELECT ref_count FROM chunks WHERE chunk_hash = ?1",
-                    params![chunk_hash],
-                    |row| row.get(0),
-                )?;
+            // Delete chunks and pieces, and chunk_pieces with ref_count <= 0
+            let mut delete_chunks_stmt = tx.prepare("DELETE FROM chunks WHERE ref_count <= 0")?;
+            delete_chunks_stmt
+                .execute([])
+                .map_err(MetadataDBError::Database)?;
+            drop(delete_chunks_stmt);
 
-                if chunk_ref_count <= 0 {
-                    // Delete chunk and its piece mappings
-                    tx.execute(
-                        "DELETE FROM chunk_pieces WHERE chunk_hash = ?1",
-                        params![chunk_hash],
-                    )?;
-                    tx.execute(
-                        "DELETE FROM chunks WHERE chunk_hash = ?1",
-                        params![chunk_hash],
-                    )?;
+            let mut delete_pieces_stmt = tx.prepare("DELETE FROM pieces WHERE ref_count <= 0")?;
+            delete_pieces_stmt
+                .execute([])
+                .map_err(MetadataDBError::Database)?;
+            drop(delete_pieces_stmt);
 
-                    // Decrement piece reference counts
-                    for piece_hash in piece_hashes {
-                        tx.execute(
-                            "UPDATE pieces SET ref_count = ref_count - 1 WHERE piece_hash = ?1",
-                            params![piece_hash],
-                        )?;
+            let mut delete_chunk_pieces_stmt = tx.prepare(
+                "DELETE FROM chunk_pieces WHERE piece_hash NOT IN (SELECT piece_hash FROM pieces)",
+            )?;
+            delete_chunk_pieces_stmt
+                .execute([])
+                .map_err(MetadataDBError::Database)?;
+            drop(delete_chunk_pieces_stmt);
 
-                        // Check if piece should be deleted
-                        let piece_ref_count: i64 = tx.query_row(
-                            "SELECT ref_count FROM pieces WHERE piece_hash = ?1",
-                            params![piece_hash],
-                            |row| row.get(0),
-                        )?;
+            // Commit the transaction
+            tx.commit().map_err(MetadataDBError::Database)?;
 
-                        if piece_ref_count <= 0 {
-                            tx.execute(
-                                "DELETE FROM pieces WHERE piece_hash = ?1",
-                                params![piece_hash],
-                            )?;
-                        }
-                    }
-                }
-            }
-
-            tx.commit()?;
             Ok::<(), MetadataDBError>(())
         })
         .await
         .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
+        // Send the response
         if response_sender.send(Ok(())).await.is_err() {
-            error!("Failed to send delete response");
+            error!("Failed to send delete infohash response");
         }
+        debug!(
+            "Successfully deleted infohash: {}",
+            hex::encode(infohash_value.infohash)
+        );
+
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn delete_infohash(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
-        delete_request: DeleteInfohashRequest,
+        infohash_value: InfohashValue,
         nonce: &[u8; 32],
     ) -> Result<(), MetadataDBError> {
         // Create a channel for the response
@@ -1870,9 +1841,9 @@ impl MetadataDB {
 
         // First validate the nonce
         let nonce_valid = Self::validate_and_consume_nonce(
-            // Same issue here - needs architectural change
+            // We need access to the command sender here - this needs to be passed in or restructured
             &(command_sender.clone()),
-            delete_request.clone().owner_account_id,
+            infohash_value.owner_account_id.0.clone(),
             nonce,
         )
         .await
@@ -1890,7 +1861,7 @@ impl MetadataDB {
         }
 
         // Verify signature after nonce validation
-        if !delete_request.verify_signature() {
+        if !infohash_value.verify_signature(nonce) {
             if response_sender
                 .send(Err(MetadataDBError::InvalidSignature))
                 .await
@@ -1901,14 +1872,16 @@ impl MetadataDB {
             return Ok(());
         }
 
+        // Send the command to delete the infohash
         command_sender
             .send(MetadataDBCommand::DeleteInfohash {
-                delete_request,
+                infohash_value,
                 response_sender,
             })
             .await
             .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
+        // Wait for the response
         match response_receiver.recv().await {
             Some(result) => result,
             None => Err(MetadataDBError::Database(
@@ -2064,6 +2037,18 @@ impl MetadataDB {
                         error!("Error inserting object: {:?}", e);
                     }
                 }
+                MetadataDBCommand::DeleteInfohash {
+                    infohash_value,
+                    response_sender,
+                } => {
+                    debug!("Handling delete infohash request");
+                    if let Err(e) = self
+                        .handle_delete_infohash(infohash_value, response_sender)
+                        .await
+                    {
+                        error!("Error deleting infohash: {:?}", e);
+                    }
+                }
                 MetadataDBCommand::GetRandomChunk { response_sender } => {
                     debug!("Handling request for random chunk");
                     if let Err(e) = self.handle_get_random_chunk(response_sender).await {
@@ -2161,18 +2146,6 @@ impl MetadataDB {
                         .await
                     {
                         error!("Error getting chunk challenge history: {:?}", e);
-                    }
-                }
-                MetadataDBCommand::DeleteInfohash {
-                    delete_request,
-                    response_sender,
-                } => {
-                    debug!("Handling delete infohash request");
-                    if let Err(e) = self
-                        .handle_delete_infohash(&delete_request, response_sender)
-                        .await
-                    {
-                        error!("Error deleting infohash: {:?}", e);
                     }
                 }
                 MetadataDBCommand::GetInfohashesByOwner {
@@ -2285,16 +2258,17 @@ mod tests {
                 .expect("Failed to disable extensions");
         }
 
-        // Create tables
+        // Create tables matching the migration schema
         conn.execute(
             "CREATE TABLE infohashes (
-                infohash BLOB PRIMARY KEY,
-                name VARCHAR(4096) NOT NULL,
-                length INTEGER NOT NULL,
-                chunk_size INTEGER NOT NULL,
-                chunk_count INTEGER NOT NULL,
-                creation_timestamp DATETIME NOT NULL,
-                signature BLOB NOT NULL
+                infohash BLOB PRIMARY KEY NOT NULL DEFAULT '',
+                name VARCHAR(4096) NOT NULL DEFAULT 'default',
+                length INTEGER NOT NULL DEFAULT 0,
+                chunk_size INTEGER NOT NULL DEFAULT 0,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                owner_account_id BLOB NOT NULL DEFAULT '',
+                creation_timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                signature BLOB NOT NULL DEFAULT ''
             )",
             [],
         )
@@ -2302,12 +2276,13 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE chunks (
-                chunk_hash BLOB PRIMARY KEY,
-                k INTEGER NOT NULL,
-                m INTEGER NOT NULL,
-                chunk_size INTEGER NOT NULL,
-                padlen INTEGER NOT NULL,
-                original_chunk_size INTEGER NOT NULL
+                chunk_hash BLOB PRIMARY KEY NOT NULL DEFAULT '',
+                k INTEGER NOT NULL DEFAULT 0,
+                m INTEGER NOT NULL DEFAULT 0,
+                chunk_size INTEGER NOT NULL DEFAULT 0,
+                padlen INTEGER NOT NULL DEFAULT 0,
+                original_chunk_size INTEGER NOT NULL DEFAULT 0,
+                ref_count INTEGER NOT NULL DEFAULT 1
             )",
             [],
         )
@@ -2315,9 +2290,9 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE tracker_chunks (
-                infohash BLOB NOT NULL REFERENCES infohashes(infohash),
-                chunk_idx INTEGER NOT NULL,
-                chunk_hash BLOB NOT NULL REFERENCES chunks(chunk_hash),
+                infohash BLOB NOT NULL DEFAULT '',
+                chunk_idx INTEGER NOT NULL DEFAULT 0,
+                chunk_hash BLOB NOT NULL DEFAULT '',
                 PRIMARY KEY (infohash, chunk_idx)
             )",
             [],
@@ -2326,10 +2301,11 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE pieces (
-                piece_hash BLOB PRIMARY KEY,
-                piece_size INTEGER NOT NULL,
-                piece_type INTEGER NOT NULL,
-                miners TEXT NOT NULL
+                piece_hash BLOB PRIMARY KEY NOT NULL DEFAULT '',
+                piece_size INTEGER NOT NULL DEFAULT 0,
+                piece_type INTEGER NOT NULL DEFAULT 0,
+                miners TEXT NOT NULL DEFAULT '',
+                ref_count INTEGER NOT NULL DEFAULT 1
             )",
             [],
         )
@@ -2337,9 +2313,9 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE chunk_pieces (
-                chunk_hash BLOB NOT NULL REFERENCES chunks(chunk_hash),
-                piece_idx INTEGER NOT NULL,
-                piece_hash BLOB NOT NULL REFERENCES pieces(piece_hash),
+                chunk_hash BLOB NOT NULL DEFAULT '',
+                piece_idx INTEGER NOT NULL DEFAULT 0,
+                piece_hash BLOB NOT NULL DEFAULT '',
                 PRIMARY KEY (chunk_hash, piece_idx)
             )",
             [],
@@ -2348,12 +2324,12 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE piece_repair_history (
-                piece_repair_hash BLOB PRIMARY KEY,
-                piece_hash BLOB NOT NULL,
-                chunk_hash BLOB NOT NULL REFERENCES chunks(chunk_hash),
-                validator_id INTEGER NOT NULL,
-                timestamp DATETIME NOT NULL,
-                signature BLOB NOT NULL
+                piece_repair_hash BLOB PRIMARY KEY NOT NULL DEFAULT '',
+                piece_hash BLOB NOT NULL DEFAULT '',
+                chunk_hash BLOB NOT NULL DEFAULT '',
+                validator_id INTEGER NOT NULL DEFAULT 0,
+                timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                signature BLOB NOT NULL DEFAULT ''
             )",
             [],
         )
@@ -2361,14 +2337,14 @@ mod tests {
 
         conn.execute(
             "CREATE TABLE chunk_challenge_history (
-                challenge_hash BLOB PRIMARY KEY,
-                chunk_hash BLOB NOT NULL REFERENCES chunks(chunk_hash),
-                validator_id INTEGER NOT NULL,
-                miners_challenged TEXT NOT NULL,
-                miners_successful TEXT NOT NULL,
-                piece_repair_hash BLOB REFERENCES piece_repair_history(piece_repair_hash),
-                timestamp DATETIME NOT NULL,
-                signature BLOB NOT NULL
+                challenge_hash BLOB PRIMARY KEY NOT NULL DEFAULT '',
+                chunk_hash BLOB NOT NULL DEFAULT '',
+                validator_id INTEGER NOT NULL DEFAULT 0,
+                miners_challenged TEXT NOT NULL DEFAULT '',
+                miners_successful TEXT NOT NULL DEFAULT '',
+                piece_repair_hash BLOB,
+                timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                signature BLOB NOT NULL DEFAULT ''
             )",
             [],
         )
@@ -2378,17 +2354,56 @@ mod tests {
             "CREATE TABLE account_nonces (
                 account_id BLOB NOT NULL,
                 nonce BLOB NOT NULL,
-                timestamp DATETIME NOT NULL,
+                timestamp DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (account_id, nonce)
             )",
             [],
         )
         .expect("Failed to create account_nonces table");
 
+        // Create indexes matching the migration
+        conn.execute("CREATE INDEX idx_chunks_by_hash ON chunks(chunk_hash)", [])
+            .expect("Failed to create chunks index");
+        conn.execute("CREATE INDEX idx_pieces_by_hash ON pieces(piece_hash)", [])
+            .expect("Failed to create pieces index");
+        conn.execute("CREATE INDEX idx_chunks_ref_count ON chunks(ref_count)", [])
+            .expect("Failed to create chunks ref_count index");
+        conn.execute("CREATE INDEX idx_pieces_ref_count ON pieces(ref_count)", [])
+            .expect("Failed to create pieces ref_count index");
+        conn.execute(
+            "CREATE INDEX idx_chunk_pieces_by_chunk ON chunk_pieces(chunk_hash)",
+            [],
+        )
+        .expect("Failed to create chunk_pieces index");
+        conn.execute(
+            "CREATE INDEX idx_tracker_chunks_by_infohash ON tracker_chunks(infohash)",
+            [],
+        )
+        .expect("Failed to create tracker_chunks index");
+        conn.execute(
+            "CREATE INDEX idx_infohashes_by_owner ON infohashes(owner_account_id)",
+            [],
+        )
+        .expect("Failed to create infohashes owner index");
+        conn.execute(
+            "CREATE INDEX idx_piece_repair_by_piece ON piece_repair_history(piece_hash)",
+            [],
+        )
+        .expect("Failed to create piece_repair_history index");
+        conn.execute(
+            "CREATE INDEX idx_chunk_challenge_by_chunk ON chunk_challenge_history(chunk_hash)",
+            [],
+        )
+        .expect("Failed to create chunk_challenge_history index");
+        conn.execute(
+            "CREATE INDEX idx_account_nonces_timestamp ON account_nonces(timestamp)",
+            [],
+        )
+        .expect("Failed to create account_nonces timestamp index");
+
         // Return the database path
         db_path
     }
-
     #[tokio::test]
     async fn test_insert_and_query_object() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
@@ -2406,7 +2421,11 @@ mod tests {
         let infohash = InfoHash([1u8; 32]);
 
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = signer.account_id().clone();
 
@@ -2514,7 +2533,11 @@ mod tests {
         });
 
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = SqlAccountId(signer.account_id().clone());
 
@@ -2592,8 +2615,11 @@ mod tests {
             db.process_events().await;
         });
 
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = SqlAccountId(signer.account_id().clone());
         // generate nonce for the account
@@ -2706,7 +2732,11 @@ mod tests {
         });
 
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = SqlAccountId(signer.account_id().clone());
         // generate nonce for the account
@@ -2805,7 +2835,11 @@ mod tests {
         });
 
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = SqlAccountId(signer.account_id().clone());
         // generate nonce for the account
@@ -2932,7 +2966,11 @@ mod tests {
         // Create first object with a piece that has miners [1, 2]
         let infohash1 = InfoHash([1u8; 32]);
         // Create dummy account
-        let test_phrase: &[u8] = b"test test test test test test test test test test test junk";
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
         let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
         let dummy_account_id = SqlAccountId(signer.account_id().clone());
         // generate nonce for the account
@@ -2985,11 +3023,6 @@ mod tests {
         .await
         .expect("Failed to insert first object");
 
-        // generate another nonce for the account
-        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
-            .await
-            .expect("Failed to generate nonce");
-
         // Verify initial miners
         let initial_pieces = MetadataDB::get_pieces_by_chunk(&command_sender, ChunkHash([2u8; 32]))
             .await
@@ -3009,6 +3042,11 @@ mod tests {
             creation_timestamp: Utc::now(),
             signature: KeypairSignature::from_raw([1; 64]),
         };
+
+        // create another nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
 
         // Sign the infohash value
         let message = infohash_value2.get_signature_message(&nonce);
@@ -3140,5 +3178,134 @@ mod tests {
         // Abort the background task
         handle.abort();
         // temp_file will be automatically cleaned up when it goes out of scope
+    }
+
+    #[tokio::test]
+    async fn test_delete_infohash() {
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let db_path = setup_test_db(&temp_file);
+        let crsqlite_lib = PathBuf::from("../../crsqlite/crsqlite.so");
+
+        let (mut db, command_sender) = MetadataDB::new(&db_path, &crsqlite_lib).unwrap();
+
+        // Start the DB event processing in the background
+        let handle = tokio::spawn(async move {
+            db.process_events().await;
+        });
+
+        // Create dummy account
+        let decoded =
+            hex::decode("ba4f8ae740dd5f7950081049e32f6ed071e3dd3d8d6f3c5073caf22924569062")
+                .unwrap();
+        // Create dummy account
+        let test_phrase: &[u8] = decoded.as_slice();
+        let signer = signer_from_seed(test_phrase).expect("Failed to create signer from seed");
+        let dummy_account_id = SqlAccountId(signer.account_id().clone());
+
+        // generate nonce for the account
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
+        let infohash_value = InfohashValue {
+            infohash: InfoHash([1; 32]),
+            name: "test_file.txt".to_string(),
+            length: 1000,
+            chunk_size: 256,
+            chunk_count: 4,
+            owner_account_id: dummy_account_id.clone(),
+            creation_timestamp: Utc::now(),
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value
+        };
+        let chunk = ChunkValue {
+            chunk_hash: ChunkHash([2u8; 32]),
+            k: 10,
+            m: 5,
+            chunk_size: 512,
+            padlen: 0,
+            original_chunk_size: 512,
+        };
+        let piece = PieceValue {
+            piece_hash: PieceHash([3u8; 32]),
+            piece_size: 256,
+            piece_type: PieceType::Data,
+            miners: vec![Compact(1), Compact(2)],
+        };
+        // Insert the object
+        MetadataDB::insert_object(
+            &command_sender,
+            infohash_value.clone(),
+            &nonce,
+            vec![(chunk.clone(), vec![piece])],
+        )
+        .await
+        .expect("Failed to insert object");
+
+        // Query the infohash to ensure it exists
+        let queried_infohash = MetadataDB::get_infohash(&command_sender, infohash_value.infohash)
+            .await
+            .expect("Failed to get infohash");
+        assert_eq!(queried_infohash.infohash, infohash_value.infohash);
+        assert_eq!(queried_infohash.name, infohash_value.name);
+        assert_eq!(queried_infohash.length, infohash_value.length);
+        assert_eq!(queried_infohash.chunk_size, infohash_value.chunk_size);
+        assert_eq!(queried_infohash.chunk_count, infohash_value.chunk_count);
+        assert_eq!(
+            queried_infohash.owner_account_id,
+            infohash_value.owner_account_id
+        );
+
+        // Generate another nonce so we can delete the infohash
+        let nonce = MetadataDB::generate_nonce(&command_sender, dummy_account_id.clone().0)
+            .await
+            .expect("Failed to generate nonce");
+
+        // Sign the infohash value again with the new nonce
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, &message);
+        let infohash_value = InfohashValue {
+            signature, // Use the signed signature
+            ..infohash_value.clone()
+        };
+
+        // Delete the infohash
+        MetadataDB::delete_infohash(&command_sender, infohash_value.clone(), &nonce)
+            .await
+            .expect("Failed to delete infohash");
+
+        // Attempt to query the infohash again, expecting an error
+        let result =
+            MetadataDB::get_infohash(&command_sender, infohash_value.clone().infohash).await;
+        assert!(result.is_err());
+
+        // Verify that the chunks and pieces associated with the infohash are also deleted
+        let queried_chunks = MetadataDB::get_chunks_by_infohash(
+            &command_sender,
+            infohash_value.clone().infohash.to_vec(),
+        )
+        .await
+        .expect("Failed to get chunks by infohash");
+        assert!(
+            queried_chunks.is_empty(),
+            "Chunks should be empty after deletion"
+        );
+        let queried_pieces =
+            MetadataDB::get_pieces_by_chunk(&command_sender, chunk.clone().chunk_hash)
+                .await
+                .expect("Failed to get pieces by chunk");
+        assert!(
+            queried_pieces.is_empty(),
+            "Pieces should be empty after deletion"
+        );
+
+        handle.abort();
     }
 }
