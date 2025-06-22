@@ -12,6 +12,7 @@ use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
 use base::{LocalNodeInfo, NeuronError};
+use chrono::TimeDelta;
 use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
@@ -25,7 +26,7 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
-use crate::constants::NONCE_CLEANUP_FREQUENCY;
+use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
 use crate::metadata::sync::sync_metadata_db;
 use crate::routes::{delete_file, generate_nonce, get_crsqlite_changes};
 
@@ -246,14 +247,20 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     // Add a periodic cleanup task for expired nonces
     tokio::spawn(async move {
         let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(NONCE_CLEANUP_FREQUENCY)); // Every hour
+            tokio::time::interval(std::time::Duration::from_secs(NONCE_CLEANUP_FREQUENCY));
 
         loop {
             interval.tick().await;
             info!("Running nonce cleanup task");
             // get the command sender from the validator
             let command_sender = validator_for_nonce_cleanup.metadatadb_sender.clone();
-            match metadata::db::MetadataDB::cleanup_expired_nonces(&command_sender, 1).await {
+            match metadata::db::MetadataDB::cleanup_expired_nonces(
+                &command_sender,
+                TimeDelta::try_seconds(NONCE_EXPIRATION_TIME as i64)
+                    .expect("Failed to create TimeDelta for nonce expiration"),
+            )
+            .await
+            {
                 Ok(deleted_count) => {
                     if deleted_count > 0 {
                         info!("Cleaned up {} expired nonces", deleted_count);
@@ -278,7 +285,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .route("/file", delete(delete_file))
         .route("/nonce", post(generate_nonce))
         .route_layer(from_fn(require_api_key));
-
     // Create main router with all routes
     let app = Router::new()
         .merge(protected_routes) // Add protected routes

@@ -6,6 +6,7 @@ pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 pub const METADATADB_SYNC_FREQUENCY: u64 = 120; // 2 minutes
 
 pub const NONCE_CLEANUP_FREQUENCY: u64 = 60; // Every minute
+pub const NONCE_EXPIRATION_TIME: u64 = 3600; // 60 minutes
 
 // TODO: should we increase min required miners?
 // TODO: should we use it in consume_bytes to determine number of miners to distribute to?

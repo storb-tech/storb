@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{
-    encode_chunk, get_infohash_with_identity, piece_length, ChunkHash, InfoHash, PieceHash,
+    encode_chunk, get_infohash_by_identity, piece_length, ChunkHash, InfoHash, PieceHash,
 };
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{BaseNeuron, NodeInfo, NodeUID};
@@ -249,7 +249,7 @@ impl<'a> UploadProcessor<'a> {
 
         let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        let infohash: InfoHash = get_infohash_with_identity(piece_hashes, &account_id);
+        let infohash: InfoHash = get_infohash_by_identity(piece_hashes, &account_id);
         // convert the infohash to a hex string for logging
         let infohash_str = hex::encode(infohash);
 

@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use base::constants::MIN_BANDWIDTH;
 use base::piece::{
-    encode_chunk, get_infohash_with_identity, piece_length, ChunkHash, Piece, PieceHash,
+    encode_chunk, get_infohash_by_identity, piece_length, ChunkHash, Piece, PieceHash,
 };
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
@@ -170,7 +170,7 @@ impl Validator {
             }
         };
 
-        let infohash = get_infohash_with_identity(piece_hashes, &validator_account_id);
+        let infohash = get_infohash_by_identity(piece_hashes, &validator_account_id);
 
         let infohash_value = metadata::models::InfohashValue {
             infohash,

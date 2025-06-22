@@ -30,11 +30,11 @@ pub enum MetadataDBError {
     InvalidPath(String),
     MissingTable(String),
     ExtensionLoad(String),
-    InvalidSignature,   // Add this
-    UnauthorizedAccess, // Add this
-    InfohashNotFound,   // Add this
-    InvalidNonce,       // Add this
-    NonceExpired,       // Add this
+    InvalidSignature,
+    UnauthorizedAccess,
+    InfohashNotFound,
+    InvalidNonce,
+    NonceExpired,
 }
 
 impl std::fmt::Display for MetadataDBError {
@@ -79,7 +79,7 @@ pub enum MetadataDBCommand {
     },
     GetCrSqliteChanges {
         min_db_version: u64,
-        site_id_disclude: Vec<u8>,
+        site_id_exclude: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<CrSqliteChanges>, MetadataDBError>>,
     },
     InsertObject {
@@ -149,7 +149,7 @@ pub enum MetadataDBCommand {
         response_sender: mpsc::Sender<Result<bool, MetadataDBError>>,
     },
     CleanupExpiredNonces {
-        max_age_hours: u64,
+        max_age: Duration,
         response_sender: mpsc::Sender<Result<u64, MetadataDBError>>, // Returns number of cleaned up nonces
     },
 }
@@ -436,11 +436,11 @@ impl MetadataDB {
     pub async fn handle_get_crsqlite_changes(
         &self,
         min_db_version: u64,
-        site_id_disclude: Vec<u8>,
+        site_id_exclude: Vec<u8>,
         response_sender: mpsc::Sender<Result<Vec<CrSqliteChanges>, MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
-        let site_id_disclude = site_id_disclude.clone();
+        let site_id_exclude = site_id_exclude.clone();
 
         let changes = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
@@ -451,7 +451,7 @@ impl MetadataDB {
                  ORDER BY db_version DESC",
             )?;
 
-            let mut rows = stmt.query(params![min_db_version, site_id_disclude])?;
+            let mut rows = stmt.query(params![min_db_version, site_id_exclude])?;
             let mut changes = Vec::new();
             while let Some(row) = rows.next()? {
                 changes.push(CrSqliteChanges {
@@ -482,7 +482,7 @@ impl MetadataDB {
     pub async fn get_crsqlite_changes(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         min_db_version: u64,
-        site_id_disclude: Vec<u8>,
+        site_id_exclude: Vec<u8>,
     ) -> Result<Vec<CrSqliteChanges>, MetadataDBError> {
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
@@ -492,7 +492,7 @@ impl MetadataDB {
         command_sender
             .send(MetadataDBCommand::GetCrSqliteChanges {
                 min_db_version,
-                site_id_disclude,
+                site_id_exclude,
                 response_sender,
             })
             .await
@@ -796,8 +796,6 @@ impl MetadataDB {
                 "SELECT 1 FROM account_nonces
                  WHERE account_id = ?1 AND nonce = ?2
                  ORDER BY timestamp DESC",
-                // TODO(syncing): is checking for the timestamp necessary here?
-                //  AND timestamp > datetime('now', '-1 hour')",
                 params![SqlAccountId(account_id.clone()), nonce.to_vec()],
                 |_| Ok(true),
             );
@@ -856,7 +854,7 @@ impl MetadataDB {
 
     pub async fn handle_cleanup_expired_nonces(
         &self,
-        max_age_hours: u64,
+        max_age: Duration,
         response_sender: mpsc::Sender<Result<u64, MetadataDBError>>,
     ) -> Result<(), MetadataDBError> {
         let pool = Arc::clone(&self.pool);
@@ -865,7 +863,7 @@ impl MetadataDB {
             let conn = pool.get()?;
 
             // Compute cutoff time in Rust
-            let cutoff_time = Utc::now() - Duration::hours(max_age_hours as i64);
+            let cutoff_time = Utc::now() - max_age;
 
             let rows_affected = conn.execute(
                 "DELETE FROM account_nonces WHERE timestamp < ?1",
@@ -885,14 +883,14 @@ impl MetadataDB {
 
     pub async fn cleanup_expired_nonces(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
-        max_age_hours: u64,
+        max_age: Duration,
     ) -> Result<u64, MetadataDBError> {
         let (response_sender, mut response_receiver) =
             mpsc::channel::<Result<u64, MetadataDBError>>(1);
 
         command_sender
             .send(MetadataDBCommand::CleanupExpiredNonces {
-                max_age_hours,
+                max_age,
                 response_sender,
             })
             .await
@@ -2006,14 +2004,14 @@ impl MetadataDB {
                 }
                 MetadataDBCommand::GetCrSqliteChanges {
                     min_db_version,
-                    site_id_disclude,
+                    site_id_exclude,
                     response_sender,
                 } => {
                     debug!("Handling request for crsqlite changes");
                     if let Err(e) = self
                         .handle_get_crsqlite_changes(
                             min_db_version,
-                            site_id_disclude,
+                            site_id_exclude,
                             response_sender,
                         )
                         .await
@@ -2209,12 +2207,12 @@ impl MetadataDB {
                     }
                 }
                 MetadataDBCommand::CleanupExpiredNonces {
-                    max_age_hours,
+                    max_age,
                     response_sender,
                 } => {
                     debug!("Handling cleanup expired nonces request");
                     if let Err(e) = self
-                        .handle_cleanup_expired_nonces(max_age_hours, response_sender)
+                        .handle_cleanup_expired_nonces(max_age, response_sender)
                         .await
                     {
                         error!("Error cleaning up expired nonces: {:?}", e);

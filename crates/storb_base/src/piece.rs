@@ -12,7 +12,7 @@ use crate::constants::{
     PIECE_LENGTH_FUNC_MAX_SIZE, PIECE_LENGTH_FUNC_MIN_SIZE, PIECE_LENGTH_OFFSET,
     PIECE_LENGTH_SCALING,
 };
-use crate::AccountId; // Add this import
+use crate::AccountId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PieceHash(pub [u8; 32]);
@@ -254,7 +254,7 @@ pub fn deserialise_piece_response(
     }
 }
 
-pub fn get_infohash_with_identity(
+pub fn get_infohash_by_identity(
     piece_hashes: Vec<PieceHash>,
     owner_account_id: &AccountId,
 ) -> InfoHash {
@@ -276,7 +276,7 @@ pub fn get_infohash_with_identity(
 }
 
 // Keep the old function for backward compatibility, but deprecate it
-#[deprecated(note = "Use get_infohash_with_identity instead")]
+#[deprecated(note = "Use get_infohash_by_identity instead")]
 pub fn get_infohash(piece_hashes: Vec<PieceHash>) -> InfoHash {
     // The infohash is a hash of the piece hashes
     let mut hasher = blake3::Hasher::new();

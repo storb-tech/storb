@@ -71,22 +71,22 @@ pub async fn get_crsqlite_changes(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let site_id_disclude = params
-        .get("site_id_disclude")
+    let site_id_exclude = params
+        .get("site_id_exclude")
         .map(|s| hex::decode(s).unwrap_or_default())
         .unwrap_or_default();
 
     debug!(
-        "Getting crsqlite changes with min_db_version: {}, site_id_disclude: {}",
+        "Getting crsqlite changes with min_db_version: {}, site_id_exclude: {}",
         min_db_version,
-        hex::encode(&site_id_disclude)
+        hex::encode(&site_id_exclude)
     );
 
     let command_sender = state.validator.metadatadb_sender.clone();
     let changes = metadata::db::MetadataDB::get_crsqlite_changes(
         &command_sender,
         min_db_version,
-        site_id_disclude,
+        site_id_exclude,
     )
     .await
     .map_err(|e| {
@@ -102,7 +102,7 @@ pub async fn get_crsqlite_changes(
         error!("Failed to serialize crsqlite changes: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to serialize changes".to_string(),
+            "Internal server error".to_string(),
         )
     })?;
 
@@ -191,8 +191,6 @@ pub async fn upload_file(
 
     debug!("Got upload request with signature: {}", sig_str);
 
-    // let slice = bytes.as_slice();
-    // KeypairSignature::from_slice(data);
     let signature = match hex::decode(sig_str) {
         // get from slice if OK
         Ok(sig) => KeypairSignature::from_slice(sig.as_slice()).map_err(|e| {
@@ -501,7 +499,7 @@ pub async fn download_file(
     responses(
         (status = 200, description = "File deleted successfully", body = String),
         (status = 400, description = "Bad request - missing infohash parameter", body = String),
-        (status = 500, description = "Internal server error during deletion", body = String)
+        (status = 500, description = "Internal server error", body = String)
     ),
     params(
         ("infohash" = String, Query, description = "The infohash of the file to delete."),
@@ -622,7 +620,7 @@ pub async fn delete_file(
             error!("Failed to delete infohash: {}: {}", infohash, e);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error during deletion".to_string(),
+                "Internal server error".to_string(),
             ))
         }
     };

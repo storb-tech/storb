@@ -30,7 +30,7 @@ async fn get_crsql_changes(
     let addr = format!("{}:{}", ip, port);
 
     let endpoint = format!(
-        "http://{}/db_changes?site_id_disclude={}?min_db_version={}",
+        "http://{}/db_changes?site_id_exclude={}&min_db_version={}",
         addr,
         hex::encode(&site_id),
         min_db_version
