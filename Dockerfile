@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates librocksdb-dev libssl-dev libudev-dev pkg-config
 
 COPY --from=builder /app/target/release/storb /usr/local/bin/storb
+COPY --from=builder /app/crsqlite /app/crsqlite
 
 ENV RUST_LOG="info,libp2p=info,opentelemetry-http=info,opentelemetry-otlp=info,hyper_util=info"
 
@@ -32,4 +33,4 @@ VOLUME ["/app", "/root/.bittensor/wallets"]
 
 WORKDIR /app
 
-CMD ["sh", "-c", "/usr/local/bin/storb ${NODE_TYPE}"]
+CMD ["sh", "-c", "/usr/local/bin/storb ${NODE_TYPE}", "--crsqlite_file", "/app/crsqlite/crsqlite.so"]
