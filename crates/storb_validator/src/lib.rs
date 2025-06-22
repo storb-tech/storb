@@ -25,7 +25,7 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
-// use crate::constants::NONCE_CLEANUP_FREQUENCY;
+use crate::constants::NONCE_CLEANUP_FREQUENCY;
 use crate::metadata::sync::sync_metadata_db;
 use crate::routes::{delete_file, generate_nonce, get_crsqlite_changes};
 
@@ -80,7 +80,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let validator_for_metadatadb = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
-    // let validator_for_nonce_cleanup = validator.clone();
+    let validator_for_nonce_cleanup = validator.clone();
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
 
     let sync_config = config.clone();
@@ -243,29 +243,28 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
-    // TODO(syncing): Add a periodic task to cleanup expired nonces
-    // // Add a periodic cleanup task for expired nonces
-    // tokio::spawn(async move {
-    //     let mut interval =
-    //         tokio::time::interval(std::time::Duration::from_secs(NONCE_CLEANUP_FREQUENCY)); // Every hour
+    // Add a periodic cleanup task for expired nonces
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(NONCE_CLEANUP_FREQUENCY)); // Every hour
 
-    //     loop {
-    //         interval.tick().await;
-    //         info!("Running nonce cleanup task");
-    //         // get the command sender from the validator
-    //         let command_sender = validator_for_nonce_cleanup.metadatadb_sender.clone();
-    //         match metadata::db::MetadataDB::cleanup_expired_nonces(&command_sender, 1).await {
-    //             Ok(deleted_count) => {
-    //                 if deleted_count > 0 {
-    //                     info!("Cleaned up {} expired nonces", deleted_count);
-    //                 }
-    //             }
-    //             Err(e) => {
-    //                 error!("Failed to cleanup expired nonces: {:?}", e);
-    //             }
-    //         }
-    //     }
-    // });
+        loop {
+            interval.tick().await;
+            info!("Running nonce cleanup task");
+            // get the command sender from the validator
+            let command_sender = validator_for_nonce_cleanup.metadatadb_sender.clone();
+            match metadata::db::MetadataDB::cleanup_expired_nonces(&command_sender, 1).await {
+                Ok(deleted_count) => {
+                    if deleted_count > 0 {
+                        info!("Cleaned up {} expired nonces", deleted_count);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to cleanup expired nonces: {:?}", e);
+                }
+            }
+        }
+    });
 
     let db_path = config.api_keys_db.clone();
     // Initialize API key manager

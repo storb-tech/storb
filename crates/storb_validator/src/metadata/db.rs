@@ -5,7 +5,7 @@ use base::{
     piece::{ChunkHash, InfoHash, PieceHash},
     NodeUID,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use crabtensor::{sign::KeypairSignature, AccountId};
 use r2d2::Pool;
 use r2d2_sqlite::{rusqlite::params, SqliteConnectionManager};
@@ -864,9 +864,12 @@ impl MetadataDB {
         let deleted_count = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
 
+            // Compute cutoff time in Rust
+            let cutoff_time = Utc::now() - Duration::hours(max_age_hours as i64);
+
             let rows_affected = conn.execute(
-                "DELETE FROM account_nonces WHERE timestamp < datetime('now', '-' || ?1 || ' hours')",
-                params![max_age_hours],
+                "DELETE FROM account_nonces WHERE timestamp < ?1",
+                params![SqlDateTime(cutoff_time)],
             )?;
 
             Ok::<u64, MetadataDBError>(rows_affected as u64)
@@ -880,7 +883,6 @@ impl MetadataDB {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn cleanup_expired_nonces(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         max_age_hours: u64,
@@ -1829,7 +1831,6 @@ impl MetadataDB {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn delete_infohash(
         command_sender: &mpsc::Sender<MetadataDBCommand>,
         infohash_value: InfohashValue,
