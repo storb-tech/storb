@@ -6,15 +6,23 @@ use axum::extract::{Extension, Multipart, Query};
 use axum::http::header::CONTENT_LENGTH;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
-use base::metadata;
 use base::piece::InfoHash;
+use crabtensor::sign::KeypairSignature;
+use crabtensor::AccountId;
+use subxt::ext::sp_core::crypto::Ss58Codec;
+use subxt::ext::sp_core::ByteArray;
+use subxt::ext::sp_runtime::AccountId32;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
+use crate::metadata;
+use crate::metadata::models::{InfohashValue, SqlAccountId};
 use crate::upload::UploadProcessor;
 use crate::ValidatorState;
+
+// TODO: add route for deleting a file
 
 /// Router function to get information on a given node
 #[utoipa::path(
@@ -42,6 +50,120 @@ pub async fn node_info(
     Ok((StatusCode::OK, serialized_local_node_info))
 }
 
+/// Router function to get crsqlite changes for syncing
+#[utoipa::path(
+    get,
+    path = "/db_changes",
+    responses(
+        (status = 200, description = "Successfully got crsqlite changes", body = String),
+        (status = 500, description = "Internal server error", body = String)
+    ),
+    tag = "DBChanges"
+)]
+pub async fn get_crsqlite_changes(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // TODO(syncing): Add verification step to check if request is from a validator?
+    debug!("Got crsqlite changes request");
+    let min_db_version = params
+        .get("min_db_version")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let site_id_exclude = params
+        .get("site_id_exclude")
+        .map(|s| hex::decode(s).unwrap_or_default())
+        .unwrap_or_default();
+
+    debug!(
+        "Getting crsqlite changes with min_db_version: {}, site_id_exclude: {}",
+        min_db_version,
+        hex::encode(&site_id_exclude)
+    );
+
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let changes = metadata::db::MetadataDB::get_crsqlite_changes(
+        &command_sender,
+        min_db_version,
+        site_id_exclude,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get crsqlite changes: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    // serialize the changes
+    let changes = bincode::serialize(&changes).map_err(|e| {
+        error!("Failed to serialize crsqlite changes: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+
+    Ok((StatusCode::OK, changes))
+}
+
+// route for generating a nonce for a given account_id
+#[utoipa::path(
+    post,
+    path = "/nonce",
+    responses(
+        (status = 200, description = "Successfully got nonce", body = String),
+        (status = 500, description = "Internal server error", body = String)
+    ),
+    params(
+        ("account_id" = String, Query, description = "The account ID to generate a nonce for."),
+    ),
+    tag = "Nonce"
+)]
+#[axum::debug_handler]
+pub async fn generate_nonce(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let account_id = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+    debug!("Generating nonce for account_id: {}", account_id);
+    let metadatadb_sender = state.validator.metadatadb_sender.clone();
+    // create an AccountId from the ss58 string account_id
+    let acc_id: AccountId = match AccountId32::from_string(account_id) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
+    let nonce = metadata::db::MetadataDB::generate_nonce(&metadatadb_sender, acc_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to generate nonce: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            )
+        })?;
+    let nonce_str = hex::encode(nonce);
+    debug!(
+        "Generated nonce: {} for account id: {}",
+        nonce_str, account_id
+    );
+    Ok((StatusCode::OK, nonce_str))
+}
+
 #[utoipa::path(
     post,
     path = "/file",
@@ -56,9 +178,55 @@ pub async fn node_info(
 pub async fn upload_file(
     state: axum::extract::State<ValidatorState>,
     Extension(api_key_manager): Extension<Arc<RwLock<ApiKeyManager>>>,
+    Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let sig_str = params.get("signature").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing signature parameter".to_string(),
+        )
+    })?;
+
+    debug!("Got upload request with signature: {}", sig_str);
+
+    let signature = match hex::decode(sig_str) {
+        // get from slice if OK
+        Ok(sig) => KeypairSignature::from_slice(sig.as_slice()).map_err(|e| {
+            error!("Failed to parse signature: {}: {:?}", sig_str, e);
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            )
+        })?,
+        Err(e) => {
+            error!("Failed to decode signature hex: {}: {}", sig_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            ));
+        }
+    };
+
+    let account_id_str = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+
+    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
     let content_length = headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -143,7 +311,7 @@ pub async fn upload_file(
     }));
 
     match processor
-        .process_upload(stream, content_length, filename)
+        .process_upload(stream, content_length, filename, account_id, signature)
         .await
     {
         Ok(infohash) => {
@@ -322,6 +490,142 @@ pub async fn download_file(
             ))
         }
     }
+}
+
+// /delete Route for deleting an infohash
+#[utoipa::path(
+    delete,
+    path = "/file",
+    responses(
+        (status = 200, description = "File deleted successfully", body = String),
+        (status = 400, description = "Bad request - missing infohash parameter", body = String),
+        (status = 500, description = "Internal server error", body = String)
+    ),
+    params(
+        ("infohash" = String, Query, description = "The infohash of the file to delete."),
+    ),
+    tag = "Delete"
+)]
+#[axum::debug_handler]
+pub async fn delete_file(
+    state: axum::extract::State<ValidatorState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let infohash = params.get("infohash").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing infohash parameter".to_string(),
+        )
+    })?;
+
+    let signature = params.get("signature").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing signature parameter".to_string(),
+        )
+    })?;
+    let account_id_str = params.get("account_id").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Missing account_id parameter".to_string(),
+        )
+    })?;
+
+    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
+        Ok(acc_id) => acc_id.into(),
+        Err(e) => {
+            error!("Failed to parse account_id: {}: {}", account_id_str, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid account_id format".to_string(),
+            ));
+        }
+    };
+
+    let signature = match hex::decode(signature) {
+        Ok(sig) => KeypairSignature::from_slice(sig.as_slice()).map_err(|e| {
+            error!("Failed to parse signature: {}: {:?}", signature, e);
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            )
+        })?,
+        Err(e) => {
+            error!("Failed to decode signature hex: {}: {}", signature, e);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid signature format".to_string(),
+            ));
+        }
+    };
+
+    debug!("Got delete request for infohash: {}", infohash);
+
+    // Decode the infohash
+    let infohash_bytes: InfoHash = match hex::decode(infohash) {
+        Ok(bytes) if bytes.len() == 32 => bytes.try_into().unwrap(),
+        _ => {
+            error!("Invalid infohash format: {}", infohash);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Invalid infohash format".to_string(),
+            ));
+        }
+    };
+    debug!("Decoded infohash: {:?}", infohash_bytes);
+
+    // Create infohash value
+    // TODO(delete): Make it so that we pass something else other than a "dummy" infohash value for deletions
+    let infohash_value = InfohashValue {
+        infohash: infohash_bytes,
+        name: "dummy".to_string(), // Placeholder, not used in deletion
+        length: 0,                 // Placeholder, not used in deletion
+        chunk_size: 0,             // Placeholder, not used in deletion
+        chunk_count: 0,            // Placeholder, not used in deletion
+        owner_account_id: SqlAccountId(account_id),
+        creation_timestamp: chrono::Utc::now(), // placeholder, not used in deletion
+        signature,
+    };
+
+    // Get nonce from the database given the account_id
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let nonce = metadata::db::MetadataDB::get_nonce(
+        &command_sender,
+        infohash_value.clone().owner_account_id.0,
+    )
+    .await
+    .map_err(|e| {
+        error!("Failed to get nonce: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        )
+    })?;
+    debug!("Got nonce: {:?}", nonce);
+
+    // Delete the infohash
+    let command_sender = state.validator.metadatadb_sender.clone();
+    let result = match metadata::db::MetadataDB::delete_infohash(
+        &command_sender,
+        infohash_value.clone(),
+        &nonce,
+    )
+    .await
+    {
+        Ok(_) => {
+            info!("Successfully deleted infohash: {}", infohash);
+            Ok((StatusCode::OK, "File deleted successfully".to_string()))
+        }
+        Err(e) => {
+            error!("Failed to delete infohash: {}: {}", infohash, e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ))
+        }
+    };
+
+    result
 }
 
 async fn get_api_key(headers: &HeaderMap) -> Option<String> {

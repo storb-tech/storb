@@ -45,6 +45,7 @@ pub struct Validator {
     pub scores_state_file: String,
     pub crsqlite_file: String,
     pub api_keys_db: String,
+    pub sync_stake_threshold: u64,
     pub neuron: ValidatorNeuron,
     pub query: ValidatorQuery,
 }

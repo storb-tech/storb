@@ -7,12 +7,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
 use base::{LocalNodeInfo, NeuronError};
-use constants::SYNTHETIC_CHALLENGE_FREQUENCY;
+use chrono::TimeDelta;
+use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
 use opentelemetry::global;
@@ -25,9 +26,14 @@ use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info};
 use validator::{Validator, ValidatorConfig};
 
+use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
+use crate::metadata::sync::sync_metadata_db;
+use crate::routes::{delete_file, generate_nonce, get_crsqlite_changes};
+
 pub mod apikey;
 mod constants;
 mod download;
+mod metadata;
 mod middleware;
 mod quic;
 mod routes;
@@ -72,8 +78,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let neuron = validator.neuron.clone();
 
     let validator_for_sync = validator.clone();
+    let validator_for_metadatadb = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
+    let validator_for_nonce_cleanup = validator.clone();
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
 
     let sync_config = config.clone();
@@ -207,6 +215,19 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
+    // Spawn background metadata database syncing task with metadata::sync::sync_metadata_db
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(METADATADB_SYNC_FREQUENCY));
+        loop {
+            interval.tick().await;
+            info!("Starting MetadataDB sync task");
+            match sync_metadata_db(validator_for_metadatadb.clone()).await {
+                Ok(_) => info!("Metadata DB sync completed successfully"),
+                Err(err) => error!("Metadata DB sync failed: {}", err),
+            }
+        }
+    });
+
     let vali_clone = validator_for_backup.clone();
     // Spawn background backup task
     tokio::spawn(async move {
@@ -223,6 +244,35 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
+    // Add a periodic cleanup task for expired nonces
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(NONCE_CLEANUP_FREQUENCY));
+
+        loop {
+            interval.tick().await;
+            info!("Running nonce cleanup task");
+            // get the command sender from the validator
+            let command_sender = validator_for_nonce_cleanup.metadatadb_sender.clone();
+            match metadata::db::MetadataDB::cleanup_expired_nonces(
+                &command_sender,
+                TimeDelta::try_seconds(NONCE_EXPIRATION_TIME as i64)
+                    .expect("Failed to create TimeDelta for nonce expiration"),
+            )
+            .await
+            {
+                Ok(deleted_count) => {
+                    if deleted_count > 0 {
+                        info!("Cleaned up {} expired nonces", deleted_count);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to cleanup expired nonces: {:?}", e);
+                }
+            }
+        }
+    });
+
     let db_path = config.api_keys_db.clone();
     // Initialize API key manager
     let api_key_manager = Arc::new(RwLock::new(apikey::ApiKeyManager::new(db_path)?));
@@ -232,8 +282,9 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let protected_routes = Router::new()
         .route("/file", post(upload_file))
         .route("/file", get(download_file))
+        .route("/file", delete(delete_file))
+        .route("/nonce", post(generate_nonce))
         .route_layer(from_fn(require_api_key));
-
     // Create main router with all routes
     let app = Router::new()
         .merge(protected_routes) // Add protected routes
@@ -244,6 +295,10 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .layer(Extension(info_api_rate_limit_state))
         .layer(Extension(api_key_manager))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+        .route(
+            "/db_changes",
+            get(get_crsqlite_changes), // TODO(syncing): Add db change rate limiting middleware?
+        )
         .with_state(ValidatorState {
             validator: validator.clone(),
             local_node_info: validator.neuron.read().await.local_node_info.clone(),

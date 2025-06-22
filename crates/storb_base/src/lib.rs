@@ -20,7 +20,6 @@ use crate::version::Version;
 
 pub mod constants;
 pub mod memory_db;
-pub mod metadata;
 pub mod piece;
 pub mod piece_hash;
 pub mod sync;

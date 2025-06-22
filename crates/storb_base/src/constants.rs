@@ -12,9 +12,6 @@ pub const PIECE_LENGTH_OFFSET: f64 = 8.39;
 pub const CHUNK_K: usize = 4;
 pub const CHUNK_M: usize = 8;
 
-/// Buffer size for the metadatadb's MPSC channel.
-pub const DB_MPSC_BUFFER_SIZE: usize = 100;
-
 /// Timeout for HTTP requests to /info endpoint.
 pub const INFO_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 

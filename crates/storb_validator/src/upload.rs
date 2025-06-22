@@ -6,11 +6,14 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, InfoHash, PieceHash};
+use base::piece::{
+    encode_chunk, get_infohash_by_identity, piece_length, ChunkHash, InfoHash, PieceHash,
+};
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, NodeInfo, NodeUID};
+use base::{BaseNeuron, NodeInfo, NodeUID};
 use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
+use crabtensor::AccountId;
 use futures::{Stream, TryStreamExt};
 use quinn::Connection;
 use rand::rngs::StdRng;
@@ -22,6 +25,8 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
+use crate::metadata;
+use crate::metadata::models::SqlAccountId;
 use crate::quic::establish_miner_connections;
 use crate::scoring::ScoringSystem;
 use crate::utils::get_id_quic_uids;
@@ -167,6 +172,8 @@ impl<'a> UploadProcessor<'a> {
         stream: S,
         total_size: u64,
         filename: String,
+        account_id: AccountId,
+        signature: KeypairSignature,
     ) -> Result<String>
     where
         S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
@@ -191,6 +198,21 @@ impl<'a> UploadProcessor<'a> {
                 }
                 Ok(())
             })
+        };
+
+        // get nonce from MetadatDB
+        let nonce = match metadata::db::MetadataDB::get_nonce(
+            &self.state.validator.metadatadb_sender,
+            account_id.clone(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))
+        {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                error!("Failed to get nonce: {}", e);
+                return Err(e);
+            }
         };
 
         // Spawn consumer task
@@ -227,21 +249,25 @@ impl<'a> UploadProcessor<'a> {
 
         let (chunks_with_pieces, piece_hashes) = consumer_result??;
 
-        let infohash: InfoHash = get_infohash(piece_hashes);
+        let infohash: InfoHash = get_infohash_by_identity(piece_hashes, &account_id);
         // convert the infohash to a hex string for logging
         let infohash_str = hex::encode(infohash);
 
-        // Put tracker entry into local database
+        // Create signature for the infohash value with nonce
         let infohash_value = metadata::models::InfohashValue {
             infohash,
-            name: filename,
+            name: filename.clone(),
             length: total_size,
             chunk_size,
             chunk_count: chunks_with_pieces.len() as u64,
+            owner_account_id: SqlAccountId(account_id.clone()),
             creation_timestamp: now,
-            // TODO: use the signature of the data blob owner
-            // empty signature for now
-            signature: KeypairSignature::from_raw([0; 64]),
+            signature: KeypairSignature::from_raw([0; 64]), // Placeholder, will be signed below
+        };
+
+        let signed_infohash_value = metadata::models::InfohashValue {
+            signature,
+            ..infohash_value
         };
 
         // display chunks_with_pieces
@@ -256,7 +282,8 @@ impl<'a> UploadProcessor<'a> {
 
         metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
-            infohash_value,
+            signed_infohash_value,
+            &nonce,
             chunks_with_pieces,
         )
         .await

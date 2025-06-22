@@ -5,14 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context};
+use anyhow::anyhow;
 use base::constants::MIN_BANDWIDTH;
-use base::piece::{encode_chunk, get_infohash, piece_length, ChunkHash, Piece, PieceHash};
+use base::piece::{
+    encode_chunk, get_infohash_by_identity, piece_length, ChunkHash, Piece, PieceHash,
+};
 use base::utils::multiaddr_to_socketaddr;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{metadata, BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
+use base::{BaseNeuron, BaseNeuronConfig, NeuronError, NodeUID};
 use chrono::Utc;
-use crabtensor::sign::sign_message;
+use crabtensor::sign::{sign_message, KeypairSignature};
 use crabtensor::wallet::Signer;
 use crabtensor::weights::set_weights_payload;
 use crabtensor::weights::NormalizedWeight;
@@ -32,6 +34,8 @@ use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHALLENGE_MINER_NUM, MAX_SYNTH_CHUNK_SIZE,
     MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
+use crate::metadata;
+use crate::metadata::models::SqlAccountId;
 use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, ScoringSystem};
 use crate::upload::upload_piece_to_miner;
@@ -53,6 +57,7 @@ struct ChallengeResult {
 pub struct ValidatorConfig {
     pub scores_state_file: PathBuf,
     pub crsqlite_file: PathBuf,
+    pub sync_stake_threshold: u64,
     pub api_keys_db: PathBuf,
     pub neuron_config: BaseNeuronConfig,
     pub otel_api_key: String,
@@ -148,21 +153,44 @@ impl Validator {
             .iter()
             .map(|piece| PieceHash(blake3::hash(&piece.data).as_bytes().to_owned()))
             .collect::<Vec<_>>();
-        // TODO(infohash_data): we may want to remvoe the chunk and total size parameters
-        let infohash = get_infohash(piece_hashes);
-        let infohash_messsage = (infohash, 69420, encoded.chunk_size, 69420);
-        let infohash_message_bytes = bincode::serialize(&infohash_messsage)
-            .context("Failed to serialize infohash message")?;
+        // Get the validator's account ID for the infohash
+        let validator_account_id = signer.account_id().clone();
 
-        let infohash_sig = sign_message(&signer, infohash_message_bytes);
+        // Generate a nonce for this upload operation
+        let nonce = match metadata::db::MetadataDB::generate_nonce(
+            &self.metadatadb_sender,
+            validator_account_id.clone(),
+        )
+        .await
+        {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                error!("Failed to generate nonce: {}", e);
+                return Err(anyhow::anyhow!("Failed to generate nonce: {}", e).into());
+            }
+        };
+
+        let infohash = get_infohash_by_identity(piece_hashes, &validator_account_id);
+
         let infohash_value = metadata::models::InfohashValue {
             infohash,
             name: filename,
             length: 69420, // placeholder for total file size
             chunk_size: encoded.chunk_size,
             chunk_count: 69420, // placeholder for chunk count
+            owner_account_id: SqlAccountId(validator_account_id),
             creation_timestamp: now,
-            signature: infohash_sig,
+            // create dummy signature
+            signature: KeypairSignature::from_raw([0; 64]),
+        };
+
+        // Sign the infohash value (which now includes the nonce)
+        let message = infohash_value.get_signature_message(&nonce);
+        let signature = sign_message(&signer, message);
+
+        let infohash_value = metadata::models::InfohashValue {
+            signature,
+            ..infohash_value
         };
 
         for piece in encoded.pieces.clone() {
@@ -296,6 +324,7 @@ impl Validator {
         match metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
             infohash_value,
+            &nonce,
             chunks_with_pieces,
         )
         .await
