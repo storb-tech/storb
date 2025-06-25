@@ -460,11 +460,6 @@ impl Validator {
 
                         let mut scoring_system_guard = self.scoring_system.write().await;
 
-                        // // Increase the missed pieces count
-                        // scoring_system_guard.increment_missed_pieces(challenge_result.piece_hash, challenge_result.miner_uid).unwrap_or_else(|e| {
-                        //     error!("Failed to increment missed pieces: {}", e);
-                        // });
-
                         scoring_system_guard
                             .update_alpha_beta_db(
                                 challenge_result.miner_uid,

@@ -11,3 +11,6 @@ DROP TABLE IF EXISTS tracker_chunks;
 DROP TABLE IF EXISTS pieces;
 DROP TABLE IF EXISTS chunks;
 DROP TABLE IF EXISTS trackers;
+DROP TABLE IF EXISTS miner_pieces;
+DROP TABLE IF EXISTS pieces_to_repair;
+DROP TABLE IF EXISTS account_nonces;
