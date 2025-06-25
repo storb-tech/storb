@@ -3,7 +3,7 @@ use std::time::Duration;
 /// Buffer size for the metadatadb's MPSC channel.
 pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 
-pub const METADATADB_SYNC_FREQUENCY: u64 = 120; // 5 minutes
+pub const METADATADB_SYNC_FREQUENCY: u64 = 600; // 5 minutes
 
 pub const NONCE_CLEANUP_FREQUENCY: u64 = 240; // Every 2 minutes
 pub const NONCE_EXPIRATION_TIME: u64 = 3600; // 60 minutes
