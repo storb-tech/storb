@@ -23,7 +23,7 @@ use opentelemetry_sdk::Resource;
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use validator::{Validator, ValidatorConfig};
 
 use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
@@ -80,7 +80,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
     let validator_for_sync = validator.clone();
     let validator_for_metadatadb = validator.clone();
-    let validator_for_queue = validator.clone();
     let validator_for_repair = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
@@ -252,8 +251,8 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             interval.tick().await;
             info!("Running piece repair task");
             match repair::repair_pieces(validator_for_repair.clone()).await {
-                Ok(_) => debug!("Piece repair task completed successfully"),
-                Err(err) => error!("Piece repair task failed: {}", err),
+                Ok(_) => info!("Piece repair task completed successfully"),
+                Err(err) => warn!("Piece repair task failed: {}", err),
             }
         }
     });

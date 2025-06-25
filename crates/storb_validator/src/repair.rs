@@ -4,7 +4,7 @@ use anyhow::Context;
 use base::{constants::MIN_BANDWIDTH, NodeUID};
 use quinn::Connection;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::{download, metadata, upload, utils::get_id_quic_uids, validator::Validator};
 
@@ -91,7 +91,7 @@ pub async fn repair_pieces(validator: Arc<Validator>) -> Result<(), Box<dyn std:
             {
                 Some(node_info) => node_info.clone(),
                 None => {
-                    error!("Miner UID {} not found in address book.", miner_uid);
+                    warn!("Miner UID {} not found in address book.", miner_uid);
                     continue; // Skip this miner if not found
                 }
             };
@@ -229,7 +229,7 @@ pub async fn repair_pieces(validator: Arc<Validator>) -> Result<(), Box<dyn std:
 
         upload::log_connection_success(&miner_connections);
 
-        // Distribute to miners, if there ar not enough miners, then we automatically loop back around the sorted_miners
+        // Distribute to miners, if there are not enough miners, then we automatically loop back around the sorted_miners
         // TODP(repair): we should probably have a better way to handle this
         for &miner_uid in sorted_miners.iter().cycle().take(num_miners_to_distribute) {
             // Get the miner's node info
@@ -243,7 +243,7 @@ pub async fn repair_pieces(validator: Arc<Validator>) -> Result<(), Box<dyn std:
             {
                 Some(node_info) => node_info.clone(),
                 None => {
-                    error!("Miner UID {} not found in address book.", miner_uid);
+                    warn!("Miner UID {} not found in address book.", miner_uid);
                     continue; // Skip this miner if not found
                 }
             };
