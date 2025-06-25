@@ -40,12 +40,25 @@ CREATE TABLE IF NOT EXISTS pieces (
   ref_count    INTEGER   NOT NULL DEFAULT 1
 );
 
+-- A mapping of miner uids to pieces they store
+CREATE TABLE IF NOT EXISTS miner_pieces (
+  miner_uid    INTEGER   NOT NULL PRIMARY KEY,
+  piece_hash   BLOB      NOT NULL DEFAULT '',
+  UNIQUE (miner_uid, piece_hash)
+);
+
 -- Piece‑chunk mapping 
 CREATE TABLE IF NOT EXISTS chunk_pieces (
   chunk_hash  BLOB    NOT NULL DEFAULT '',
   piece_idx   INTEGER NOT NULL DEFAULT 0,
   piece_hash  BLOB    NOT NULL DEFAULT '',
   PRIMARY KEY (chunk_hash, piece_idx)
+);
+
+-- Table of pieces to repair, and the miner uids which failed to serve them --
+CREATE TABLE pieces_to_repair (
+    piece_hash BLOB PRIMARY KEY, -- piece hash
+    miners TEXT NOT NULL DEFAULT '' -- JSON array of miner IDs who failed to serve the piece
 );
 
 -- Piece‑repair history
@@ -89,3 +102,6 @@ CREATE INDEX IF NOT EXISTS idx_infohashes_by_owner ON infohashes(owner_account_i
 CREATE INDEX IF NOT EXISTS idx_piece_repair_by_piece ON piece_repair_history(piece_hash);
 CREATE INDEX IF NOT EXISTS idx_chunk_challenge_by_chunk ON chunk_challenge_history(chunk_hash);
 CREATE INDEX IF NOT EXISTS idx_account_nonces_timestamp ON account_nonces(timestamp);
+CREATE INDEX IF NOT EXISTS idx_miner_pieces_by_miner ON miner_pieces(miner_uid);
+CREATE INDEX IF NOT EXISTS idx_miner_pieces_by_piece ON miner_pieces(piece_hash);
+CREATE INDEX IF NOT EXISTS idx_pieces_to_repair ON pieces_to_repair(piece_hash);

@@ -10,7 +10,7 @@ use crabtensor::{sign::KeypairSignature, AccountId};
 use r2d2::Pool;
 use r2d2_sqlite::{rusqlite::params, SqliteConnectionManager};
 use rand::RngCore;
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use subxt::ext::codec::Compact;
 use tokio::sync::mpsc;
 use tracing::{debug, error};
@@ -23,7 +23,9 @@ use crate::{
     metadata::models::{CrSqliteChanges, CrSqliteValue, PieceValue, SqlAccountId},
 };
 
-#[derive(Debug)]
+// Add type alias for the complex return type
+pub type PiecesForRepairResult = Result<Vec<(PieceHash, Vec<NodeUID>)>, MetadataDBError>;
+
 pub enum MetadataDBError {
     Database(rusqlite::Error),
     Pool(r2d2::Error),
@@ -35,6 +37,25 @@ pub enum MetadataDBError {
     InfohashNotFound,
     InvalidNonce,
     NonceExpired,
+}
+
+// add impl for converting MetadataDBError into a Box<dyn std::error::Error>
+impl std::error::Error for MetadataDBError {}
+impl std::fmt::Debug for MetadataDBError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetadataDBError::Database(e) => write!(f, "Database error: {:?}", e),
+            MetadataDBError::Pool(e) => write!(f, "Pool error: {:?}", e),
+            MetadataDBError::InvalidPath(path) => write!(f, "Invalid path: {}", path),
+            MetadataDBError::MissingTable(table) => write!(f, "Missing table: {}", table),
+            MetadataDBError::ExtensionLoad(msg) => write!(f, "Extension load error: {}", msg),
+            MetadataDBError::InvalidSignature => write!(f, "Invalid signature"),
+            MetadataDBError::UnauthorizedAccess => write!(f, "Unauthorized access"),
+            MetadataDBError::InfohashNotFound => write!(f, "Infohash not found"),
+            MetadataDBError::InvalidNonce => write!(f, "Invalid or expired nonce"),
+            MetadataDBError::NonceExpired => write!(f, "Nonce has expired"),
+        }
+    }
 }
 
 impl std::fmt::Display for MetadataDBError {
@@ -89,6 +110,13 @@ pub enum MetadataDBCommand {
     },
     GetRandomChunk {
         response_sender: mpsc::Sender<Result<ChunkValue, MetadataDBError>>,
+    },
+    QueuePiecesForRepair {
+        miner_uid: NodeUID,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    },
+    GetPiecesForRepair {
+        response_sender: mpsc::Sender<PiecesForRepairResult>,
     },
     InsertPieceRepairHistory {
         piece_repair_history: PieceChallengeHistory,
@@ -495,6 +523,213 @@ impl MetadataDB {
                 site_id_exclude,
                 response_sender,
             })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    /// Handles moving the pieces belonging to a miner from miner_pieces to pieces_to_repair
+    pub async fn handle_queue_pieces_for_repair(
+        &self,
+        miner_uid: NodeUID,
+        response_sender: mpsc::Sender<Result<(), MetadataDBError>>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let tx = conn.unchecked_transaction()?;
+
+            // Collect all piece hashes first
+            let pieces_to_repair = {
+                let mut stmt =
+                    tx.prepare("SELECT piece_hash FROM miner_pieces WHERE miner_uid = ?1")?;
+                let mut rows = stmt.query(params![miner_uid])?;
+                let mut pieces = Vec::new();
+
+                while let Some(row) = rows.next()? {
+                    let piece_hash: PieceHash = row.get(0)?;
+                    pieces.push((piece_hash, miner_uid));
+                }
+                pieces
+            }; // stmt and rows are dropped here automatically
+
+            // Insert the pieces into pieces_to_repair
+            // If the entry already exists, simply update the array of miners in the row
+            for (piece_hash, miner) in pieces_to_repair {
+                // Check if the piece already exists in pieces_to_repair
+                let existing_miners: Option<String> = {
+                    let mut check_stmt =
+                        tx.prepare("SELECT miners FROM pieces_to_repair WHERE piece_hash = ?1")?;
+                    check_stmt
+                        .query_row(params![piece_hash], |row| row.get(0))
+                        .optional()?
+                }; // check_stmt is dropped here automatically
+
+                if let Some(existing_miners) = existing_miners {
+                    // Parse existing miners from JSON array
+                    let mut miners: Vec<NodeUID> =
+                        serde_json::from_str(&existing_miners).map_err(|e| {
+                            MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Text,
+                                Box::new(e),
+                            ))
+                        })?;
+
+                    // Add the new miner if not already present
+                    if !miners.contains(&miner) {
+                        miners.push(miner);
+                    }
+
+                    // Update the existing entry
+                    tx.execute(
+                        "UPDATE pieces_to_repair SET miners = ?1 WHERE piece_hash = ?2",
+                        params![
+                            serde_json::to_string(&miners).map_err(|e| {
+                                MetadataDBError::Database(
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        0,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(e),
+                                    ),
+                                )
+                            })?,
+                            piece_hash
+                        ],
+                    )?;
+                } else {
+                    // Insert a new entry
+                    tx.execute(
+                        "INSERT INTO pieces_to_repair (piece_hash, miners) VALUES (?1, ?2)",
+                        params![
+                            piece_hash,
+                            serde_json::to_string(&vec![miner]).map_err(|e| {
+                                MetadataDBError::Database(
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        0,
+                                        rusqlite::types::Type::Text,
+                                        Box::new(e),
+                                    ),
+                                )
+                            })?
+                        ],
+                    )?;
+                }
+            }
+
+            // Delete the pieces from miner_pieces
+            tx.execute(
+                "DELETE FROM miner_pieces WHERE miner_uid = ?1",
+                params![miner_uid],
+            )?;
+
+            // Update the entries in the pieces table to remove the miner from its "miners" array
+            tx.execute(
+                "UPDATE pieces SET miners = json_remove(miners, json_each.value) FROM json_each(miners) WHERE miner_uid = ?1",
+                params![miner_uid],
+            )?;
+
+            tx.commit()?;
+
+            Ok::<(), MetadataDBError>(())
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(())).await.is_err() {
+            error!("Failed to send queue pieces for repair response");
+        }
+
+        Ok(())
+    }
+
+    /// Moves the pieces belonging to a miner from miner_pieces to pieces_to_repair
+    pub async fn queue_pieces_for_repair(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+        miner_uid: NodeUID,
+    ) -> Result<(), MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<Result<(), MetadataDBError>>(1);
+
+        // Send the command to queue pieces for repair
+        command_sender
+            .send(MetadataDBCommand::QueuePiecesForRepair {
+                miner_uid,
+                response_sender,
+            })
+            .await
+            .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
+
+        // Wait for the response
+        match response_receiver.recv().await {
+            Some(result) => result,
+            None => Err(MetadataDBError::Database(
+                rusqlite::Error::ExecuteReturnedResults,
+            )),
+        }
+    }
+
+    // returns piece hashes that need repairing and the miners that lost the pieces
+    pub async fn handle_get_pieces_for_repair(
+        &self,
+        response_sender: mpsc::Sender<PiecesForRepairResult>,
+    ) -> Result<(), MetadataDBError> {
+        let pool = Arc::clone(&self.pool);
+
+        let pieces_for_repair = tokio::task::spawn_blocking(move || {
+            let conn = pool.get()?;
+            let mut stmt = conn.prepare("SELECT piece_hash, miners FROM pieces_to_repair")?;
+
+            let mut rows = stmt.query([])?;
+            let mut results = Vec::new();
+            while let Some(row) = rows.next()? {
+                let piece_hash: PieceHash = row.get(0)?;
+                let miners: String = row.get(1)?;
+
+                // Parse miners from JSON array
+                let miners: Vec<NodeUID> = serde_json::from_str(&miners).map_err(|e| {
+                    MetadataDBError::Database(rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    ))
+                })?;
+
+                results.push((piece_hash, miners));
+            }
+            Ok::<Vec<(PieceHash, Vec<NodeUID>)>, MetadataDBError>(results)
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+
+        // Send the result through the response channel
+        if response_sender.send(Ok(pieces_for_repair)).await.is_err() {
+            error!("Failed to send pieces for repair response");
+        }
+
+        Ok(())
+    }
+
+    pub async fn get_pieces_for_repair(
+        command_sender: &mpsc::Sender<MetadataDBCommand>,
+    ) -> Result<Vec<(PieceHash, Vec<NodeUID>)>, MetadataDBError> {
+        // Create a channel for the response
+        let (response_sender, mut response_receiver) =
+            mpsc::channel::<PiecesForRepairResult>(1);
+
+        // Send the command to get pieces for repair
+        command_sender
+            .send(MetadataDBCommand::GetPiecesForRepair { response_sender })
             .await
             .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))?;
 
@@ -1062,6 +1297,22 @@ impl MetadataDB {
                                 "UPDATE pieces SET miners = ?1, ref_count = ref_count + 1 WHERE piece_hash = ?2",
                                 params![updated_miners, piece.piece_hash],
                             ).map_err(MetadataDBError::Database)?;
+
+                            // Update miner_pieces
+                            for miner in &piece.miners {
+                                match tx.execute(
+                                    "INSERT INTO miner_pieces (miner_uid, piece_hash) VALUES (?1, ?2)",
+                                    params![miner.0, piece.piece_hash],
+                                ) {
+                                    Ok(_) => {}
+                                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                                        // Ignore if miner-piece mapping already exists
+                                        debug!("Miner {} for piece {} already exists, skipping insert", miner.0, hex::encode(piece.piece_hash));
+                                    }
+                                    Err(e) => return Err(MetadataDBError::Database(e)),
+                                }
+                            }
+
                         }
                         Err(e) => return Err(MetadataDBError::Database(e)),
                     }
@@ -1604,7 +1855,9 @@ impl MetadataDB {
             })?;
 
             Ok::<PieceChallengeHistory, MetadataDBError>(piece_challenge_history)
-        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send result through response channel
         if response_sender.send(Ok(result)).await.is_err() {
@@ -1699,7 +1952,9 @@ impl MetadataDB {
                 })?;
 
             Ok::<ChunkChallengeHistory, MetadataDBError>(chunk_challenge_history)
-        }).await.map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
+        })
+        .await
+        .map_err(|_| MetadataDBError::Database(rusqlite::Error::ExecuteReturnedResults))??;
 
         // Send result through response channel
         if response_sender.send(Ok(result)).await.is_err() {
@@ -2052,6 +2307,24 @@ impl MetadataDB {
                     debug!("Handling request for random chunk");
                     if let Err(e) = self.handle_get_random_chunk(response_sender).await {
                         error!("Error retrieving random chunk: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::QueuePiecesForRepair {
+                    miner_uid,
+                    response_sender,
+                } => {
+                    debug!("Handling queue pieces for repair request");
+                    if let Err(e) = self
+                        .handle_queue_pieces_for_repair(miner_uid, response_sender)
+                        .await
+                    {
+                        error!("Error queuing pieces for repair: {:?}", e);
+                    }
+                }
+                MetadataDBCommand::GetPiecesForRepair { response_sender } => {
+                    debug!("Handling get pieces for repair request");
+                    if let Err(e) = self.handle_get_pieces_for_repair(response_sender).await {
+                        error!("Error getting pieces for repair: {:?}", e);
                     }
                 }
                 MetadataDBCommand::InsertPieceRepairHistory {
@@ -2783,7 +3056,7 @@ mod tests {
             &command_sender,
             infohash_value.clone(),
             &nonce,
-            vec![(chunk, vec![piece])],
+            vec![(chunk.clone(), vec![piece])],
         )
         .await
         .expect("Failed to insert object");
@@ -3148,7 +3421,7 @@ mod tests {
         };
 
         let piece3 = PieceValue {
-            piece_hash: PieceHash([3u8; 32]), // SAME piece hash again
+            piece_hash: PieceHash([3u8; 32]), // SAME piece hash as piece1
             piece_size: 256,
             piece_type: PieceType::Data,
             miners: vec![Compact(2), Compact(3)], // Miners that already exist

@@ -15,6 +15,7 @@ use chrono::Utc;
 use crabtensor::sign::{sign_message, KeypairSignature};
 use crabtensor::AccountId;
 use futures::{Stream, TryStreamExt};
+use libp2p::Multiaddr;
 use quinn::Connection;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -123,42 +124,65 @@ pub async fn upload_piece_data(
     Ok(hash)
 }
 
+/// Log the initial connection attempt details
+pub fn log_connection_attempt(quic_addresses: &[Multiaddr], miner_uids: &[NodeUID]) {
+    info!(
+        "Attempting to establish connections with {} miners",
+        quic_addresses.len()
+    );
+    info!("Miner UIDs: {:?}", miner_uids);
+    info!("Quic addresses: {:?}", quic_addresses);
+}
+
+/// Establish connections and validate minimum requirements
+pub async fn establish_and_validate_connections(
+    quic_addresses: Vec<Multiaddr>,
+) -> Result<Vec<(SocketAddr, Connection)>> {
+    // TODO: do we want to establish connections with all miners?
+    let miner_connections = establish_miner_connections(quic_addresses)
+        .await
+        .context("Failed to establish miner connections")?;
+
+    validate_connection_count(&miner_connections)?;
+
+    Ok(miner_connections)
+}
+
+/// Validate that we have sufficient connections
+pub fn validate_connection_count(connections: &[(SocketAddr, Connection)]) -> Result<()> {
+    if connections.is_empty() {
+        bail!("Failed to establish connections with any miners");
+    }
+
+    if connections.len() < MIN_REQUIRED_MINERS {
+        warn!(
+            "Connected to fewer miners than recommended: {}",
+            connections.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Log successful connection establishment
+pub fn log_connection_success(miner_connections: &[(SocketAddr, Connection)]) {
+    info!(
+        "Successfully connected to {} miners",
+        miner_connections.len()
+    );
+}
+
 impl<'a> UploadProcessor<'a> {
     /// Create a new instance of the UploadProcessor.
     pub(crate) async fn new(state: &'a ValidatorState) -> Result<Self> {
         let (_, quic_addresses, miner_uids) = get_id_quic_uids(state.validator.clone()).await;
 
-        info!(
-            "Attempting to establish connections with {} miners",
-            quic_addresses.len()
-        );
-        info!("Miner UIDs: {:?}", miner_uids);
-        info!("Quic addresses: {:?}", quic_addresses);
+        log_connection_attempt(&quic_addresses, &miner_uids);
 
-        // Establish QUIC connections with miners
-        // TODO: do we want to establish connections with all miners?
-        let miner_connections = match establish_miner_connections(quic_addresses).await {
-            Ok(connections) => {
-                if connections.is_empty() {
-                    bail!("Failed to establish connections with any miners");
-                }
-                if connections.len() < MIN_REQUIRED_MINERS {
-                    warn!(
-                        "Connected to fewer miners than recommended: {}",
-                        connections.len()
-                    );
-                }
-                connections
-            }
-            Err(e) => {
-                bail!("Failed to establish miner connections: {e}");
-            }
-        };
+        let miner_connections = establish_and_validate_connections(quic_addresses).await?;
 
-        info!(
-            "Successfully connected to {} miners",
-            miner_connections.len()
-        );
+        log_connection_success(&miner_connections);
+
         Ok(Self {
             miner_uids,
             miner_connections,
