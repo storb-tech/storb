@@ -4,7 +4,7 @@ members = ["crates/*"]
 default-members = ["crates/storb_cli"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.2.0"
 description = "An object storage subnet on the Bittensor network"
 edition = "2021"
 authors = ["Storb Technologies Ltd"]
