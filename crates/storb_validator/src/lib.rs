@@ -23,7 +23,7 @@ use opentelemetry_sdk::Resource;
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use validator::{Validator, ValidatorConfig};
 
 use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
@@ -36,6 +36,7 @@ mod download;
 mod metadata;
 mod middleware;
 mod quic;
+mod repair;
 mod routes;
 mod scoring;
 mod signature;
@@ -79,6 +80,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
     let validator_for_sync = validator.clone();
     let validator_for_metadatadb = validator.clone();
+    let validator_for_repair = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
     let validator_for_nonce_cleanup = validator.clone();
@@ -150,7 +152,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                         scoring_system
                             .write()
                             .await
-                            .update_scores(neuron_count, uids)
+                            .update_scores(neuron_count, uids.clone())
                             .await;
 
                         let ema_scores =
@@ -167,6 +169,19 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                             Ok(_) => info!("Successfully set weights on chain"),
                             Err(e) => error!("Failed to set weights on chain: {}", e),
                         };
+
+                        // Queue pieces for the deregistered uids for repair
+                        for uid in uids.iter() {
+                            match metadata::db::MetadataDB::queue_pieces_for_repair(
+                                &local_validator.metadatadb_sender,
+                                *uid,
+                            )
+                            .await
+                            {
+                                Ok(_) => info!("Queued pieces for UID {} for repair", uid),
+                                Err(e) => error!("Failed to queue pieces for UID {}: {}", uid, e),
+                            };
+                        }
                     }
                     Err(err) => {
                         error!("Failed to sync metagraph: {}", err);
@@ -224,6 +239,20 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
             match sync_metadata_db(validator_for_metadatadb.clone()).await {
                 Ok(_) => info!("Metadata DB sync completed successfully"),
                 Err(err) => error!("Metadata DB sync failed: {}", err),
+            }
+        }
+    });
+
+    // Spawn background piece repair task
+    tokio::spawn(async move {
+        let mut interval: time::Interval =
+            interval(Duration::from_secs(constants::PIECE_REPAIR_FREQUENCY));
+        loop {
+            interval.tick().await;
+            info!("Running piece repair task");
+            match repair::repair_pieces(validator_for_repair.clone()).await {
+                Ok(_) => info!("Piece repair task completed successfully"),
+                Err(err) => warn!("Piece repair task failed: {}", err),
             }
         }
     });

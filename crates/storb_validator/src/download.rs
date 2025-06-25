@@ -8,8 +8,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use base::constants::MIN_BANDWIDTH;
+use base::piece::PieceHash;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
-use base::{AddressBook, BaseNeuron};
+use base::{AddressBook, BaseNeuron, NodeInfo};
 use crabtensor::sign::sign_message;
 use futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -24,6 +25,139 @@ use crate::ValidatorState;
 const MPSC_BUFFER_SIZE: usize = 100;
 // TODO: Put this in config or just base it on hardware threads
 const THREAD_COUNT: usize = 10;
+
+/// Helper function to update scoring system on failure
+pub async fn update_scoring_on_failure(
+    scoring_system: Arc<RwLock<ScoringSystem>>,
+    miner_uid: u16,
+    error_msg: &str,
+) -> Result<()> {
+    let mut scoring_system_rw = scoring_system.write().await;
+    scoring_system_rw
+        .update_alpha_beta_db(miner_uid, 1.0, false)
+        .await
+        .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
+    drop(scoring_system_rw);
+    error!("{}", error_msg);
+    Ok(())
+}
+
+/// Helper function to get piece from miner with complete request handling
+pub async fn get_piece_from_miner(
+    req_client: reqwest::Client,
+    node_info: &NodeInfo,
+    piece_hash: PieceHash,
+    signer: Arc<subxt::tx::PairSigner<subxt::SubstrateConfig, subxt::ext::sp_core::sr25519::Pair>>,
+    vali_uid: u16,
+    scoring_system: Arc<RwLock<ScoringSystem>>,
+) -> Result<reqwest::Response> {
+    let miner_uid = node_info.neuron_info.uid;
+
+    // Create verification message and payload
+    let message = VerificationMessage {
+        netuid: node_info.neuron_info.netuid,
+        miner: KeyRegistrationInfo {
+            uid: miner_uid,
+            account_id: node_info.neuron_info.hotkey.clone(),
+        },
+        validator: KeyRegistrationInfo {
+            uid: vali_uid,
+            account_id: signer.account_id().clone(),
+        },
+    };
+    let signature = sign_message(&signer, &message);
+    let payload = HandshakePayload { signature, message };
+    let payload_bytes = bincode::serialize(&payload)?;
+
+    // Create URL
+    let url = match node_info
+        .http_address
+        .as_ref()
+        .and_then(base::utils::multiaddr_to_socketaddr)
+        .map(|socket_addr| {
+            format!(
+                "http://{}:{}/piece?piecehash={}&handshake={}",
+                socket_addr.ip(),
+                socket_addr.port(),
+                hex::encode(piece_hash),
+                hex::encode(payload_bytes)
+            )
+        }) {
+        Some(url) => url,
+        None => {
+            update_scoring_on_failure(
+                scoring_system,
+                miner_uid,
+                &format!("Miner {:?} has no valid HTTP address", miner_uid),
+            )
+            .await?;
+            return Err(anyhow!("Miner has no valid HTTP address"));
+        }
+    };
+
+    // Make HTTP request
+    match req_client.get(&url).send().await {
+        Ok(response) => {
+            trace!("Node response from {:?}: {:?}", miner_uid, response);
+            Ok(response)
+        }
+        Err(e) => {
+            update_scoring_on_failure(
+                scoring_system,
+                miner_uid,
+                &format!("Failed to send request to miner {:?}: {}", miner_uid, e),
+            )
+            .await?;
+            Err(anyhow!("Failed to send request to miner: {}", e))
+        }
+    }
+}
+
+/// Helper function to process response and extract piece data
+pub async fn process_piece_response(
+    response: reqwest::Response,
+    piece_hash: PieceHash,
+    miner_uid: u16,
+) -> Result<Vec<u8>> {
+    let response_status = response.status();
+    let body_bytes = response
+        .bytes()
+        .await
+        .context("Failed to read response body")?;
+
+    debug!(
+        "Raw body preview from miner {:?}: {:?}",
+        miner_uid,
+        &body_bytes[..std::cmp::min(100, body_bytes.len())]
+    );
+    debug!(
+        "Utf8 body preview from miner {:?}: {:?}",
+        miner_uid,
+        String::from_utf8_lossy(&body_bytes[..std::cmp::min(100, body_bytes.len())])
+    );
+
+    let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
+        .context("Failed to deserialize piece response")?;
+
+    // Check status of response
+    if response_status != StatusCode::OK {
+        let err_msg = bincode::deserialize::<String>(&piece_data[..])
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        bail!(
+            "Response returned with status code {}: {}",
+            response_status,
+            err_msg
+        );
+    }
+
+    // Verify the integrity of the piece_data using Blake3.
+    let computed_hash = blake3::hash(&piece_data);
+    if computed_hash.as_bytes() != piece_hash.as_ref() {
+        bail!("Hash mismatch for miner {:?}", miner_uid);
+    }
+
+    Ok(piece_data)
+}
 
 /// Processes download streams and retrieves file pieces from available miners.
 pub(crate) struct DownloadProcessor {
@@ -63,7 +197,7 @@ impl DownloadProcessor {
         let mut requests = FuturesUnordered::new();
 
         let base_neuron_guard = validator_base_neuron.read().await;
-        let signer = base_neuron_guard.signer.clone();
+        let signer = Arc::new(base_neuron_guard.signer.clone());
 
         let vali_uid = base_neuron_guard
             .local_node_info
@@ -87,15 +221,14 @@ impl DownloadProcessor {
             drop(scoring_system_clone);
 
             let scoring_system = Arc::clone(&scoring_system);
-
-            let signer = Arc::new(signer.clone());
+            let signer = signer.clone();
 
             // Each provider query is executed in its own async block.
-            // The provider variable is moved into the block for logging purposes.
             let timeout_duration = Duration::from_secs_f64(size / min_bandwidth);
             let fut = async move {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
+
                 let req_client = match reqwest::Client::builder().timeout(timeout_duration).build()
                 {
                     Ok(client) => client,
@@ -114,89 +247,24 @@ impl DownloadProcessor {
                     }
                 };
 
-                let message = VerificationMessage {
-                    netuid: node_info.neuron_info.netuid,
-                    miner: KeyRegistrationInfo {
-                        uid: miner_uid,
-                        account_id: node_info.neuron_info.hotkey.clone(),
-                    },
-                    validator: KeyRegistrationInfo {
-                        uid: vali_uid,
-                        account_id: signer.clone().account_id().clone(),
-                    },
-                };
-                let signature = sign_message(&signer.clone(), &message);
-                let payload = HandshakePayload { signature, message };
-                let payload_bytes = bincode::serialize(&payload)?;
-
                 // log timeout
                 debug!(
                     "Timeout duration for download acknowledgement: {} milliseconds",
                     timeout_duration.as_millis()
                 );
 
-                let url = match node_info
-                    .http_address
-                    .as_ref()
-                    .and_then(base::utils::multiaddr_to_socketaddr)
-                    .map(|socket_addr| {
-                        format!(
-                            "http://{}:{}/piece?piecehash={}&handshake={}",
-                            socket_addr.ip(),
-                            socket_addr.port(),
-                            hex::encode(piece_hash),
-                            hex::encode(payload_bytes)
-                        )
-                    }) {
-                    Some(url) => url,
-                    None => {
-                        let mut scoring_system_rw = scoring_system.write().await;
-                        scoring_system_rw
-                            .update_alpha_beta_db(miner_uid, 1.0, false)
-                            .await
-                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
-                        drop(scoring_system_rw);
-                        error!("Miner {:?} has no valid HTTP address", miner_uid);
-                        return Err(anyhow!("Miner has no valid HTTP address"));
-                    }
-                };
-
-                let node_response = match req_client.get(&url).send().await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        let mut scoring_system_rw = scoring_system.write().await;
-                        scoring_system_rw
-                            .update_alpha_beta_db(miner_uid, 1.0, false)
-                            .await
-                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
-                        drop(scoring_system_rw);
-                        error!("Failed to send request to miner {:?}: {}", miner_uid, e);
-                        return Err(anyhow!("Failed to send request to miner: {}", e));
-                    }
-                };
-
-                trace!("Node response from {:?}: {:?}", miner_uid, node_response);
-
-                let response_status = node_response.status();
-                let body_bytes = node_response
-                    .bytes()
-                    .await
-                    .context("Failed to read response body")?;
-                debug!(
-                    "Raw body preview from miner {:?}: {:?}",
-                    miner_uid,
-                    // show first few as readable bytes
-                    &body_bytes[..std::cmp::min(100, body_bytes.len())]
-                );
-                debug!(
-                    "Utf8 body preview from miner {:?}: {:?}",
-                    miner_uid,
-                    // show first few as readable bytes
-                    String::from_utf8_lossy(&body_bytes[..std::cmp::min(100, body_bytes.len())])
-                );
+                let node_response = get_piece_from_miner(
+                    req_client,
+                    &node_info,
+                    piece_hash,
+                    signer,
+                    vali_uid,
+                    scoring_system.clone(),
+                )
+                .await?;
 
                 let piece_data =
-                    match base::piece::deserialise_piece_response(&body_bytes, &piece_hash) {
+                    match process_piece_response(node_response, piece_hash, miner_uid).await {
                         Ok(data) => data,
                         Err(e) => {
                             let mut scoring_system_rw = scoring_system.write().await;
@@ -205,37 +273,9 @@ impl DownloadProcessor {
                                 .await
                                 .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                             drop(scoring_system_rw);
-                            bail!("Failed to deserialize piece response: {}", e);
+                            return Err(e);
                         }
                     };
-
-                // Check status of response
-                if response_status != StatusCode::OK {
-                    let err_msg = bincode::deserialize::<String>(&piece_data[..])?;
-                    let mut scoring_system_rw = scoring_system.write().await;
-                    scoring_system_rw
-                        .update_alpha_beta_db(miner_uid, 1.0, false)
-                        .await
-                        .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
-                    drop(scoring_system_rw);
-                    bail!(
-                        "Response returned with status code {}: {}",
-                        response_status,
-                        err_msg
-                    );
-                }
-
-                // Verify the integrity of the piece_data using Blake3.
-                let computed_hash = blake3::hash(&piece_data);
-                if computed_hash.as_bytes() != piece_hash.as_ref() {
-                    let mut scoring_system_rw = scoring_system.write().await;
-                    scoring_system_rw
-                        .update_alpha_beta_db(miner_uid, 1.0, false)
-                        .await
-                        .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
-                    drop(scoring_system_rw);
-                    bail!("Hash mismatch for miner {:?}", miner_uid);
-                }
 
                 // Update the scoring system with the successful retrieval.
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
