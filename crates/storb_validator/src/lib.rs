@@ -80,6 +80,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
 
     let validator_for_sync = validator.clone();
     let validator_for_metadatadb = validator.clone();
+    let validator_for_queue = validator.clone();
     let validator_for_repair = validator.clone();
     let validator_for_challenges = validator.clone();
     let validator_for_backup = validator.clone();
@@ -243,11 +244,28 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         }
     });
 
+    // Spawn background task to queue piece repair for miner uid 4 every 90 seconds
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(90));
+        loop {
+            interval.tick().await;
+            info!("Queueing piece repair for miner uid 4");
+            match metadata::db::MetadataDB::queue_pieces_for_repair(
+                &validator_for_queue.metadatadb_sender,
+                4, // TODO: should we make this configurable?
+            )
+            .await
+            {
+                Ok(_) => info!("Successfully queued pieces for miner uid 4 for repair"),
+                Err(e) => error!("Failed to queue pieces for miner uid 4: {}", e),
+            }
+        }
+    });
+
     // Spawn background piece repair task
     tokio::spawn(async move {
-        let mut interval = interval(Duration::from_secs(
-            constants::PIECE_REPAIR_FREQUENCY
-        ));
+        let mut interval: time::Interval =
+            interval(Duration::from_secs(constants::PIECE_REPAIR_FREQUENCY));
         loop {
             interval.tick().await;
             info!("Running piece repair task");

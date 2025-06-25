@@ -139,21 +139,25 @@ pub async fn process_piece_response(
     let piece_data = base::piece::deserialise_piece_response(&body_bytes, &piece_hash)
         .context("Failed to deserialize piece response")?;
 
-        // Check status of response
-        if response_status != StatusCode::OK {
-            let err_msg = bincode::deserialize::<String>(&piece_data[..])
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            bail!("Response returned with status code {}: {}", response_status, err_msg);
-        }
-
-        // Verify the integrity of the piece_data using Blake3.
-        let computed_hash = blake3::hash(&piece_data);
-        if computed_hash.as_bytes() != piece_hash.as_ref() {
-            bail!("Hash mismatch for miner {:?}", miner_uid);
-        }
-
-        Ok(piece_data)
+    // Check status of response
+    if response_status != StatusCode::OK {
+        let err_msg = bincode::deserialize::<String>(&piece_data[..])
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        bail!(
+            "Response returned with status code {}: {}",
+            response_status,
+            err_msg
+        );
     }
+
+    // Verify the integrity of the piece_data using Blake3.
+    let computed_hash = blake3::hash(&piece_data);
+    if computed_hash.as_bytes() != piece_hash.as_ref() {
+        bail!("Hash mismatch for miner {:?}", miner_uid);
+    }
+
+    Ok(piece_data)
+}
 
 /// Processes download streams and retrieves file pieces from available miners.
 pub(crate) struct DownloadProcessor {
@@ -225,7 +229,8 @@ impl DownloadProcessor {
                 let miner_uid = node_info.neuron_info.uid;
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = $1", [&miner_uid])?;
 
-                let req_client = match reqwest::Client::builder().timeout(timeout_duration).build() {
+                let req_client = match reqwest::Client::builder().timeout(timeout_duration).build()
+                {
                     Ok(client) => client,
                     Err(e) => {
                         let mut scoring_system_rw = scoring_system.write().await;
@@ -234,7 +239,10 @@ impl DownloadProcessor {
                             .await
                             .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                         drop(scoring_system_rw);
-                        error!("Failed to create HTTP client for miner {:?}: {}", miner_uid, e);
+                        error!(
+                            "Failed to create HTTP client for miner {:?}: {}",
+                            miner_uid, e
+                        );
                         return Err(anyhow!("Failed to create HTTP client: {}", e));
                     }
                 };
@@ -255,18 +263,19 @@ impl DownloadProcessor {
                 )
                 .await?;
 
-                let piece_data = match process_piece_response(node_response, piece_hash, miner_uid).await {
-                    Ok(data) => data,
-                    Err(e) => {
-                        let mut scoring_system_rw = scoring_system.write().await;
-                        scoring_system_rw
-                            .update_alpha_beta_db(miner_uid, 1.0, false)
-                            .await
-                            .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
-                        drop(scoring_system_rw);
-                        return Err(e);
-                    }
-                };
+                let piece_data =
+                    match process_piece_response(node_response, piece_hash, miner_uid).await {
+                        Ok(data) => data,
+                        Err(e) => {
+                            let mut scoring_system_rw = scoring_system.write().await;
+                            scoring_system_rw
+                                .update_alpha_beta_db(miner_uid, 1.0, false)
+                                .await
+                                .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
+                            drop(scoring_system_rw);
+                            return Err(e);
+                        }
+                    };
 
                 // Update the scoring system with the successful retrieval.
                 db.conn.lock().await.execute("UPDATE miner_stats SET retrieval_successes = retrieval_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;

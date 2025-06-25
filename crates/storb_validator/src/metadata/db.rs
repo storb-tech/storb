@@ -633,7 +633,7 @@ impl MetadataDB {
 
             // Update the entries in the pieces table to remove the miner from its "miners" array
             tx.execute(
-                "UPDATE pieces SET miners = json_remove(miners, json_each.value) FROM json_each(miners) WHERE miner_uid = ?1",
+                "UPDATE pieces SET miners = json_remove(miners, uid.fullkey) FROM json_each(miners) as uid WHERE uid.value = ?1",
                 params![miner_uid],
             )?;
 
@@ -724,8 +724,7 @@ impl MetadataDB {
         command_sender: &mpsc::Sender<MetadataDBCommand>,
     ) -> Result<Vec<(PieceHash, Vec<NodeUID>)>, MetadataDBError> {
         // Create a channel for the response
-        let (response_sender, mut response_receiver) =
-            mpsc::channel::<PiecesForRepairResult>(1);
+        let (response_sender, mut response_receiver) = mpsc::channel::<PiecesForRepairResult>(1);
 
         // Send the command to get pieces for repair
         command_sender
@@ -1257,6 +1256,23 @@ impl MetadataDB {
                     match insert_result {
                         Ok(_) => {
                             // Piece inserted successfully
+                            // Insert miners for this piece into miner_pieces
+                            debug!("Inserting miners for piece {}", hex::encode(piece.piece_hash));
+                            for miner in &piece.miners {
+                                match tx.execute(
+                                    "INSERT INTO miner_pieces (miner_uid, piece_hash) VALUES (?1, ?2)",
+                                    params![miner.0, piece.piece_hash],
+                                ) {
+                                    Ok(_) => {
+                                        debug!("Inserted miner {} for piece {}", miner.0, hex::encode(piece.piece_hash));
+                                    }
+                                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                                        // Ignore if miner-piece mapping already exists
+                                        debug!("Miner {} for piece {} already exists, skipping insert", miner.0, hex::encode(piece.piece_hash));
+                                    }
+                                    Err(e) => return Err(MetadataDBError::Database(e)),
+                                }
+                            }
                         }
                         Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
                             // Piece already exists, need to merge miners and update ref_count
@@ -1299,12 +1315,15 @@ impl MetadataDB {
                             ).map_err(MetadataDBError::Database)?;
 
                             // Update miner_pieces
+                            debug!("Updating miners for existing piece {}", hex::encode(piece.piece_hash));
                             for miner in &piece.miners {
                                 match tx.execute(
                                     "INSERT INTO miner_pieces (miner_uid, piece_hash) VALUES (?1, ?2)",
                                     params![miner.0, piece.piece_hash],
                                 ) {
-                                    Ok(_) => {}
+                                    Ok(_) => {
+                                        debug!("Inserted miner {} for piece {}", miner.0, hex::encode(piece.piece_hash));
+                                    }
                                     Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
                                         // Ignore if miner-piece mapping already exists
                                         debug!("Miner {} for piece {} already exists, skipping insert", miner.0, hex::encode(piece.piece_hash));

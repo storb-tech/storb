@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS pieces (
 
 -- A mapping of miner uids to pieces they store
 CREATE TABLE IF NOT EXISTS miner_pieces (
-  miner_uid    INTEGER   NOT NULL PRIMARY KEY,
-  piece_hash   BLOB      NOT NULL DEFAULT '',
+  miner_uid    INTEGER   NOT NULL,
+  piece_hash   BLOB      NOT NULL,
   UNIQUE (miner_uid, piece_hash)
 );
 
@@ -57,8 +57,9 @@ CREATE TABLE IF NOT EXISTS chunk_pieces (
 
 -- Table of pieces to repair, and the miner uids which failed to serve them --
 CREATE TABLE pieces_to_repair (
-    piece_hash BLOB PRIMARY KEY, -- piece hash
-    miners TEXT NOT NULL DEFAULT '' -- JSON array of miner IDs who failed to serve the piece
+    piece_hash BLOB, -- piece hash
+    miners TEXT NOT NULL DEFAULT '[]', -- JSON array of miner IDs who failed to serve the piece
+    UNIQUE (piece_hash, miners)
 );
 
 -- Piece‑repair history

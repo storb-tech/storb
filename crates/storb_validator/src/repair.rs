@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
-use base::constants::MIN_BANDWIDTH;
+use base::{constants::MIN_BANDWIDTH, NodeUID};
+use quinn::Connection;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -218,6 +219,14 @@ pub async fn repair_pieces(validator: Arc<Validator>) -> Result<(), Box<dyn std:
             .await
             .context("Failed to establish connections with miners")?;
 
+        // create hashmap of miner_uids->miner_connection.
+        // each miner_uid coresponds to the miner connection in miner_connections
+        let uid_to_connection: HashMap<NodeUID, Connection> = miner_uids
+            .iter()
+            .zip(miner_connections.iter())
+            .map(|(&uid, conn)| (uid, conn.1.clone()))
+            .collect();
+
         upload::log_connection_success(&miner_connections);
 
         // Distribute to miners, if there ar not enough miners, then we automatically loop back around the sorted_miners
@@ -239,7 +248,7 @@ pub async fn repair_pieces(validator: Arc<Validator>) -> Result<(), Box<dyn std:
                 }
             };
 
-            let (_, conn) = miner_connections[miner_uid].clone();
+            let conn = uid_to_connection[&(miner_uid as u16)].clone();
             let valid_piece_clone = valid_piece.clone(); // TODO(repair): is there a better way to handle this instead of cloning the piece?
 
             // Upload the piece to the miner

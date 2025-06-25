@@ -87,7 +87,6 @@ impl Validator {
         let neuron = Arc::new(RwLock::new(BaseNeuron::new(neuron_config).await?));
 
         info!("Validator initialized with config: {:?}", config);
-        // TODO(metadatadb): use config varibable to get path for crsqlite library?
         let (mut metadatadb, metadatadb_sender) = metadata::db::MetadataDB::new(
             &config.neuron_config.metadatadb_file,
             &PathBuf::from(&config.crsqlite_file),
@@ -458,7 +457,6 @@ impl Validator {
                         ) {
                             error!("Failed to update retrieval successes: {}", e);
                         }
-
 
                         let mut scoring_system_guard = self.scoring_system.write().await;
 
