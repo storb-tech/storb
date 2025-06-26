@@ -26,7 +26,6 @@ libp2p.workspace = true
 lru.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-rocksdb.workspace = true
 rustls.workspace = true
 rusqlite.workspace = true
 subxt.workspace = true
