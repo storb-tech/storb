@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base::utils::multiaddr_to_socketaddr;
 use libp2p::Multiaddr;
 use thiserror::Error;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     metadata::{db::MetadataDB, models::CrSqliteChanges},
@@ -120,8 +120,14 @@ pub async fn sync_metadata_db(validator: Arc<Validator>) -> Result<(), SyncError
             .stake
             .iter()
             .map(|(_, stake)| stake.0)
-            .sum::<u64>();
-        if stake < sync_stake_threshold {
+            .sum::<u64>() as f64
+            / 1_000_000_000.0;
+        debug!(
+            "Neuron {} has stake {}, threshold is {}",
+            neuron_info.uid, stake, sync_stake_threshold
+        );
+        if stake < sync_stake_threshold as f64 {
+            debug!("skipping neuron {}", neuron_info.uid);
             continue;
         }
         // If it does have enough stake, we can sync the metadata
