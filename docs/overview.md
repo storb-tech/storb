@@ -8,25 +8,31 @@ The subnet can be used as shown below:
 
 ### Uploading files
 
-Before performing in write operations, a user must first generate and sign a nonce with a sr25519 keypair and supply it in the relevant endpoints. 
+Before performing in write operations, a user must first generate and sign a nonce with a sr25519 keypair and supply it in the relevant endpoints.
 In the future a client cli tool and/or SDK will be created to make this process much more seamless and automatic.
 
 #### Generate nonce
 
 - Generate a nonce for your account id (formatted as an ss58 address). For example:
+
     ```bash
     curl -X GET http://{ip}:{port}/nonce?account_id=5HeHkTeToUHmoZisZcoQDF1aJFR1Q8bZJY18FVqTV6fr8kvA" -H "X-API-Key: API_KEY"
     ```
+
 - This will then return a nonce. For example:
+
 ```
 fc52edb98e03d5e45381f7dd9e85353b84c5a4b419daf5efe0298ccbfd1d938c
 ```
+
 - Using the polkadot js frontend to sign this would output:
+
 ```
 0xe23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82
 ```
 
 - Which without the hex prefix "0x" would be:
+
 ```
 e23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82
 ```
@@ -60,9 +66,11 @@ e23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad42
 ### Deleting files
 
 - Client requests to delete a file through a validator:
+
     ```bash
     curl -X DELETE http://{ip}:{port}/file?infohash={infohash}?account_id={account_id}?signature={signature} -H "X-API-Key: API_KEY"
     ```
+
 - The validator deletes the file pieces from the miners and removes the metadata from its database.
 
 ## Scoring Mechanism
