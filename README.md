@@ -32,22 +32,14 @@ For an overview of how the subnet works, [see here](docs/overview.md).
    sudo apt install build-essential clang libclang-dev libssl-dev pkg-config
    ```
 
-   We highly recommend installing `librocksdb` locally to speed up compile times. If you're on a Debian-based system:
-
-   ```bash
-   sudo apt install librocksdb-dev
-   ```
-
    **OR**
 
    If you use NixOS or the Nix package manager, you can use the provided flakes in this repository to get set up. It will install the necessary dependencies and Rust toolchains for you.
 
 3. **Compile**:
 
-   When compiling, we highly recommend setting `ROCKSDB_LIB_DIR` to avoid recompiling RocksDB every time. If you are using the Nix flake then this is done automatically.
-
    ```bash
-   ROCKSDB_LIB_DIR=/usr/lib/x86_64-linux-gnu cargo build --release
+   cargo build --release
 
    # Your executable:
    ./target/release/storb
