@@ -65,6 +65,8 @@ pub struct ValidatorConfig {
     pub otel_endpoint: String,
 }
 
+pub static SCORE_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("miner_scoring"));
+pub static UPLOAD_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("upload"));
 /// The Storb validator.
 #[derive(Clone)]
 pub struct Validator {
@@ -581,6 +583,7 @@ impl Validator {
             &quic_conn,
             piece,
             scoring_clone,
+            None,
             None,
         )
         .await

@@ -5,11 +5,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base::memory_db::MemoryDb;
 use ndarray::{array, s, Array, Array1};
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
 use crate::constants::{INITIAL_ALPHA, INITIAL_BETA};
+use crate::validator::SCORE_METER;
 
 /// ScoreState stores the scores for each miner.
 ///
@@ -37,6 +39,7 @@ pub struct ScoringSystem {
     pub initial_beta: f64,
     // forgetting factor for challenges
     pub lambda: f64,
+    pub score_histogram: Histogram<f64>,
 }
 
 #[inline]
@@ -94,6 +97,13 @@ impl ScoringSystem {
             previous_scores: array![],
         };
 
+        let meter = &*SCORE_METER;
+
+        let score_histogram = meter
+            .f64_histogram("storb.validator.score_histogram")
+            .with_description("Histogram of miner scores")
+            .init();
+
         let mut scoring_system = Self {
             db,
             state,
@@ -101,6 +111,7 @@ impl ScoringSystem {
             initial_alpha: INITIAL_ALPHA,
             initial_beta: INITIAL_BETA,
             lambda: 0.99, // forgetting factor for challenges
+            score_histogram,
         };
 
         match scoring_system.load_state() {
@@ -113,7 +124,7 @@ impl ScoringSystem {
         Ok(scoring_system)
     }
 
-    /// Load scores state from teh state file.
+    /// Load scores state from the state file.
     fn load_state(&mut self) -> Result<()> {
         let buf: Vec<u8> = fs::read(&self.state_file)?;
         self.state = bincode::deserialize::<ScoreState>(&buf[..])?;
@@ -176,6 +187,11 @@ impl ScoringSystem {
         Ok(())
     }
 
+    #[instrument(
+        name = "scoring.update_scores",
+        skip(self, uids_to_update),
+        fields(neuron_count, uids = ?uids_to_update)
+    )]
     /// Update scores for each of the miners.
     pub async fn update_scores(&mut self, neuron_count: usize, uids_to_update: Vec<u16>) {
         let extend_array = |old: &Array1<f64>, new_size: usize| -> Array1<f64> {
@@ -266,6 +282,13 @@ impl ScoringSystem {
 
         info!("response rate scores: {}", response_rate_scores);
         info!("new scores: {}", state.ema_scores);
+
+        for (uid, &score) in state.ema_scores.iter().enumerate() {
+            let attrs = &[KeyValue::new("miner_uid", uid as u64)];
+            score_histogram.record(score, attrs);
+        }
+
+        debug!("score metrics collected");
 
         match self.save_state() {
             Ok(_) => info!("Saved state successfully"),

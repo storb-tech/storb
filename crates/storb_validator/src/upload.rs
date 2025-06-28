@@ -16,6 +16,7 @@ use crabtensor::sign::{sign_message, KeypairSignature};
 use crabtensor::AccountId;
 use futures::{Stream, TryStreamExt};
 use libp2p::Multiaddr;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use quinn::Connection;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -36,13 +37,54 @@ use crate::ValidatorState;
 const LOGGING_INTERVAL_MB: u64 = 100;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
+struct UploadMetrics {
+    /// Total bytes received from client
+    bytes_received: Counter<u64>,
+    /// Number of chunks processed
+    chunks_processed: Counter<u64>,
+    /// Time taken to process each chunk
+    chunk_processing_time: Histogram<f64>,
+    /// Time taken to process each piece
+    piece_processing_time: Histogram<f64>,
+    /// Number of pieces attempted per miner
+    pieces_uploaded: Counter<u64>,
+    /// Number of successful piece uploads
+    pieces_succeeded: Counter<u64>,
+    /// Number of failed piece uploads
+    pieces_failed: Counter<u64>,
+}
+
+impl UploadMetrics {
+    pub fn new() -> Self {
+        let m = &*METER;
+        Self {
+            bytes_received: m.u64_counter("upload.bytes_received").init(),
+            chunks_processed: m.u64_counter("upload.chunks_processed").init(),
+            chunk_processing_time: m.f64_histogram("upload.chunk_processing_ms").init(),
+            piece_processing_time: m.f64_histogram("upload.piece_processing_ms").init(),
+            pieces_uploaded: m.u64_counter("upload.pieces_uploaded").init(),
+            pieces_succeeded: m.u64_counter("upload.pieces_succeeded").init(),
+            pieces_failed: m.u64_counter("upload.pieces_failed").init(),
+        }
+    }
+}
+
 /// Processes upload streams and distributes file pieces to available miners.
 pub(crate) struct UploadProcessor<'a> {
     pub miner_uids: Vec<NodeUID>,
     pub miner_connections: Vec<(SocketAddr, Connection)>,
     pub state: &'a ValidatorState,
+    pub metrics: Arc<UploadMetrics>,
 }
 
+#[instrument(
+    name = "upload.upload_piece_data",
+    skip(validator_base_neuron, conn, data),
+    fields(
+        miner_uid = ?miner_info.neuron_info.uid,
+        piece_size = data.len(),
+    )
+)]
 /// Upload piece data to a miner
 pub async fn upload_piece_data(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
@@ -134,6 +176,11 @@ pub fn log_connection_attempt(quic_addresses: &[Multiaddr], miner_uids: &[NodeUI
     info!("Quic addresses: {:?}", quic_addresses);
 }
 
+#[instrument(
+    name = "upload.establish_and_validate_connections",
+    skip(quic_addresses),
+    fields(requested = quic_addresses.len())
+)]
 /// Establish connections and validate minimum requirements
 pub async fn establish_and_validate_connections(
     quic_addresses: Vec<Multiaddr>,
@@ -148,6 +195,11 @@ pub async fn establish_and_validate_connections(
     Ok(miner_connections)
 }
 
+#[instrument(
+    name = "upload.validate_connection_count",
+    skip(connections),
+    fields(actual = connections.len())
+)]
 /// Validate that we have sufficient connections
 pub fn validate_connection_count(connections: &[(SocketAddr, Connection)]) -> Result<()> {
     if connections.is_empty() {
@@ -187,9 +239,19 @@ impl<'a> UploadProcessor<'a> {
             miner_uids,
             miner_connections,
             state,
+            metrics: Arc::new(UploadMetrics::new()),
         })
     }
 
+    #[instrument(
+        name = "upload.process_upload",
+        skip(self, stream),
+        fields(
+            total_size,
+            filename,
+            account_id = ?account_id,
+        )
+    )]
     /// Process the upload of a file and its distribution to miners.
     pub(crate) async fn process_upload<S, E>(
         &self,
@@ -203,8 +265,12 @@ impl<'a> UploadProcessor<'a> {
         S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
         E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
     {
+        self.metrics.upload_requests.add(1, &[]);
+        let timer = std::time::Instant::now();
+
         info!("Processing upload of size {} bytes...", total_size);
 
+        self.metrics.bytes_received.add(total_size, &[]);
         if self.miner_connections.is_empty() {
             return Err(anyhow::anyhow!("No active miner connections available"));
         }
@@ -216,7 +282,15 @@ impl<'a> UploadProcessor<'a> {
         let producer_handle = {
             let stream = Box::pin(stream);
             tokio::spawn(async move {
-                if let Err(e) = produce_bytes(stream, tx, total_size, chunk_size as usize).await {
+                if let Err(e) = produce_bytes(
+                    stream,
+                    tx,
+                    total_size,
+                    chunk_size as usize,
+                    self.metrics.clone(),
+                )
+                .await
+                {
                     error!("Producer error: {}", e);
                     return Err(e);
                 }
@@ -260,6 +334,7 @@ impl<'a> UploadProcessor<'a> {
                 rx,
                 miner_uids,
                 miner_connections,
+                self.metrics.clone(),
             )
             .await
         });
@@ -324,11 +399,17 @@ impl<'a> UploadProcessor<'a> {
     }
 }
 
+#[instrument(
+    name = "upload.produce_bytes",
+    skip(stream, tx),
+    fields(total_size, chunk_size,)
+)]
 async fn produce_bytes<S, E>(
     stream: S,
     tx: mpsc::Sender<(u64, Vec<u8>)>,
     total_size: u64,
     chunk_size: usize,
+    metrics: Arc<UploadMetrics>,
 ) -> Result<()>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -342,7 +423,8 @@ where
 
     while let Some(chunk_result) = stream.try_next().await? {
         buffer.extend_from_slice(&chunk_result);
-
+        let n = chunk_result.len() as u64;
+        metrics.upload_bytes_received.add(n, &[]);
         // Process full chunks
         while buffer.len() >= chunk_size {
             let chunk_data = buffer.drain(..chunk_size).collect::<Vec<u8>>();
@@ -376,6 +458,13 @@ where
     Ok(())
 }
 
+#[instrument(
+    name = "upload.consume_bytes",
+    skip(validator_base_neuron, scoring_system, metadatadb_sender, rx),
+    fields(
+        miner_count = miner_connections.len(),
+    )
+)]
 async fn consume_bytes(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     scoring_system: Arc<RwLock<ScoringSystem>>,
@@ -383,6 +472,7 @@ async fn consume_bytes(
     mut rx: mpsc::Receiver<(u64, Vec<u8>)>,
     miner_uids: Vec<NodeUID>,
     miner_connections: Vec<(SocketAddr, Connection)>,
+    metrics: Arc<UploadMetrics>,
 ) -> Result<(
     Vec<(
         metadata::models::ChunkValue,
@@ -410,6 +500,9 @@ async fn consume_bytes(
     let miner_uids: Vec<NodeUID> = indices.iter().map(|&i| miner_uids[i]).collect();
 
     while let Some((chunk_idx, chunk)) = rx.recv().await {
+        let chunk_start = Instant::now();
+        metrics.chunks_processed.add(1, &[]);
+
         // Encode the chunk using FEC
         let encoded = encode_chunk(&chunk, chunk_idx);
         let target_piece_count = encoded.pieces.len();
@@ -478,6 +571,7 @@ async fn consume_bytes(
                         })?
                         .clone();
                     drop(vali_guard);
+
                     tokio::select! {
                         upload_result = upload_piece_to_miner(
                             vali_clone.clone(),
@@ -486,6 +580,7 @@ async fn consume_bytes(
                             piece_data.clone(),
                             scoring_clone,
                             Some(metadatadb_sender_clone),
+                            Some(metrics.clone())
                         ) => {
                             match upload_result {
                                 Ok((piece_hash, miner_uid)) => {
@@ -594,6 +689,8 @@ async fn consume_bytes(
 
         let chunk_with_pieces = (chunk_value.clone(), chunk_piece_values.clone());
         chunks_with_pieces.push(chunk_with_pieces);
+        let elapsed_ms = chunk_start.elapsed().as_secs_f64() * 1_000.0;
+        metrics.chunk_processing_time.record(elapsed_ms, &[]);
     }
 
     // get pieces from chunks_with_pieces
@@ -606,6 +703,14 @@ async fn consume_bytes(
 }
 
 /// Upload a piece to a miner and verify the upload by checking the hash, then update the miner's stats
+#[instrument(
+    name = "upload.upload_piece_to_miner",
+    skip(validator_base_neuron, conn, scoring_system, metadatadb_sender),
+    fields(
+        miner_uid = ?miner_info.neuron_info.uid,
+        piece_idx = piece.piece_idx,
+    )
+)]
 pub async fn upload_piece_to_miner(
     validator_base_neuron: Arc<RwLock<BaseNeuron>>,
     miner_info: NodeInfo,
@@ -613,6 +718,7 @@ pub async fn upload_piece_to_miner(
     piece: base::piece::Piece,
     scoring_system: Arc<RwLock<ScoringSystem>>,
     metadatadb_sender: Option<mpsc::Sender<metadata::db::MetadataDBCommand>>,
+    metrics: Option<Arc<UploadMetrics>>,
 ) -> Result<(PieceHash, NodeUID)> {
     let piece_hash = PieceHash(*blake3::hash(&piece.data).as_bytes());
 
@@ -641,9 +747,18 @@ pub async fn upload_piece_to_miner(
     }
 
     let miner_uid = miner_info.neuron_info.uid;
+    metrics
+        .pieces_uploaded
+        .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
 
+    let upload_start = Instant::now();
     let upload_result =
         upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;
+
+    let elapsed_ms = upload_start.elapsed().as_secs_f64() * 1_000.0;
+    metrics
+        .piece_processing_time
+        .record(elapsed_ms, &[KeyValue::new("miner_uid", miner_uid)]);
 
     // Verification: Check if the hash received from the miner is the same
     // as the hash of the piece and update the stats of the miner in the database accordingly
@@ -671,11 +786,17 @@ pub async fn upload_piece_to_miner(
         scoring_system_guard
             .update_alpha_beta_db(miner_uid, 1.0, true)
             .await?;
+        metrics
+            .pieces_succeeded
+            .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
     } else {
         let mut scoring_system_guard = scoring_system.write().await;
         scoring_system_guard
             .update_alpha_beta_db(miner_uid, 1.0, false)
             .await?;
+        metrics
+            .pieces_failed
+            .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
     }
 
     Ok((piece_hash, miner_uid))
