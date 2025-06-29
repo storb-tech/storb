@@ -6,7 +6,9 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{
-    constants::TAO_IN_RAO, metadata::{db::MetadataDB, models::CrSqliteChanges}, validator::Validator
+    constants::TAO_IN_RAO,
+    metadata::{db::MetadataDB, models::CrSqliteChanges},
+    validator::Validator,
 };
 
 #[derive(Debug, Error)]

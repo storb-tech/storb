@@ -1208,7 +1208,7 @@ impl MetadataDB {
                         "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
                         ON CONFLICT(chunk_hash) DO UPDATE SET ref_count = ref_count + 1"
                     )?;
-                    
+
                     chunk_stmt.execute(params![
                         chunk.chunk_hash,
                         chunk.k,
@@ -1225,7 +1225,7 @@ impl MetadataDB {
                     let mut tracker_chunk_stmt = tx.prepare(
                         "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
                     )?;
-                    
+
                     tracker_chunk_stmt.execute(params![
                         infohash_value.infohash,
                         chunk_idx,

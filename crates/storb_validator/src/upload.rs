@@ -352,7 +352,7 @@ where
                 return Err(anyhow::anyhow!("Upload size exceeds expected size"));
             }
 
-            if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
+            if total_processed.is_multiple_of(LOGGING_INTERVAL_MB * BYTES_PER_MB) {
                 info!(
                     "Processing: {} MB / {} MB",
                     total_processed / (1024 * 1024),
