@@ -19,9 +19,11 @@ use middleware::{require_api_key, InfoApiRateLimiter};
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
-use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
+use opentelemetry_otlp::{
+    MetricExporter, Protocol, SpanExporter, WithExportConfig, WithHttpConfig,
+};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::{trace, trace::BatchSpanProcessor, Resource};
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
@@ -47,6 +49,7 @@ mod utils;
 pub mod validator;
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub static WEIGHT_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("weights"));
 
 #[derive(Debug)]
@@ -395,8 +398,61 @@ async fn main(config: ValidatorConfig) {
         .expect("Failed to run the validator")
 }
 
+fn init_metrics(cfg: &ValidatorConfig) -> anyhow::Result<()> {
+    if cfg.otel_api_key.trim().is_empty() {
+        info!("No OTEL API key; disabling metrics");
+        return Ok(());
+    } else {
+        info!("OTEL API key found; enabling metrics");
+        let mut headers = HashMap::new();
+        headers.insert("X-Api-Key".to_string(), cfg.otel_api_key.clone());
+        let metrics_url: String = cfg.otel_endpoint.to_owned() + "metrics";
+
+        let resource = Resource::builder()
+            .with_attribute(opentelemetry::KeyValue::new(
+                "service.name",
+                cfg.otel_service_name.clone() + " - v" + VERSION,
+            ))
+            .build();
+
+        let metrics_exporter = MetricExporter::builder()
+            .with_http()
+            .with_endpoint(metrics_url)
+            .with_protocol(Protocol::HttpBinary)
+            .with_headers(headers.clone())
+            .build()
+            .expect("Failed to create OTEL metrics expoter");
+
+        let metrics_provider = SdkMeterProvider::builder()
+            .with_resource(resource.clone())
+            .with_periodic_exporter(metrics_exporter)
+            .build();
+
+        global::set_meter_provider(metrics_provider);
+
+        let traces_url: String = cfg.otel_endpoint.to_owned() + "traces";
+        let trace_exporter = SpanExporter::builder()
+            .with_http()
+            .with_endpoint(traces_url)
+            .with_protocol(Protocol::HttpBinary)
+            .with_headers(headers)
+            .build()
+            .expect("Failed to create OTEL trace exporter");
+
+        let tracer_provider = trace::SdkTracerProvider::builder()
+            .with_resource(resource)
+            .with_span_processor(BatchSpanProcessor::builder(trace_exporter).build())
+            .build();
+
+        global::set_tracer_provider(tracer_provider);
+    }
+
+    Ok(())
+}
+
 /// Runs the main async runtime
 pub fn run(config: ValidatorConfig) {
+    let _ = init_metrics(&config);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
