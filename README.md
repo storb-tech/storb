@@ -25,7 +25,7 @@ For an overview of how the subnet works, [see here](docs/overview.md).
 
    Install the Rust nightly toolchain.
 
-   If you're using Ubuntu, you should be using Ubuntu 24.04 LTS. Ensure that the following dependencies are installed:
+   Ensure that the following dependencies are installed:
 
    ```bash
    sudo apt update

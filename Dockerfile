@@ -33,4 +33,4 @@ VOLUME ["/app", "/root/.bittensor/wallets"]
 
 WORKDIR /app
 
-CMD ["sh", "-c", "/usr/local/bin/storb ${NODE_TYPE}", "--crsqlite_file", "/app/crsqlite/crsqlite.so"]
+CMD ["sh", "-c", "/usr/local/bin/storb ${NODE_TYPE}", "--validator.crsqlite_file", "/app/crsqlite/crsqlite.so"]

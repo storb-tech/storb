@@ -304,14 +304,20 @@ impl<'a> UploadProcessor<'a> {
             hex::encode(blake3::hash(&serialized).as_bytes())
         );
 
-        metadata::db::MetadataDB::insert_object(
+        match metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
             signed_infohash_value,
             &nonce,
             chunks_with_pieces,
         )
         .await
-        .expect("Failed to insert object entry into local database"); // TOOD: handle this error properly
+        {
+            Ok(_) => debug!("Successfully inserted object into local database"),
+            Err(e) => {
+                error!("Failed to insert object into local database: {}", e);
+                return Err(e.into());
+            }
+        }
         debug!("Inserted object entry with infohash {infohash_str} into local database");
 
         Ok(infohash_str)
@@ -346,7 +352,7 @@ where
                 return Err(anyhow::anyhow!("Upload size exceeds expected size"));
             }
 
-            if total_processed % (LOGGING_INTERVAL_MB * BYTES_PER_MB) == 0 {
+            if total_processed.is_multiple_of(LOGGING_INTERVAL_MB * BYTES_PER_MB) {
                 info!(
                     "Processing: {} MB / {} MB",
                     total_processed / (1024 * 1024),

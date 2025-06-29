@@ -19,7 +19,7 @@ use super::models::{
     ChunkChallengeHistory, ChunkValue, InfohashValue, PieceChallengeHistory, SqlDateTime,
 };
 use crate::{
-    constants::DB_MPSC_BUFFER_SIZE,
+    constants::{CONNECTION_TIMEOUT, DB_MAX_LIFETIME, DB_MPSC_BUFFER_SIZE, IDLE_TIMEOUT},
     metadata::models::{CrSqliteChanges, CrSqliteValue, PieceValue, SqlAccountId},
 };
 
@@ -218,7 +218,13 @@ impl MetadataDB {
         });
 
         // Create connection pool
-        let pool = Pool::new(manager)?;
+        let pool = Pool::builder()
+            .max_size(10) // Limit maximum connections
+            .min_idle(Some(2)) // Minimum idle connections
+            .max_lifetime(Some(std::time::Duration::from_secs(DB_MAX_LIFETIME))) // Close connections after 1 hour
+            .idle_timeout(Some(std::time::Duration::from_secs(IDLE_TIMEOUT))) // Close idle connections after 10 minutes
+            .connection_timeout(std::time::Duration::from_secs(CONNECTION_TIMEOUT))
+            .build(manager)?;
 
         // Test connection and validate database
         {
@@ -494,6 +500,9 @@ impl MetadataDB {
                     seq: row.get(8)?,
                 });
             }
+            drop(rows);
+            drop(stmt);
+
             Ok::<Vec<CrSqliteChanges>, MetadataDBError>(changes)
         })
         .await
@@ -558,6 +567,8 @@ impl MetadataDB {
                     let piece_hash: PieceHash = row.get(0)?;
                     pieces.push((piece_hash, miner_uid));
                 }
+                drop(rows);
+                drop(stmt);
                 pieces
             }; // stmt and rows are dropped here automatically
 
@@ -568,9 +579,11 @@ impl MetadataDB {
                 let existing_miners: Option<String> = {
                     let mut check_stmt =
                         tx.prepare("SELECT miners FROM pieces_to_repair WHERE piece_hash = ?1")?;
-                    check_stmt
+                    let result = check_stmt
                         .query_row(params![piece_hash], |row| row.get(0))
-                        .optional()?
+                        .optional()?;
+                    drop(check_stmt);
+                    result
                 }; // check_stmt is dropped here automatically
 
                 if let Some(existing_miners) = existing_miners {
@@ -590,9 +603,11 @@ impl MetadataDB {
                     }
 
                     // Update the existing entry
-                    tx.execute(
-                        "UPDATE pieces_to_repair SET miners = ?1 WHERE piece_hash = ?2",
-                        params![
+                    {
+                        let mut update_stmt = tx.prepare(
+                            "UPDATE pieces_to_repair SET miners = ?1 WHERE piece_hash = ?2"
+                        )?;
+                        update_stmt.execute(params![
                             serde_json::to_string(&miners).map_err(|e| {
                                 MetadataDBError::Database(
                                     rusqlite::Error::FromSqlConversionFailure(
@@ -604,7 +619,9 @@ impl MetadataDB {
                             })?,
                             piece_hash
                         ],
-                    )?;
+                        )?;
+                        drop(update_stmt);
+                    }
                 } else {
                     // Insert a new entry
                     tx.execute(
@@ -707,6 +724,9 @@ impl MetadataDB {
 
                 results.push((piece_hash, miners));
             }
+            drop(rows);
+            drop(stmt);
+
             Ok::<Vec<(PieceHash, Vec<NodeUID>)>, MetadataDBError>(results)
         })
         .await
@@ -950,6 +970,12 @@ impl MetadataDB {
         let nonce = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
 
+            // Delete any existing nonces for this account
+            conn.execute(
+                "DELETE FROM account_nonces WHERE account_id = ?1",
+                params![SqlAccountId(account_id.clone())],
+            )?;
+
             // Generate a cryptographically secure random nonce
             let mut nonce = [0u8; 32];
             rand::thread_rng().fill_bytes(&mut nonce);
@@ -1173,63 +1199,40 @@ impl MetadataDB {
                 Err(e) => return Err(MetadataDBError::Database(e)),
             }
 
-            // Prepare statements for better performance with multiple inserts
-            let mut chunk_stmt = tx.prepare(
-                "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
-                 ON CONFLICT(chunk_hash) DO UPDATE SET ref_count = ref_count + 1"
-            )?;
-
-            let mut tracker_chunk_stmt = tx.prepare(
-                "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
-            )?;
-
-            let piece_stmt = tx.prepare(
-                "INSERT INTO pieces (piece_hash, piece_size, piece_type, miners, ref_count) VALUES (?1, ?2, ?3, ?4, 1)
-                 ON CONFLICT(piece_hash) DO UPDATE SET
-                   miners = ?4,
-                   ref_count = ref_count + 1"
-            )?;
-
-            let mut chunk_pieces_stmt = tx.prepare(
-                "INSERT INTO chunk_pieces (chunk_hash, piece_idx, piece_hash) VALUES (?1, ?2, ?3)",
-            )?;
-
             // Insert chunks and their pieces
             // Iterate over each chunk and its associated pieces, also ensure that we can get the index
             for (chunk_idx, (chunk, pieces)) in chunks_with_pieces.iter().enumerate() {
-                // Insert chunk
-                // if it already exists, it will be ignored due to the unique constraint
-                match chunk_stmt.execute(params![
-                    chunk.chunk_hash,
-                    chunk.k,
-                    chunk.m,
-                    chunk.chunk_size,
-                    chunk.padlen,
-                    chunk.original_chunk_size
-                ]) {
-                    Ok(_) => {}
-                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
-                        // Ignore if chunk already exists
-                        debug!("Chunk {} already exists, skipping insert", hex::encode(chunk.chunk_hash));
-                    }
-                    Err(e) => return Err(MetadataDBError::Database(e)),
+                // Insert chunk with explicit statement management
+                {
+                    let mut chunk_stmt = tx.prepare(
+                        "INSERT INTO chunks (chunk_hash, k, m, chunk_size, padlen, original_chunk_size, ref_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                        ON CONFLICT(chunk_hash) DO UPDATE SET ref_count = ref_count + 1"
+                    )?;
+
+                    chunk_stmt.execute(params![
+                        chunk.chunk_hash,
+                        chunk.k,
+                        chunk.m,
+                        chunk.chunk_size,
+                        chunk.padlen,
+                        chunk.original_chunk_size
+                    ])?;
+                    // Explicitly finalize the statement
+                    drop(chunk_stmt);
                 }
 
+                {
+                    let mut tracker_chunk_stmt = tx.prepare(
+                        "INSERT INTO tracker_chunks (infohash, chunk_idx, chunk_hash) VALUES (?1, ?2, ?3)",
+                    )?;
 
-                // Insert chunk-infohash mapping
-                // If it already exists, it will be ignored due to the unique constraint
-                match tracker_chunk_stmt.execute(params![
-                    infohash_value.infohash,
-                    chunk_idx,
-                    chunk.chunk_hash
-                ]) {
-                    Ok(_) => {}
-                    Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
-                        // Ignore if chunk-infohash mapping already exists
-                        debug!("Chunk {} for infohash {} already exists, skipping insert", hex::encode(chunk.chunk_hash), hex::encode(infohash_value.infohash));
-                    }
-                    Err(e) => return Err(MetadataDBError::Database(e)),
-                };
+                    tracker_chunk_stmt.execute(params![
+                        infohash_value.infohash,
+                        chunk_idx,
+                        chunk.chunk_hash
+                    ])?;
+                    drop(tracker_chunk_stmt);
+                }
 
                 // Insert all pieces for this chunk
                 for (piece_idx, piece) in pieces.iter().enumerate() {
@@ -1336,28 +1339,26 @@ impl MetadataDB {
                         Err(e) => return Err(MetadataDBError::Database(e)),
                     }
 
-                    // Insert chunk-piece mapping
-                    // If it already exists, it will be ignored due to the unique constraint
-                    match chunk_pieces_stmt.execute(params![
-                        chunk.chunk_hash,
-                        piece_idx,
-                        piece.piece_hash
-                    ]) {
-                        Ok(_) => {}
-                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
-                            // Ignore if chunk-piece mapping already exists
-                            debug!("Chunk-piece mapping for chunk {} and piece {} already exists, skipping insert", hex::encode(chunk.chunk_hash), hex::encode(piece.piece_hash));
-                        }
-                        Err(e) => return Err(MetadataDBError::Database(e)),
-                    };
+                    // Insert chunk-piece mapping with explicit cleanup
+                    {
+                        let mut chunk_pieces_stmt = tx.prepare(
+                            "INSERT INTO chunk_pieces (chunk_hash, piece_idx, piece_hash) VALUES (?1, ?2, ?3)",
+                        )?;
+                        match chunk_pieces_stmt.execute(params![
+                            chunk.chunk_hash,
+                            piece_idx,
+                            piece.piece_hash
+                        ]) {
+                            Ok(_) => {}
+                            Err(e) if e.to_string().contains("UNIQUE constraint failed") => {
+                                debug!("Chunk-piece mapping for chunk {} and piece {} already exists, skipping insert", hex::encode(chunk.chunk_hash), hex::encode(piece.piece_hash));
+                            }
+                            Err(e) => return Err(MetadataDBError::Database(e)),
+                        };
+                        drop(chunk_pieces_stmt);
+                    }
                 }
             }
-
-            // Drop all prepared statements before committing
-            drop(chunk_stmt);
-            drop(tracker_chunk_stmt);
-            drop(piece_stmt);
-            drop(chunk_pieces_stmt);
 
             tx.commit()?;
             Ok::<(), MetadataDBError>(())
@@ -1381,6 +1382,13 @@ impl MetadataDB {
         nonce: &[u8; 32],
         chunks_with_pieces: Vec<(ChunkValue, Vec<PieceValue>)>,
     ) -> Result<(), MetadataDBError> {
+        // Log signature
+        debug!(
+            "Inserting object with infohash {} and signature {} for account id: {}",
+            hex::encode(infohash_value.infohash),
+            hex::encode(infohash_value.signature.0),
+            infohash_value.owner_account_id.0
+        );
         // Create a channel for the response
         let (response_sender, mut response_receiver) =
             mpsc::channel::<Result<(), MetadataDBError>>(1);
@@ -1396,27 +1404,23 @@ impl MetadataDB {
         .unwrap_or(false);
 
         if !nonce_valid {
-            if response_sender
-                .send(Err(MetadataDBError::InvalidNonce))
-                .await
-                .is_err()
-            {
-                error!("Failed to send invalid nonce error response");
-            }
-            return Ok(());
+            return Err(MetadataDBError::InvalidNonce);
         }
 
         // Verify signature after nonce validation
         if !infohash_value.verify_signature(nonce) {
-            if response_sender
-                .send(Err(MetadataDBError::InvalidSignature))
-                .await
-                .is_err()
-            {
-                error!("Failed to send invalid signature error response");
-            }
-            return Ok(());
+            error!(
+                "Invalid signature for infohash {}",
+                hex::encode(infohash_value.infohash)
+            );
+            // return invalid signature error
+            return Err(MetadataDBError::InvalidSignature);
         }
+
+        debug!(
+            "Inserting object with infohash {}",
+            hex::encode(infohash_value.infohash)
+        );
 
         // Send the command to insert the object
         command_sender
@@ -1478,6 +1482,7 @@ impl MetadataDB {
                     )?,
                 })
             })?;
+            drop(stmt);
 
             Ok::<PieceValue, MetadataDBError>(piece_value)
         })
@@ -1563,6 +1568,7 @@ impl MetadataDB {
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
 
             Ok::<Vec<PieceValue>, MetadataDBError>(pieces)
         })
@@ -1642,6 +1648,7 @@ impl MetadataDB {
                     })
                 })?
                 .collect();
+            drop(stmt);
 
             chunks.map_err(MetadataDBError::from)
         })
@@ -1690,6 +1697,8 @@ impl MetadataDB {
         let pool = Arc::clone(&self.pool);
         let infohash = *infohash;
 
+        debug!("Fetching infohash: {}", hex::encode(infohash));
+
         let result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
             let mut stmt = conn.prepare(
@@ -1723,6 +1732,7 @@ impl MetadataDB {
                     },
                 })
             })?;
+            drop(stmt);
 
             Ok::<InfohashValue, MetadataDBError>(infohash_value)
         })
@@ -1797,6 +1807,7 @@ impl MetadataDB {
                     original_chunk_size: row.get(5)?,
                 })
             })?;
+            drop(stmt);
 
             Ok::<ChunkValue, MetadataDBError>(chunk)
         })
@@ -1872,6 +1883,7 @@ impl MetadataDB {
                     },
                 })
             })?;
+            drop(stmt);
 
             Ok::<PieceChallengeHistory, MetadataDBError>(piece_challenge_history)
         })
@@ -1969,6 +1981,7 @@ impl MetadataDB {
                         },
                     })
                 })?;
+                drop(stmt);
 
             Ok::<ChunkChallengeHistory, MetadataDBError>(chunk_challenge_history)
         })
@@ -2123,26 +2136,12 @@ impl MetadataDB {
         .unwrap_or(false);
 
         if !nonce_valid {
-            if response_sender
-                .send(Err(MetadataDBError::InvalidNonce))
-                .await
-                .is_err()
-            {
-                error!("Failed to send invalid nonce error response");
-            }
-            return Ok(());
+            return Err(MetadataDBError::InvalidNonce);
         }
 
         // Verify signature after nonce validation
         if !infohash_value.verify_signature(nonce) {
-            if response_sender
-                .send(Err(MetadataDBError::InvalidSignature))
-                .await
-                .is_err()
-            {
-                error!("Failed to send invalid signature error response");
-            }
-            return Ok(());
+            return Err(MetadataDBError::InvalidSignature);
         }
 
         // Send the command to delete the infohash

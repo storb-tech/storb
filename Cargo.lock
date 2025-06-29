@@ -12947,7 +12947,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storb_base"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12982,7 +12982,7 @@ dependencies = [
 
 [[package]]
 name = "storb_cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -13010,7 +13010,7 @@ dependencies = [
 
 [[package]]
 name = "storb_miner"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -13038,7 +13038,7 @@ dependencies = [
 
 [[package]]
 name = "storb_validator"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
