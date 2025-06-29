@@ -21,6 +21,9 @@ use crabtensor::weights::NormalizedWeight;
 use futures::stream::{FuturesUnordered, StreamExt};
 use libp2p::Multiaddr;
 use ndarray::Array1;
+use once_cell::sync::Lazy;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::KeyValue;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::{Rng, SeedableRng};
@@ -40,6 +43,7 @@ use crate::quic::{create_quic_client, make_client_endpoint};
 use crate::scoring::{normalize_min_max, ScoringSystem};
 use crate::upload::upload_piece_to_miner;
 use crate::utils::{generate_synthetic_data, get_id_quic_uids};
+use crate::WeightMetrics;
 
 #[derive(Debug)]
 // TODO: remove latency and bytes_len from ChallengeResult?
@@ -67,6 +71,91 @@ pub struct ValidatorConfig {
 
 pub static SCORE_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("miner_scoring"));
 pub static UPLOAD_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("upload"));
+pub static SYNTH_METER: Lazy<Meter> =
+    Lazy::new(|| opentelemetry::global::meter("synthetic_challenges"));
+
+#[derive(Debug)]
+pub struct SyntheticMetrics {
+    /// How many times run_synthetic_challenges was invoked
+    pub challenges_requested: Counter<u64>,
+    /// End-to-end duration of run_synthetic_challenges
+    pub challenge_duration_ms: Histogram<f64>,
+
+    // — store challenges —
+    pub store_total: Counter<u64>,
+    pub store_success: Counter<u64>,
+    pub store_failure: Counter<u64>,
+    pub store_latency_ms: Histogram<f64>,
+    pub store_bytes_sent: Counter<u64>,
+
+    // — retrieval challenges —
+    pub retrieve_total: Counter<u64>,
+    pub retrieve_success: Counter<u64>,
+    pub retrieve_failure: Counter<u64>,
+    pub retrieve_latency_ms: Histogram<f64>,
+    pub retrieve_bytes_received: Counter<u64>,
+}
+
+impl SyntheticMetrics {
+    pub fn new() -> Self {
+        let meter = &*SYNTH_METER;
+
+        Self {
+            challenges_requested: meter
+                .u64_counter("synthetic.challenges_requested")
+                .with_description("Invocations of run_synthetic_challenges")
+                .build(),
+
+            challenge_duration_ms: meter
+                .f64_histogram("synthetic.challenge_duration_ms")
+                .with_description("Total time for run_synthetic_challenges")
+                .build(),
+
+            store_total: meter
+                .u64_counter("synthetic.store_total")
+                .with_description("Store challenges attempted")
+                .build(),
+            store_success: meter
+                .u64_counter("synthetic.store_success")
+                .with_description("Successful store challenges")
+                .build(),
+            store_failure: meter
+                .u64_counter("synthetic.store_failure")
+                .with_description("Failed store challenges")
+                .build(),
+            store_latency_ms: meter
+                .f64_histogram("synthetic.store_latency_ms")
+                .with_description("Latency of store challenges")
+                .build(),
+            store_bytes_sent: meter
+                .u64_counter("synthetic.store_bytes_sent")
+                .with_description("Bytes sent in store challenges")
+                .build(),
+
+            retrieve_total: meter
+                .u64_counter("synthetic.retrieve_total")
+                .with_description("Retrieval challenges attempted")
+                .build(),
+            retrieve_success: meter
+                .u64_counter("synthetic.retrieve_success")
+                .with_description("Successful retrieval challenges")
+                .build(),
+            retrieve_failure: meter
+                .u64_counter("synthetic.retrieve_failure")
+                .with_description("Failed retrieval challenges")
+                .build(),
+            retrieve_latency_ms: meter
+                .f64_histogram("synthetic.retrieve_latency_ms")
+                .with_description("Latency of retrieval challenges")
+                .build(),
+            retrieve_bytes_received: meter
+                .u64_counter("synthetic.retrieve_bytes_received")
+                .with_description("Bytes received in retrieval challenges")
+                .build(),
+        }
+    }
+}
+
 /// The Storb validator.
 #[derive(Clone)]
 pub struct Validator {
@@ -74,6 +163,7 @@ pub struct Validator {
     pub neuron: Arc<RwLock<BaseNeuron>>,
     pub scoring_system: Arc<RwLock<ScoringSystem>>,
     pub metadatadb_sender: mpsc::Sender<metadata::db::MetadataDBCommand>,
+    pub synthetic_metrics: Arc<SyntheticMetrics>,
 }
 
 impl Validator {
@@ -106,6 +196,7 @@ impl Validator {
             neuron,
             scoring_system,
             metadatadb_sender,
+            synthetic_metrics: Arc::new(SyntheticMetrics::new()),
         };
         Ok(validator)
     }
@@ -131,6 +222,8 @@ impl Validator {
         // ----==== Synthetic store challenges ====----
 
         info!("Running store retrieval challenges");
+        self.synthetic_metrics.challenges_requested.add(1, &[]);
+        let start_time = Instant::now();
 
         let synth_size = rng.gen_range(MIN_SYNTH_CHUNK_SIZE..MAX_SYNTH_CHUNK_SIZE + 1);
         // TODO: generate synthetic data separately and in its own interval
@@ -439,6 +532,15 @@ impl Validator {
                 Ok(Ok(challenge_result)) => {
                     let db = self.scoring_system.write().await.db.clone();
 
+                    let elapsed_time = start_time.elapsed().as_secs_f64() * 1_000.0;
+                    self.synthetic_metrics.challenge_duration_ms.record(
+                        elapsed_time,
+                        &[KeyValue::new(
+                            "miner_uid",
+                            challenge_result.miner_uid as i64,
+                        )],
+                    );
+
                     // Update attempts count
                     if let Err(e) = db.conn.lock().await.execute(
                         "UPDATE miner_stats SET retrieval_attempts = retrieval_attempts + 1 WHERE miner_uid = ?",
@@ -506,7 +608,7 @@ impl Validator {
         neuron: BaseNeuron,
         scores: Array1<f64>,
         config: ValidatorConfig,
-        weights_counter: opentelemetry::metrics::Counter<f64>,
+        weight_meter: Arc<WeightMetrics>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let normed_scores = normalize_min_max(&scores);
         debug!("weights: {:?}", normed_scores);
@@ -520,27 +622,32 @@ impl Validator {
             })
             .collect();
 
-        for weight in &weights {
-            weights_counter.add(
-                weight.weight as f64,
-                &[opentelemetry::KeyValue::new("miner_uid", weight.uid as i64)],
-            );
-        }
         let payload = set_weights_payload(config.neuron_config.netuid, weights, 1);
-
+        let start = Instant::now();
         let subtensor = BaseNeuron::get_subtensor_connection(
             neuron.config.subtensor.insecure,
             &neuron.config.subtensor.address,
         )
         .await?;
-        subtensor
+        let res = subtensor
             .tx()
             .sign_and_submit_default(&payload, &neuron.signer)
-            .await?;
-
-        drop(neuron);
-
-        Ok(())
+            .await;
+        weight_meter
+            .publish_latency_ms
+            .record(start.elapsed().as_secs_f64() * 1_000.0, &[]);
+        match res {
+            Ok(_) => {
+                weight_meter.publish_total.add(1, &[]);
+                drop(neuron);
+                Ok(())
+            }
+            Err(e) => {
+                weight_meter.publish_fail.add(1, &[]);
+                drop(neuron);
+                Err(Box::new(e))
+            }
+        }
     }
 
     async fn run_store_challenge(
@@ -557,6 +664,10 @@ impl Validator {
         let socket_addr =
             multiaddr_to_socketaddr(&quic_addr).ok_or_else(|| anyhow!("Invalid QUIC address"))?;
 
+        self.synthetic_metrics
+            .store_total
+            .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+
         let start_time = Instant::now();
 
         let piece_len = piece.data.len();
@@ -571,6 +682,16 @@ impl Validator {
                     piece_hash,
                     success: false,
                     error: Some(format!("QUIC connection failed: {}", e)),
+                })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .store_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.store_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
                 })
             }
         };
@@ -598,11 +719,38 @@ impl Validator {
                     success: false,
                     error: Some(format!("Upload failed: {}", e)),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .store_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.store_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                })
             }
         };
 
         let latency = start_time.elapsed().as_secs_f64();
         let success = hash == piece_hash;
+
+        self.synthetic_metrics
+            .store_latency_ms
+            .record(latency * 1_000.0, &[]);
+        self.synthetic_metrics
+            .store_bytes_sent
+            .add(piece_len as u64, &[]);
+
+        if success {
+            self.synthetic_metrics
+                .store_success
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+        } else {
+            self.synthetic_metrics
+                .store_failure
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+        }
 
         Ok(ChallengeResult {
             miner_uid,
@@ -631,6 +779,10 @@ impl Validator {
         signer: Signer,
         validator_id: NodeUID,
     ) -> Result<ChallengeResult, Box<dyn std::error::Error + Send + Sync>> {
+        self.synthetic_metrics
+            .retrieve_total
+            .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+        let metrics_start_time = Instant::now();
         let message = VerificationMessage {
             netuid: self.config.neuron_config.netuid,
             miner: KeyRegistrationInfo {
@@ -658,6 +810,16 @@ impl Validator {
                     success: false,
                     error: Some(format!("Serialization failed: {}", e)),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .retrieve_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.retrieve_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                });
             }
         };
 
@@ -684,6 +846,16 @@ impl Validator {
                     success: false,
                     error: Some("Invalid HTTP address".to_string()),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .retrieve_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.retrieve_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                });
             }
         };
 
@@ -715,6 +887,16 @@ impl Validator {
                     success: false,
                     error: Some(format!("Request failed: {}", e)),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .retrieve_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.retrieve_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                });
             }
         };
 
@@ -728,6 +910,16 @@ impl Validator {
                 piece_hash,
                 success: false,
                 error: Some(format!("Bad status code: {}", response.status())),
+            })
+            .map(|r| {
+                self.synthetic_metrics
+                    .retrieve_failure
+                    .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                self.synthetic_metrics.retrieve_latency_ms.record(
+                    SYNTH_CHALLENGE_TIMEOUT,
+                    &[KeyValue::new("miner_uid", miner_uid as i64)],
+                );
+                r
             });
         }
 
@@ -742,6 +934,16 @@ impl Validator {
                     success: false,
                     error: Some(format!("Failed to read response body: {}", e)),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .retrieve_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.retrieve_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                });
             }
         };
 
@@ -756,11 +958,41 @@ impl Validator {
                     success: false,
                     error: Some(format!("Failed to deserialize piece: {}", e)),
                 })
+                .map(|r| {
+                    self.synthetic_metrics
+                        .retrieve_failure
+                        .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+                    self.synthetic_metrics.retrieve_latency_ms.record(
+                        SYNTH_CHALLENGE_TIMEOUT,
+                        &[KeyValue::new("miner_uid", miner_uid as i64)],
+                    );
+                    r
+                });
             }
         };
 
         let computed_hash = blake3::hash(&piece_data);
         let success = PieceHash(*computed_hash.as_bytes()) == piece_hash;
+
+        let metrics_elapsed_time = metrics_start_time.elapsed().as_secs_f64() * 1_000.0;
+        self.synthetic_metrics.retrieve_latency_ms.record(
+            metrics_elapsed_time,
+            &[KeyValue::new("miner_uid", miner_uid as i64)],
+        );
+        self.synthetic_metrics.retrieve_bytes_received.add(
+            piece_data.len() as u64,
+            &[KeyValue::new("miner_uid", miner_uid as i64)],
+        );
+
+        if success {
+            self.synthetic_metrics
+                .retrieve_success
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+        } else {
+            self.synthetic_metrics
+                .retrieve_failure
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as i64)]);
+        }
 
         Ok(ChallengeResult {
             miner_uid,

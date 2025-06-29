@@ -20,6 +20,7 @@ futures.workspace = true
 hex.workspace = true
 libp2p.workspace = true
 ndarray.workspace = true
+once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true

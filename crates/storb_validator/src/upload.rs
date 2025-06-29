@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
@@ -16,7 +17,8 @@ use crabtensor::sign::{sign_message, KeypairSignature};
 use crabtensor::AccountId;
 use futures::{Stream, TryStreamExt};
 use libp2p::Multiaddr;
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::KeyValue;
 use quinn::Connection;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -24,7 +26,7 @@ use rand::SeedableRng;
 use subxt::ext::codec::Compact;
 use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::constants::MIN_REQUIRED_MINERS;
 use crate::metadata;
@@ -32,39 +34,44 @@ use crate::metadata::models::SqlAccountId;
 use crate::quic::establish_miner_connections;
 use crate::scoring::ScoringSystem;
 use crate::utils::get_id_quic_uids;
+use crate::validator::UPLOAD_METER;
 use crate::ValidatorState;
 
 const LOGGING_INTERVAL_MB: u64 = 100;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 
-struct UploadMetrics {
+#[derive(Debug)]
+pub struct UploadMetrics {
+    // Total Upload Requests
+    pub upload_requests: Counter<u64>,
     /// Total bytes received from client
-    bytes_received: Counter<u64>,
+    pub bytes_received: Counter<u64>,
     /// Number of chunks processed
-    chunks_processed: Counter<u64>,
+    pub chunks_processed: Counter<u64>,
     /// Time taken to process each chunk
-    chunk_processing_time: Histogram<f64>,
+    pub chunk_processing_time: Histogram<f64>,
     /// Time taken to process each piece
-    piece_processing_time: Histogram<f64>,
+    pub piece_processing_time: Histogram<f64>,
     /// Number of pieces attempted per miner
-    pieces_uploaded: Counter<u64>,
+    pub pieces_uploaded: Counter<u64>,
     /// Number of successful piece uploads
-    pieces_succeeded: Counter<u64>,
+    pub pieces_succeeded: Counter<u64>,
     /// Number of failed piece uploads
-    pieces_failed: Counter<u64>,
+    pub pieces_failed: Counter<u64>,
 }
 
 impl UploadMetrics {
     pub fn new() -> Self {
-        let m = &*METER;
+        let m = &*UPLOAD_METER;
         Self {
-            bytes_received: m.u64_counter("upload.bytes_received").init(),
-            chunks_processed: m.u64_counter("upload.chunks_processed").init(),
-            chunk_processing_time: m.f64_histogram("upload.chunk_processing_ms").init(),
-            piece_processing_time: m.f64_histogram("upload.piece_processing_ms").init(),
-            pieces_uploaded: m.u64_counter("upload.pieces_uploaded").init(),
-            pieces_succeeded: m.u64_counter("upload.pieces_succeeded").init(),
-            pieces_failed: m.u64_counter("upload.pieces_failed").init(),
+            upload_requests: m.u64_counter("upload.requests").build(),
+            bytes_received: m.u64_counter("upload.bytes_received").build(),
+            chunks_processed: m.u64_counter("upload.chunks_processed").build(),
+            chunk_processing_time: m.f64_histogram("upload.chunk_processing_ms").build(),
+            piece_processing_time: m.f64_histogram("upload.piece_processing_ms").build(),
+            pieces_uploaded: m.u64_counter("upload.pieces_uploaded").build(),
+            pieces_succeeded: m.u64_counter("upload.pieces_succeeded").build(),
+            pieces_failed: m.u64_counter("upload.pieces_failed").build(),
         }
     }
 }
@@ -266,7 +273,6 @@ impl<'a> UploadProcessor<'a> {
         E: Into<Box<dyn std::error::Error + Send + Sync>> + 'static,
     {
         self.metrics.upload_requests.add(1, &[]);
-        let timer = std::time::Instant::now();
 
         info!("Processing upload of size {} bytes...", total_size);
 
@@ -277,19 +283,13 @@ impl<'a> UploadProcessor<'a> {
 
         let chunk_size = piece_length(total_size, None, None);
         let (tx, rx) = mpsc::channel::<(u64, Vec<u8>)>(chunk_size as usize);
-
+        let metrics_cloned = self.metrics.clone();
         // Spawn producer task
         let producer_handle = {
             let stream = Box::pin(stream);
             tokio::spawn(async move {
-                if let Err(e) = produce_bytes(
-                    stream,
-                    tx,
-                    total_size,
-                    chunk_size as usize,
-                    self.metrics.clone(),
-                )
-                .await
+                if let Err(e) =
+                    produce_bytes(stream, tx, total_size, chunk_size as usize, metrics_cloned).await
                 {
                     error!("Producer error: {}", e);
                     return Err(e);
@@ -323,7 +323,7 @@ impl<'a> UploadProcessor<'a> {
 
         // Get MemoryDB from state
         let scoring_system = validator.scoring_system.clone();
-
+        let metrics_cloned = self.metrics.clone();
         // Cloning again to avoid borrowing issues
         let validator_clone = validator.clone();
         let consumer_handle = tokio::spawn(async move {
@@ -334,7 +334,7 @@ impl<'a> UploadProcessor<'a> {
                 rx,
                 miner_uids,
                 miner_connections,
-                self.metrics.clone(),
+                metrics_cloned,
             )
             .await
         });
@@ -424,7 +424,7 @@ where
     while let Some(chunk_result) = stream.try_next().await? {
         buffer.extend_from_slice(&chunk_result);
         let n = chunk_result.len() as u64;
-        metrics.upload_bytes_received.add(n, &[]);
+        metrics.bytes_received.add(n, &[]);
         // Process full chunks
         while buffer.len() >= chunk_size {
             let chunk_data = buffer.drain(..chunk_size).collect::<Vec<u8>>();
@@ -549,6 +549,7 @@ async fn consume_bytes(
                 let metadatadb_sender_clone = metadatadb_sender.clone();
 
                 let piece_data = piece.clone();
+                let metrics_clone = metrics.clone();
                 let future = tokio::spawn(async move {
                     // Check if this piece was already successfully uploaded
                     let suc_pieces_read = successful_pieces.read().await;
@@ -580,7 +581,7 @@ async fn consume_bytes(
                             piece_data.clone(),
                             scoring_clone,
                             Some(metadatadb_sender_clone),
-                            Some(metrics.clone())
+                            Some(metrics_clone)
                         ) => {
                             match upload_result {
                                 Ok((piece_hash, miner_uid)) => {
@@ -747,18 +748,21 @@ pub async fn upload_piece_to_miner(
     }
 
     let miner_uid = miner_info.neuron_info.uid;
-    metrics
-        .pieces_uploaded
-        .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
+    if let Some(ref metrics) = metrics {
+        metrics
+            .pieces_uploaded
+            .add(1, &[KeyValue::new("miner_uid", miner_uid as f64)]);
+    }
 
     let upload_start = Instant::now();
     let upload_result =
         upload_piece_data(validator_base_neuron.clone(), miner_info, conn, piece.data).await?;
-
     let elapsed_ms = upload_start.elapsed().as_secs_f64() * 1_000.0;
-    metrics
-        .piece_processing_time
-        .record(elapsed_ms, &[KeyValue::new("miner_uid", miner_uid)]);
+    if let Some(ref metrics) = metrics {
+        metrics
+            .piece_processing_time
+            .record(elapsed_ms, &[KeyValue::new("miner_uid", miner_uid as f64)]);
+    }
 
     // Verification: Check if the hash received from the miner is the same
     // as the hash of the piece and update the stats of the miner in the database accordingly
@@ -786,17 +790,21 @@ pub async fn upload_piece_to_miner(
         scoring_system_guard
             .update_alpha_beta_db(miner_uid, 1.0, true)
             .await?;
-        metrics
-            .pieces_succeeded
-            .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
+        if let Some(ref metrics) = metrics {
+            metrics
+                .pieces_succeeded
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as f64)]);
+        }
     } else {
         let mut scoring_system_guard = scoring_system.write().await;
         scoring_system_guard
             .update_alpha_beta_db(miner_uid, 1.0, false)
             .await?;
-        metrics
-            .pieces_failed
-            .add(1, &[KeyValue::new("miner_uid", miner_uid)]);
+        if let Some(ref metrics) = metrics {
+            metrics
+                .pieces_failed
+                .add(1, &[KeyValue::new("miner_uid", miner_uid as f64)]);
+        }
     }
 
     Ok((piece_hash, miner_uid))

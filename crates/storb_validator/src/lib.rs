@@ -16,7 +16,9 @@ use chrono::TimeDelta;
 use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
 use middleware::{require_api_key, InfoApiRateLimiter};
+use once_cell::sync::Lazy;
 use opentelemetry::global;
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::Resource;
@@ -45,6 +47,37 @@ mod utils;
 pub mod validator;
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10 GiB
+pub static WEIGHT_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("weights"));
+
+#[derive(Debug)]
+pub struct WeightMetrics {
+    pub publish_total: Counter<u64>,
+    pub publish_fail: Counter<u64>,
+    pub publish_latency_ms: Histogram<f64>,
+}
+
+impl WeightMetrics {
+    pub fn new() -> Self {
+        let meter = &*WEIGHT_METER;
+
+        Self {
+            publish_total: meter
+                .u64_counter("weights.publish_total")
+                .with_description("How many times we attempted to push weights on-chain")
+                .build(),
+
+            publish_fail: meter
+                .u64_counter("weights.publish_fail")
+                .with_description("How many of those attempts errored")
+                .build(),
+
+            publish_latency_ms: meter
+                .f64_histogram("weights.publish_latency_ms")
+                .with_description("End-to-end latency of the weight-tx submission (ms)")
+                .build(),
+        }
+    }
+}
 
 /// State maintained by the validator service
 ///
@@ -74,6 +107,7 @@ struct ValidatorState {
 /// On success, returns Ok(()).
 /// On failure, returns error with details of the failure.
 pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
+    let weight_metrics = Arc::new(WeightMetrics::new());
     let validator = Arc::new(Validator::new(config.clone()).await?);
 
     let neuron = validator.neuron.clone();
@@ -113,13 +147,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
         .build();
 
     global::set_meter_provider(metrics_provider.clone());
-
-    let meter = global::meter("validator::metrics");
-    let weights_counter = meter
-        .f64_counter("miner.weight")
-        .with_description("Current weight per miner")
-        .with_unit("score")
-        .build();
 
     info!("Set up OTEL metrics exporter");
 
@@ -162,7 +189,7 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
                             neuron_guard.clone(),
                             ema_scores,
                             sync_config.clone(),
-                            weights_counter.clone(),
+                            weight_metrics.clone(),
                         )
                         .await
                         {

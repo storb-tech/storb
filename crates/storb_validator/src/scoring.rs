@@ -5,10 +5,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use base::memory_db::MemoryDb;
 use ndarray::{array, s, Array, Array1};
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::Histogram;
+use opentelemetry::KeyValue;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::constants::{INITIAL_ALPHA, INITIAL_BETA};
 use crate::validator::SCORE_METER;
@@ -102,7 +103,7 @@ impl ScoringSystem {
         let score_histogram = meter
             .f64_histogram("storb.validator.score_histogram")
             .with_description("Histogram of miner scores")
-            .init();
+            .build();
 
         let mut scoring_system = Self {
             db,
@@ -144,7 +145,7 @@ impl ScoringSystem {
         let db = self.db.clone();
         let conn = db.conn.lock().await;
         conn.execute(
-            "UPDATE miner_stats SET 
+            "UPDATE miner_stats SET
                 alpha = ?1,
                 beta = ?2,
                 store_successes = 0,
@@ -284,8 +285,8 @@ impl ScoringSystem {
         info!("new scores: {}", state.ema_scores);
 
         for (uid, &score) in state.ema_scores.iter().enumerate() {
-            let attrs = &[KeyValue::new("miner_uid", uid as u64)];
-            score_histogram.record(score, attrs);
+            let attrs = &[KeyValue::new("miner_uid", uid as i64)];
+            self.score_histogram.record(score, attrs);
         }
 
         debug!("score metrics collected");
