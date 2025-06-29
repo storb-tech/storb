@@ -11,6 +11,7 @@ use rusqlite::{
 };
 use serde::{Deserialize, Serialize};
 use subxt::ext::codec::Compact;
+use tracing::debug;
 
 // Newtype wrapper for DateTime<Utc>
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -68,7 +69,16 @@ impl InfohashValue {
     /// Verify that the signature is valid for this infohash value
     pub fn verify_signature(&self, nonce: &[u8; 32]) -> bool {
         let message = self.get_signature_message(nonce);
-        crabtensor::sign::verify_signature(&self.owner_account_id.0, &self.signature, message)
+        // Log info
+        debug!(
+            "Verifying signature for infohash {} with nonce {} with signature {} with account id {}",
+            hex::encode(self.infohash.0),
+            hex::encode(nonce),
+            hex::encode(self.signature.0),
+            self.owner_account_id.0,
+        );
+
+        crabtensor::sign::verify_signature(&self.owner_account_id.0, &self.signature, &message)
     }
 
     /// Get the message that should be signed for this infohash

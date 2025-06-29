@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use base::piece_hash::{piecehash_str_to_bytes, PieceHashStr};
 use base::verification::HandshakePayload;
 use crabtensor::sign::verify_signature;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::MinerState;
 
@@ -24,7 +24,7 @@ use crate::MinerState;
 pub async fn node_info(
     state: axum::extract::State<MinerState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    info!("Got node info req");
+    trace!("Got node info req");
     let local_node_info = state.local_node_info.clone();
     let serialized_local_node_info = bincode::serialize(&local_node_info).map_err(|e| {
         error!("Error while deserialising local node info: {e}");

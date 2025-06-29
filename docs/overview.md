@@ -25,7 +25,7 @@ In the future a client cli tool and/or SDK will be created to make this process 
 fc52edb98e03d5e45381f7dd9e85353b84c5a4b419daf5efe0298ccbfd1d938c
 ```
 
-- Using the polkadot js frontend to sign this would output:
+- Using [`storb-sign`](https://github.com/Shr1ftyy/storb-sign) to sign this would output:
 
 ```
 0xe23e5bc68d39a6130d1d224d08472e687d6227ce5030fc53887829f5d278e2500dc7a81ba84bad424e42648ed76c640835e614225b39a5fe6fd57f266896ac82

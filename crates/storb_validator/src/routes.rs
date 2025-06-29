@@ -13,7 +13,7 @@ use subxt::ext::sp_core::crypto::Ss58Codec;
 use subxt::ext::sp_core::ByteArray;
 use subxt::ext::sp_runtime::AccountId32;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::apikey::ApiKeyManager;
 use crate::download::DownloadProcessor;
@@ -37,7 +37,7 @@ use crate::ValidatorState;
 pub async fn node_info(
     state: axum::extract::State<ValidatorState>,
 ) -> Result<impl IntoResponse, (StatusCode, Vec<u8>)> {
-    info!("Got node info req");
+    trace!("Got node info req");
     let local_node_info = state.local_node_info.clone();
     let serialized_local_node_info = bincode::serialize(&local_node_info).map_err(|e| {
         error!("Error while deserialising local node info: {e}");

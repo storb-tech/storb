@@ -6,8 +6,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::{
-    metadata::{db::MetadataDB, models::CrSqliteChanges},
-    validator::Validator,
+    constants::TAO_IN_RAO, metadata::{db::MetadataDB, models::CrSqliteChanges}, validator::Validator
 };
 
 #[derive(Debug, Error)]
@@ -121,7 +120,7 @@ pub async fn sync_metadata_db(validator: Arc<Validator>) -> Result<(), SyncError
             .iter()
             .map(|(_, stake)| stake.0)
             .sum::<u64>() as f64
-            / 1_000_000_000.0;
+            / TAO_IN_RAO;
         debug!(
             "Neuron {} has stake {}, threshold is {}",
             neuron_info.uid, stake, sync_stake_threshold

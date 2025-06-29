@@ -304,14 +304,20 @@ impl<'a> UploadProcessor<'a> {
             hex::encode(blake3::hash(&serialized).as_bytes())
         );
 
-        metadata::db::MetadataDB::insert_object(
+        match metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
             signed_infohash_value,
             &nonce,
             chunks_with_pieces,
         )
         .await
-        .expect("Failed to insert object entry into local database"); // TOOD: handle this error properly
+        {
+            Ok(_) => debug!("Successfully inserted object into local database"),
+            Err(e) => {
+                error!("Failed to insert object into local database: {}", e);
+                return Err(e.into());
+            }
+        }
         debug!("Inserted object entry with infohash {infohash_str} into local database");
 
         Ok(infohash_str)

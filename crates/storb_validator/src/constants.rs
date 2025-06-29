@@ -23,6 +23,12 @@ pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synth
 pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
 pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 10; // maximum number of miners to challenge
 
+// constants for MetadataDB
+pub const DB_MAX_LIFETIME: u64 = 3600; // Close connections after 1 hour
+pub const IDLE_TIMEOUT: u64 = 600; // Close connections after 10 minutes of inactivity
+pub const CONNECTION_TIMEOUT: u64 = 30; // Timeout for establishing a connection
+pub const TAO_IN_RAO: f64 = 1_000_000_000.0; // 1 TAO = 1,000,000,000 RAO
+
 pub const INFO_API_RATE_LIMIT_DURATION: Duration = Duration::from_secs(60);
 pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
 
