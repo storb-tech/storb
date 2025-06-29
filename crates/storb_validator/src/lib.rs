@@ -11,7 +11,7 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Router};
 use base::constants::NEURON_SYNC_TIMEOUT;
 use base::sync::Synchronizable;
-use base::{LocalNodeInfo, NeuronError};
+use base::LocalNodeInfo;
 use chrono::TimeDelta;
 use constants::{METADATADB_SYNC_FREQUENCY, SYNTHETIC_CHALLENGE_FREQUENCY};
 use dashmap::DashMap;
@@ -124,34 +124,6 @@ pub async fn run_validator(config: ValidatorConfig) -> Result<()> {
     let sync_frequency = config.clone().neuron_config.neuron.sync_frequency;
 
     let sync_config = config.clone();
-
-    let identifier_resource = Resource::builder()
-        .with_attribute(opentelemetry::KeyValue::new(
-            "service.name",
-            config.otel_service_name,
-        ))
-        .build();
-    let mut otel_headers: HashMap<String, String> = HashMap::new();
-    otel_headers.insert("X-Api-Key".to_string(), config.otel_api_key.clone());
-    let url = config.otel_endpoint.clone() + "metrics";
-    let metrics_exporter = MetricExporter::builder()
-        .with_http()
-        .with_endpoint(url)
-        .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-        .with_headers(otel_headers)
-        .build()
-        .map_err(|e| {
-            NeuronError::ConfigError(format!("Failed to build OTEL MetricExporter: {:?}", e))
-        })?;
-
-    let metrics_provider = SdkMeterProvider::builder()
-        .with_periodic_exporter(metrics_exporter)
-        .with_resource(identifier_resource)
-        .build();
-
-    global::set_meter_provider(metrics_provider.clone());
-
-    info!("Set up OTEL metrics exporter");
 
     tokio::spawn(async move {
         let local_validator = validator_for_sync;
