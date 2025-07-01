@@ -33,6 +33,7 @@ rustls.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sp-core.workspace = true
 subxt.workspace = true
 tokio.workspace = true
 tokio-serde.workspace = true

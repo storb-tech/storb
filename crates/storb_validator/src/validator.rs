@@ -188,7 +188,7 @@ impl Validator {
         let signature = sign_message(&signer, message);
 
         let infohash_value = metadata::models::InfohashValue {
-            signature,
+            signature: signature?,
             ..infohash_value
         };
 
@@ -643,7 +643,10 @@ impl Validator {
         let piece_len = piece_size;
 
         let signature = sign_message(&signer, &message);
-        let payload = HandshakePayload { signature, message };
+        let payload = HandshakePayload {
+            signature: signature?,
+            message,
+        };
         let payload_bytes = match bincode::serialize(&payload) {
             Ok(bytes) => bytes,
             Err(e) => {

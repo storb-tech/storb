@@ -2740,7 +2740,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
 
@@ -2851,7 +2851,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
 
@@ -2932,7 +2932,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
 
@@ -3049,7 +3049,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
 
@@ -3152,7 +3152,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
 
@@ -3283,7 +3283,7 @@ mod tests {
         let message = infohash_value1.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value1 = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value1
         };
 
@@ -3342,7 +3342,7 @@ mod tests {
         let message = infohash_value2.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value2 = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value2
         };
 
@@ -3425,7 +3425,7 @@ mod tests {
         let message = infohash_value3.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value3 = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value3
         };
 
@@ -3512,7 +3512,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value
         };
         let chunk = ChunkValue {
@@ -3562,7 +3562,7 @@ mod tests {
         let message = infohash_value.get_signature_message(&nonce);
         let signature = sign_message(&signer, &message);
         let infohash_value = InfohashValue {
-            signature, // Use the signed signature
+            signature: signature.unwrap(), // Use the signed signature
             ..infohash_value.clone()
         };
 
