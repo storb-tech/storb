@@ -20,8 +20,8 @@ use quinn::Connection;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use sp_core::hexdisplay::AsBytesRef;
 use subxt::ext::codec::Compact;
-use subxt::ext::sp_core::hexdisplay::AsBytesRef;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
@@ -74,7 +74,10 @@ pub async fn upload_piece_data(
         },
     };
     let signature = sign_message(&signer, &message);
-    let payload = HandshakePayload { signature, message };
+    let payload = HandshakePayload {
+        signature: signature?,
+        message,
+    };
     let payload_bytes = bincode::serialize(&payload)?;
     debug!("payload_bytes: {:?}", payload_bytes);
 

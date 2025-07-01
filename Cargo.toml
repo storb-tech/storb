@@ -19,9 +19,9 @@ storb_miner = { version = "*", path = "crates/storb_miner" }
 storb_validator = { version = "*", path = "crates/storb_validator" }
 
 # Crabtensor
-crabtensor = { git = "https://github.com/storb-tech/crabtensor.git", version = "0.5.2" }
-sp-runtime = "=39.0.2"
-subxt = "=0.38.0"
+crabtensor = { git = "https://github.com/storb-tech/crabtensor.git", tag = "v0.6.0" }
+sp-core = "36.1.0"
+subxt = "0.41.0"
 
 # Third party
 anyhow = "1.0.95"

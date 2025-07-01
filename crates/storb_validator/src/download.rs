@@ -11,7 +11,7 @@ use base::constants::MIN_BANDWIDTH;
 use base::piece::PieceHash;
 use base::verification::{HandshakePayload, KeyRegistrationInfo, VerificationMessage};
 use base::{AddressBook, BaseNeuron, NodeInfo};
-use crabtensor::sign::sign_message;
+use crabtensor::sign::{sign_message, PairSigner};
 use futures::stream::FuturesUnordered;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
@@ -47,7 +47,7 @@ pub async fn get_piece_from_miner(
     req_client: reqwest::Client,
     node_info: &NodeInfo,
     piece_hash: PieceHash,
-    signer: Arc<subxt::tx::PairSigner<subxt::SubstrateConfig, subxt::ext::sp_core::sr25519::Pair>>,
+    signer: Arc<PairSigner>,
     vali_uid: u16,
     scoring_system: Arc<RwLock<ScoringSystem>>,
 ) -> Result<reqwest::Response> {
@@ -66,7 +66,10 @@ pub async fn get_piece_from_miner(
         },
     };
     let signature = sign_message(&signer, &message);
-    let payload = HandshakePayload { signature, message };
+    let payload = HandshakePayload {
+        signature: signature?,
+        message,
+    };
     let payload_bytes = bincode::serialize(&payload)?;
 
     // Create URL

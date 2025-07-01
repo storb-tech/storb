@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -9,9 +10,8 @@ use axum::response::{AppendHeaders, IntoResponse};
 use base::piece::InfoHash;
 use crabtensor::sign::KeypairSignature;
 use crabtensor::AccountId;
-use subxt::ext::sp_core::crypto::Ss58Codec;
-use subxt::ext::sp_core::ByteArray;
-use subxt::ext::sp_runtime::AccountId32;
+use sp_core::ByteArray;
+use subxt::utils::AccountId32;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, trace};
 
@@ -136,8 +136,8 @@ pub async fn generate_nonce(
     debug!("Generating nonce for account_id: {}", account_id);
     let metadatadb_sender = state.validator.metadatadb_sender.clone();
     // create an AccountId from the ss58 string account_id
-    let acc_id: AccountId = match AccountId32::from_string(account_id) {
-        Ok(acc_id) => acc_id.into(),
+    let acc_id: AccountId = match AccountId32::from_str(account_id) {
+        Ok(acc_id) => acc_id,
         Err(e) => {
             error!("Failed to parse account_id: {}: {}", account_id, e);
             return Err((
@@ -216,8 +216,8 @@ pub async fn upload_file(
         )
     })?;
 
-    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
-        Ok(acc_id) => acc_id.into(),
+    let account_id: AccountId = match AccountId32::from_str(account_id_str) {
+        Ok(acc_id) => acc_id,
         Err(e) => {
             error!("Failed to parse account_id: {}: {}", account_id_str, e);
             return Err((
@@ -531,8 +531,8 @@ pub async fn delete_file(
         )
     })?;
 
-    let account_id: AccountId = match AccountId32::from_string(account_id_str) {
-        Ok(acc_id) => acc_id.into(),
+    let account_id: AccountId = match AccountId32::from_str(account_id_str) {
+        Ok(acc_id) => acc_id,
         Err(e) => {
             error!("Failed to parse account_id: {}: {}", account_id_str, e);
             return Err((
