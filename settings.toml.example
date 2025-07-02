@@ -1,4 +1,4 @@
-version = "0.2.1"
+version = "0.2.2"
 log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 
 netuid = 26             # Testnet is 269
