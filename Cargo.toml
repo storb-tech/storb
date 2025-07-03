@@ -80,6 +80,7 @@ tracing-subscriber = { version = "0.3.19", features = [
     "registry",
     "std",
 ] }
+tracing-opentelemetry = "0.31.0"
 ureq = "3.0.11"
 utoipa = "5"
 uuid = "1.12.1"

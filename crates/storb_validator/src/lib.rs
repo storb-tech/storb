@@ -19,6 +19,7 @@ use middleware::{require_api_key, InfoApiRateLimiter};
 use once_cell::sync::Lazy;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::{
     MetricExporter, Protocol, SpanExporter, WithExportConfig, WithHttpConfig,
 };
@@ -28,6 +29,9 @@ use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info, warn};
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::Registry;
 use validator::{Validator, ValidatorConfig};
 
 use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
@@ -425,6 +429,13 @@ fn init_metrics(cfg: &ValidatorConfig) -> anyhow::Result<()> {
 /// Runs the main async runtime
 pub fn run(config: ValidatorConfig) {
     let _ = init_metrics(&config);
+    let tracer = global::tracer_provider()
+        .tracer(&config.otel_service_name + " - v" + Some(env!("CARGO_PKG_VERSION")));
+
+    let otel_layer = OpenTelemetryLayer::new(tracer);
+    let subscriber = Registry::default().with(otel_layer);
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("Failed to setup global tracing subscriber");
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
