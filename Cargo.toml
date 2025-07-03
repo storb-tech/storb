@@ -44,14 +44,14 @@ libp2p = { version = "0.55.0", features = ["full", "serde"] }
 lru = "0.13.0"
 ndarray = { version = "0.16.1", features = ["serde"] }
 once_cell = "1.21.3"
-opentelemetry = { version = "0.29.1", default-features = false, features = [
+opentelemetry = { version = "0.30.0", default-features = false, features = [
     "trace",
 ] }
-opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
+opentelemetry_sdk = { version = "0.30.0", default-features = false, features = [
     "trace",
 ] }
-opentelemetry-otlp = "0.29.0"
-opentelemetry-appender-tracing = "0.29.1"
+opentelemetry-otlp = "0.30.0"
+opentelemetry-appender-tracing = "0.30.0"
 quinn = "0.11.2"
 r2d2 = "0.8"
 r2d2_sqlite = "0.28"

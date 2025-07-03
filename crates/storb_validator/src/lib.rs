@@ -24,14 +24,13 @@ use opentelemetry_otlp::{
     MetricExporter, Protocol, SpanExporter, WithExportConfig, WithHttpConfig,
 };
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use opentelemetry_sdk::{trace, trace::BatchSpanProcessor, Resource};
+use opentelemetry_sdk::{trace as sdkTrace, trace::BatchSpanProcessor, Resource};
 use routes::{download_file, node_info, upload_file};
 use tokio::time::interval;
 use tokio::{sync::RwLock, time};
 use tracing::{debug, error, info, warn};
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::Registry;
+use tracing_subscriber::{layer::SubscriberExt, Registry};
 use validator::{Validator, ValidatorConfig};
 
 use crate::constants::{NONCE_CLEANUP_FREQUENCY, NONCE_EXPIRATION_TIME};
@@ -374,10 +373,10 @@ async fn main(config: ValidatorConfig) {
         .expect("Failed to run the validator")
 }
 
-fn init_metrics(cfg: &ValidatorConfig) -> anyhow::Result<()> {
+fn init_metrics(cfg: &ValidatorConfig) -> anyhow::Result<Option<sdkTrace::Tracer>> {
     if cfg.otel_api_key.trim().is_empty() {
         info!("No OTEL API key; disabling metrics");
-        return Ok(());
+        return Ok(None);
     } else {
         info!("OTEL API key found; enabling metrics");
         let mut headers = HashMap::new();
@@ -415,23 +414,22 @@ fn init_metrics(cfg: &ValidatorConfig) -> anyhow::Result<()> {
             .build()
             .expect("Failed to create OTEL trace exporter");
 
-        let tracer_provider = trace::SdkTracerProvider::builder()
+        let tracer_provider = sdkTrace::SdkTracerProvider::builder()
             .with_resource(resource)
             .with_span_processor(BatchSpanProcessor::builder(trace_exporter).build())
             .build();
 
-        global::set_tracer_provider(tracer_provider);
-    }
+        let name = cfg.otel_service_name.clone() + " - v" + VERSION;
+        let tracer = tracer_provider.tracer(name);
 
-    Ok(())
+        global::set_tracer_provider(tracer_provider);
+        Ok(Some(tracer))
+    }
 }
 
 /// Runs the main async runtime
 pub fn run(config: ValidatorConfig) {
-    let _ = init_metrics(&config);
-    let tracer = global::tracer_provider()
-        .tracer(&config.otel_service_name + " - v" + Some(env!("CARGO_PKG_VERSION")));
-
+    let tracer = init_metrics(&config).expect("…").unwrap();
     let otel_layer = OpenTelemetryLayer::new(tracer);
     let subscriber = Registry::default().with(otel_layer);
     tracing::subscriber::set_global_default(subscriber)
