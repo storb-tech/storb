@@ -242,6 +242,25 @@ impl<'a> UploadProcessor<'a> {
             }
         };
 
+        let owner_account_id = SqlAccountId(account_id.clone());
+
+        // Verify nonce before we upload the user's file
+        let message = {
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&nonce);
+            msg
+        };
+        debug!("Verifying signature for nonce {}", hex::encode(nonce));
+        let verified =
+            crabtensor::sign::verify_signature(&owner_account_id.0, &signature, &message);
+        if !verified {
+            error!(
+                "Signature verification failed for nonce {}",
+                hex::encode(message)
+            );
+            return Err(anyhow::anyhow!("Signature verification failed for nonce"));
+        }
+
         // Spawn consumer task
         let miner_uids = self.miner_uids.clone();
         let miner_connections = self.miner_connections.clone();
@@ -287,7 +306,7 @@ impl<'a> UploadProcessor<'a> {
             length: total_size,
             chunk_size,
             chunk_count: chunks_with_pieces.len() as u64,
-            owner_account_id: SqlAccountId(account_id.clone()),
+            owner_account_id,
             creation_timestamp: now,
             signature: KeypairSignature::from_raw([0; 64]), // Placeholder, will be signed below
         };
