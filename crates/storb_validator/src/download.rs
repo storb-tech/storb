@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::StreamExt;
 use tracing::{debug, error, trace};
 
+use crate::constants::AUDIT_WEIGHT;
 use crate::metadata;
 use crate::metadata::db::MetadataDBCommand;
 use crate::scoring::ScoringSystem;
@@ -34,7 +35,7 @@ pub async fn update_scoring_on_failure(
 ) -> Result<()> {
     let mut scoring_system_rw = scoring_system.write().await;
     scoring_system_rw
-        .update_alpha_beta_db(miner_uid, 1.0, false)
+        .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, false)
         .await
         .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
     drop(scoring_system_rw);
@@ -238,7 +239,7 @@ impl DownloadProcessor {
                     Err(e) => {
                         let mut scoring_system_rw = scoring_system.write().await;
                         scoring_system_rw
-                            .update_alpha_beta_db(miner_uid, 1.0, false)
+                            .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, false)
                             .await
                             .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                         drop(scoring_system_rw);
@@ -272,7 +273,7 @@ impl DownloadProcessor {
                         Err(e) => {
                             let mut scoring_system_rw = scoring_system.write().await;
                             scoring_system_rw
-                                .update_alpha_beta_db(miner_uid, 1.0, false)
+                                .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, false)
                                 .await
                                 .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                             drop(scoring_system_rw);
@@ -285,7 +286,7 @@ impl DownloadProcessor {
                 db.conn.lock().await.execute("UPDATE miner_stats SET total_successes = total_successes + 1 WHERE miner_uid = $1", [&miner_uid])?;
                 let mut scoring_system_rw = scoring_system.write().await;
                 scoring_system_rw
-                    .update_alpha_beta_db(miner_uid, 1.0, true)
+                    .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, true)
                     .await
                     .map_err(|e| anyhow!("Failed to update scoring system: {}", e))?;
                 drop(scoring_system_rw);

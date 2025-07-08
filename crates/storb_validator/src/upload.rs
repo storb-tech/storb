@@ -25,7 +25,7 @@ use subxt::ext::codec::Compact;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::constants::MIN_REQUIRED_MINERS;
+use crate::constants::{AUDIT_WEIGHT, MIN_REQUIRED_MINERS};
 use crate::metadata;
 use crate::metadata::models::SqlAccountId;
 use crate::quic::establish_miner_connections;
@@ -79,7 +79,6 @@ pub async fn upload_piece_data(
         message,
     };
     let payload_bytes = bincode::serialize(&payload)?;
-    debug!("payload_bytes: {:?}", payload_bytes);
 
     let piece_size = data.len();
     let size: f64 = piece_size as f64;
@@ -100,11 +99,6 @@ pub async fn upload_piece_data(
         .await?;
     send_stream.write_all(&data).await?;
     send_stream.finish()?;
-
-    debug!(
-        "Timeout duration for upload acknowledgement: {} milliseconds",
-        timeout_duration.as_millis()
-    );
 
     // Wrap the upload response operation in a timeout
     let hash = tokio::time::timeout(timeout_duration, async {
@@ -315,16 +309,6 @@ impl<'a> UploadProcessor<'a> {
             signature,
             ..infohash_value
         };
-
-        // display chunks_with_pieces
-        debug!("Chunks with pieces: {:?}", chunks_with_pieces);
-
-        // display hash of chunks_with_pieces
-        let serialized = bincode::serialize(&chunks_with_pieces)?;
-        debug!(
-            "HASH: {}",
-            hex::encode(blake3::hash(&serialized).as_bytes())
-        );
 
         match metadata::db::MetadataDB::insert_object(
             &metadatadb_sender,
@@ -691,12 +675,12 @@ pub async fn upload_piece_to_miner(
         )?;
         let mut scoring_system_guard = scoring_system.write().await;
         scoring_system_guard
-            .update_alpha_beta_db(miner_uid, 1.0, true)
+            .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, true)
             .await?;
     } else {
         let mut scoring_system_guard = scoring_system.write().await;
         scoring_system_guard
-            .update_alpha_beta_db(miner_uid, 1.0, false)
+            .update_alpha_beta_db(miner_uid, AUDIT_WEIGHT, false)
             .await?;
     }
 

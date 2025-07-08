@@ -19,9 +19,9 @@ pub const SYNTHETIC_CHALLENGE_FREQUENCY: u64 = 300;
 pub const MAX_CHALLENGE_PIECE_NUM: i32 = 5;
 pub const SYNTH_CHALLENGE_TIMEOUT: f64 = 1.0; // TODO: modify this
 pub const SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE: f64 = 3.0;
-pub const MIN_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10; // minimum size of synthetic data in bytes
-pub const MAX_SYNTH_CHUNK_SIZE: usize = 1024 * 10 * 10 * 10 * 10; // maximum size of synthetic data in bytes
-pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 25; // maximum number of miners to challenge
+pub const MIN_SYNTH_CHUNK_SIZE: usize = 512 * 1024; // minimum size of synthetic data in bytes
+pub const MAX_SYNTH_CHUNK_SIZE: usize = 8 * 1024 * 1024; // maximum size of synthetic data in bytes
+pub const MAX_SYNTH_CHALLENGE_MINER_NUM: usize = 50; // maximum number of miners to challenge
 
 // constants for MetadataDB
 pub const DB_MAX_LIFETIME: u64 = 3600; // Close connections after 1 hour
@@ -34,5 +34,7 @@ pub const INFO_API_RATE_LIMIT_MAX_REQUESTS: usize = 10;
 
 // Initial values for alpha and beta used in the scoring system
 // These were empirically derived to minimise reliable node churn
-pub const INITIAL_ALPHA: f64 = 500.0;
-pub const INITIAL_BETA: f64 = 1000.0;
+pub const INITIAL_ALPHA: f64 = 18.0;
+pub const INITIAL_BETA: f64 = 36.0;
+pub const LAMBDA: f64 = 0.99;
+pub const AUDIT_WEIGHT: f64 = 1.0;

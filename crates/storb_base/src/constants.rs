@@ -16,6 +16,6 @@ pub const CHUNK_M: usize = 8;
 pub const INFO_REQ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Timeout params for upload requests
-pub const MIN_BANDWIDTH: u64 = 20 * 1024; // minimum "bandwidth"
+pub const MIN_BANDWIDTH: u64 = 100 * 1024; // 100 KiB/s
 
 pub const SYNC_BUFFER_SIZE: usize = 32;

@@ -9,7 +9,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
 
-use crate::constants::{INITIAL_ALPHA, INITIAL_BETA};
+use crate::constants::{INITIAL_ALPHA, INITIAL_BETA, LAMBDA};
 
 /// ScoreState stores the scores for each miner.
 ///
@@ -39,6 +39,7 @@ pub struct ScoringSystem {
     pub lambda: f64,
 }
 
+// normalization function that produces an s curve
 #[inline]
 pub fn normalize_min_max(arr: &Array1<f64>) -> Array1<f64> {
     let min = arr.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -100,7 +101,7 @@ impl ScoringSystem {
             state_file: scoring_state_file.to_path_buf(),
             initial_alpha: INITIAL_ALPHA,
             initial_beta: INITIAL_BETA,
-            lambda: 0.99, // forgetting factor for challenges
+            lambda: LAMBDA, // forgetting factor for challenges
         };
 
         match scoring_system.load_state() {
@@ -163,7 +164,7 @@ impl ScoringSystem {
         )?;
 
         // calculate new alpha and beta
-        let (new_beta, new_alpha) = get_new_alpha_beta(beta, alpha, 0.99, weight, success);
+        let (new_beta, new_alpha) = get_new_alpha_beta(beta, alpha, LAMBDA, weight, success);
         // update alpha and beta in the database
         conn.execute(
             "UPDATE miner_stats SET alpha = ?1, beta = ?2 WHERE miner_uid = ?3",
