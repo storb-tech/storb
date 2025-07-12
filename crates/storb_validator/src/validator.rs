@@ -32,7 +32,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::constants::{
     MAX_CHALLENGE_PIECE_NUM, MAX_SYNTH_CHALLENGE_MINER_NUM, MAX_SYNTH_CHUNK_SIZE,
-    MIN_SYNTH_CHUNK_SIZE, SYNTH_CHALLENGE_TIMEOUT, SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
+    MIN_SYNTH_CHUNK_SIZE, OWNER_UID, OWNER_WEIGHT, SYNTH_CHALLENGE_TIMEOUT,
+    SYNTH_CHALLENGE_WAIT_BEFORE_RETRIEVE,
 };
 use crate::metadata;
 use crate::metadata::models::SqlAccountId;
@@ -506,7 +507,50 @@ impl Validator {
         config: ValidatorConfig,
         weights_counter: opentelemetry::metrics::Counter<f64>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let normed_scores = normalize_min_max(&scores);
+        let mut normed_scores = normalize_min_max(&scores);
+
+        // We adjust OWNER_UID to have OWNER_WEIGHT proportion of total scores
+        // so if weights are:
+        // [0.1, 0.2, 0.3] and OWNER_WEIGHT is 0.9, then OWNER_UID (e.g. 0) will have
+        // 90% of the sum of all weights, so the array will be:
+        // [1., 0.04444444, 0.06666667], because 1 + 0.04444444 + 0.06666667 = 1.11111111
+        // and 1 / 1.11111111 = 0.9
+        // This is used to recycle emissions by redirecting a portion of the rewards to the owner
+        // If the OWNER_UID is not present in the weights, then we don't need to adjust it.
+        if let Some(_current_owner_score) = normed_scores.get(OWNER_UID) {
+            let mut adjusted_scores = normed_scores.to_vec();
+
+            // Calculate the sum of all scores except the owner
+            let non_owner_total: f64 = adjusted_scores
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != OWNER_UID)
+                .map(|(_, score)| *score)
+                .sum();
+
+            // Set OWNER_UID score to OWNER_WEIGHT proportion
+            adjusted_scores[OWNER_UID] = OWNER_WEIGHT;
+
+            // Scale the remaining scores to use the remaining weight (1.0 - OWNER_WEIGHT)
+            let remaining_weight = 1.0 - OWNER_WEIGHT;
+            if non_owner_total > 0.0 {
+                for (i, score) in adjusted_scores.iter_mut().enumerate() {
+                    if i != OWNER_UID {
+                        *score = (*score / non_owner_total) * remaining_weight;
+                    }
+                }
+            }
+
+            let new_scores = normalize_min_max(&Array1::from(adjusted_scores));
+            debug!("Adjusted scores with OWNER_UID: {:?}", new_scores);
+            normed_scores = new_scores;
+        } else {
+            debug!(
+                "OWNER_UID {} not found in scores, using normalized scores",
+                OWNER_UID
+            );
+        }
+
         debug!("weights: {:?}", normed_scores);
         // Convert normalized scores to Vec<NormalizedWeight>
         let weights: Vec<NormalizedWeight> = normed_scores

@@ -1,5 +1,10 @@
 use std::time::Duration;
 
+// Owner UID number on mainnet
+pub const OWNER_UID: usize = 4;
+// Weight to be assigned to the owner UID
+pub const OWNER_WEIGHT: f64 = 0.9;
+
 /// Buffer size for the metadatadb's MPSC channel.
 pub const DB_MPSC_BUFFER_SIZE: usize = 100;
 
