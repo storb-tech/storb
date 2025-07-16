@@ -1,0 +1,33 @@
+[package]
+name = "storb_protocol"
+description = "Protocol definitions and types for Storb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Storb
+storb_core.workspace = true
+storb_storage.workspace = true
+
+blake3.workspace = true
+capnp.workspace = true
+capnp-rpc.workspace = true
+crabtensor.workspace = true
+futures.workspace = true
+multiaddr.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+tokio-util = { version = "0.7", features = ["compat"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
+[build-dependencies]
+capnpc = "0.21"

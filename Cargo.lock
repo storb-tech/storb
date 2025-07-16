@@ -1213,6 +1213,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "capnp"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "168e28337bd0c923cea658afbc1f612bade6fedb616414db89bbd965869b66e7"
+dependencies = [
+ "embedded-io",
+]
+
+[[package]]
+name = "capnp-futures"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d04478adeb234836f886ec554a0d96e3af3a939ba7b3962af5addddf7ab71231"
+dependencies = [
+ "capnp",
+ "futures-channel",
+ "futures-util",
+]
+
+[[package]]
+name = "capnp-rpc"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85e9c19ef52ff1b9c9822fb21bfa68a72bc58711676295ff06eb88e64c7877f7"
+dependencies = [
+ "capnp",
+ "capnp-futures",
+ "futures",
+]
+
+[[package]]
+name = "capnpc"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97b41fc9f41d940c160761b6030eb69c7252f0c1289317475ea4167fff308f8e"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "cbor4ii"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,6 +2185,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "encoding_rs"
@@ -7322,7 +7368,14 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "storb"
-version = "0.1.1"
+version = "0.2.2"
+dependencies = [
+ "storb_core",
+ "storb_gateway",
+ "storb_node",
+ "storb_protocol",
+ "storb_storage",
+]
 
 [[package]]
 name = "storb_base"
@@ -7388,6 +7441,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "storb_client"
+version = "0.2.2"
+
+[[package]]
+name = "storb_core"
+version = "0.2.2"
+dependencies = [
+ "chrono",
+ "hex",
+ "rustls",
+ "serde",
+ "thiserror 2.0.12",
+ "tracing",
+ "zfec-rs",
+]
+
+[[package]]
+name = "storb_gateway"
+version = "0.2.2"
+
+[[package]]
 name = "storb_miner"
 version = "0.2.4"
 dependencies = [
@@ -7413,6 +7487,57 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "uuid",
+]
+
+[[package]]
+name = "storb_node"
+version = "0.2.2"
+dependencies = [
+ "bincode",
+ "crabtensor",
+ "multiaddr",
+ "serde",
+ "sp-core",
+ "storb_core",
+ "storb_protocol",
+ "subxt",
+ "thiserror 2.0.12",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "storb_protocol"
+version = "0.2.2"
+dependencies = [
+ "blake3",
+ "capnp",
+ "capnp-rpc",
+ "capnpc",
+ "crabtensor",
+ "futures",
+ "multiaddr",
+ "quinn",
+ "rcgen",
+ "rustls",
+ "serde",
+ "storb_core",
+ "storb_storage",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "storb_storage"
+version = "0.2.2"
+dependencies = [
+ "blake3",
+ "storb_core",
+ "thiserror 2.0.12",
+ "tracing",
 ]
 
 [[package]]

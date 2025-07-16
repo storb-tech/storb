@@ -1,0 +1,7 @@
+[package]
+name = "storb_client"
+description = "Client for Storb, providing CLI and API access to the Storb network"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

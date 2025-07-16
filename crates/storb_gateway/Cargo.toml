@@ -1,0 +1,5 @@
+[package]
+name = "storb_gateway"
+description = "External access to the Storb network"
+version.workspace = true
+edition.workspace = true

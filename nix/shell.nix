@@ -4,7 +4,7 @@ in
   pkgs.mkShell rec {
     packages =
       [
-        # pkgs.capnproto
+        pkgs.capnproto
         pkgs.rust-analyzer
       ]
       ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -23,6 +23,11 @@ in
     OPENSSL_DIR = "${pkgs.openssl.dev}";
     OPENSSL_LIB_DIR = "${pkgs.lib.getLib pkgs.openssl}/lib";
     OPENSSL_NO_VENDOR = 1;
+
+    RUSTFLAGS =
+      if pkgs.stdenv.hostPlatform.isLinux
+      then "-C link-arg=-fuse-ld=mold"
+      else "";
 
     PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
   }

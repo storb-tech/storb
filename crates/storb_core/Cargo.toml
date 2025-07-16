@@ -1,0 +1,14 @@
+[package]
+name = "storb_core"
+description = "Provides core constants and utilities that are required by multiple crates"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+rustls.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zfec-rs.workspace = true

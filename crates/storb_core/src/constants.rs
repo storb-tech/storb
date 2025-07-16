@@ -1,0 +1,4 @@
+pub const BLOCK_LENGTH_FUNC_MIN_SIZE: u64 = 16 * 1024; // 16 KiB
+pub const BLOCK_LENGTH_FUNC_MAX_SIZE: u64 = 256 * 1024 * 1024; // 256 MiB
+pub const BLOCK_LENGTH_SCALING: f64 = 0.5;
+pub const BLOCK_LENGTH_OFFSET: f64 = 8.39;

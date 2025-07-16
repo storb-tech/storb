@@ -3,3 +3,10 @@ name = "storb"
 version.workspace = true
 description.workspace = true
 edition.workspace = true
+
+[dependencies]
+storb_core.workspace = true
+storb_gateway.workspace = true
+storb_node.workspace = true
+storb_protocol.workspace = true
+storb_storage.workspace = true

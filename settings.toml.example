@@ -1,4 +1,4 @@
-version = "0.2.4"
+version = "0.4.0"
 log_level = "INFO"     # Must be one of TRACE, DEBUG, INFO, WARN, ERROR
 
 netuid = 26             # Testnet is 269
@@ -16,11 +16,11 @@ otel_service_name = ""
 
 mock = false
 
-load_old_nodes = true
-min_stake_threshold = 1000
+load_old_nodes = true # TODO: remove
+min_stake_threshold = 1000 # TODO: remove
 
-db_file = "storb_data/database.db"
-metadatadb_file = "storb_data/metadata.db"
+db_file = "storb_data/database.db" # move this to validator-only or remove entirely
+metadatadb_file = "storb_data/metadata.db" # move this to validator only
 neurons_dir = "storb_data/neurons.state"
 
 [subtensor]
