@@ -27,12 +27,7 @@ enum RpcError {
 pub struct RPCClientOptions {
     /// Disable TLS
     pub insecure: bool,
-    pub server_addr: SocketAddr 
-}
-
-/// Configuration options for the RPC server.
-pub struct RPCServerOptions {
-    pub addr: SocketAddr
+    pub server_addr: SocketAddr,
 }
 
 // TODO: remove unwraps
@@ -62,10 +57,3 @@ pub async fn init_client_rpc(rpc_options: RpcClientOptions) -> Result<RpcSystem<
     let rpc_system = RpcSystem::new(Box::new(network), None);
     Ok(rpc_system)
 }
-
-// pub async fn init_server_rpc(rpc_options: RPCServerOptions) -> {
-//     let port = rpc_options.addr.port();
-//     let ip = rpc_options.addr.ip();
-//     let socket = UdpSocket::bind(("0.0.0.0", quic_port))?;
-//     let server_config = configure_server(ip).unwrap();
-// }
